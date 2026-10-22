@@ -9,4 +9,18 @@ export default defineConfig({
     port: 1420,
     strictPort: true,
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          xterm: [
+            "@xterm/xterm",
+            "@xterm/addon-webgl",
+            "@xterm/addon-fit",
+            "@xterm/addon-unicode11",
+          ],
+        },
+      },
+    },
+  },
 });

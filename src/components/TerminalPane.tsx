@@ -36,6 +36,25 @@ interface TerminalPaneProps {
 
 const textEncoder = new TextEncoder();
 
+export function computeImeDiff(
+  prevRaw: string,
+  nextRaw: string,
+): { backspaces: number; insertText: string } {
+  const prev = Array.from(prevRaw.normalize("NFC"));
+  const next = Array.from(nextRaw.normalize("NFC"));
+
+  let common = 0;
+  const minLen = Math.min(prev.length, next.length);
+  while (common < minLen && prev[common] === next[common]) {
+    common++;
+  }
+
+  return {
+    backspaces: prev.length - common,
+    insertText: next.slice(common).join(""),
+  };
+}
+
 export const TerminalPane: React.FC<TerminalPaneProps> = ({
   leaf,
   isActive,
@@ -51,6 +70,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const statusRef = useRef<PaneStatus>(leaf.status);
+  const trackedInputRef = useRef<string>("");
   const [retryPassword, setRetryPassword] = useState("");
 
   statusRef.current = leaf.status;
@@ -116,20 +136,167 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     termRef.current = term;
     fitRef.current = fitAddon;
 
-    term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
-      if (ev.type === "keydown" && ev.metaKey) {
-        const key = ev.key.toLowerCase();
-        if (key === "d" || key === "w" || key === "t" || key === "i") {
-          return false;
-        }
-        if (key === "c" && term.hasSelection()) {
-          navigator.clipboard
-            .writeText(term.getSelection())
-            .catch(() => undefined);
-          term.clearSelection();
-          return false;
+    const sendRawStringToPty = (str: string) => {
+      if (!str) return;
+      const bytes = Array.from(textEncoder.encode(str));
+      invoke("write_pane_input", {
+        paneId: leaf.paneId,
+        data: bytes,
+      }).catch(() => undefined);
+    };
+
+    const resetTextareaBuffer = (resetImeContext = false) => {
+      const hadText =
+        trackedInputRef.current.length > 0 ||
+        Boolean(term.textarea && term.textarea.value.length > 0);
+      trackedInputRef.current = "";
+      if (term.textarea) {
+        term.textarea.value = "";
+        if (resetImeContext && hadText) {
+          term.textarea.blur();
+          term.textarea.focus({ preventScroll: true });
         }
       }
+    };
+
+    // Intercept composition & input events in capture phase before xterm's CompositionHelper drops/locks them on macOS WKWebView
+    const onCompositionEvent = (e: Event) => {
+      if (e.target === term.textarea) {
+        e.stopPropagation();
+      }
+    };
+
+    const onTextareaInput = (e: Event) => {
+      if (!term.textarea || e.target !== term.textarea) return;
+      e.stopPropagation();
+
+      const rawValue = term.textarea.value;
+      if (rawValue.includes("\n") || rawValue.includes("\r")) {
+        const cleanValue = rawValue.replace(/[\r\n]+/g, "");
+        const { backspaces, insertText } = computeImeDiff(
+          trackedInputRef.current,
+          cleanValue,
+        );
+        const delta = "\x7f".repeat(backspaces) + insertText;
+        if (delta) {
+          sendRawStringToPty(delta);
+        }
+        resetTextareaBuffer(true);
+        if (
+          statusRef.current === "disconnected" ||
+          statusRef.current === "error"
+        ) {
+          onTriggerReconnect();
+        } else {
+          sendRawStringToPty("\r");
+        }
+        return;
+      }
+
+      const { backspaces, insertText } = computeImeDiff(
+        trackedInputRef.current,
+        rawValue,
+      );
+      trackedInputRef.current = rawValue;
+
+      const payload = "\x7f".repeat(backspaces) + insertText;
+      if (payload) {
+        sendRawStringToPty(payload);
+      }
+    };
+
+    const onPasteReset = () => {
+      trackedInputRef.current = "";
+    };
+
+    el.addEventListener("compositionstart", onCompositionEvent, true);
+    el.addEventListener("compositionupdate", onCompositionEvent, true);
+    el.addEventListener("compositionend", onCompositionEvent, true);
+    el.addEventListener("input", onTextareaInput, true);
+    el.addEventListener("paste", onPasteReset, true);
+
+    term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
+      if (ev.metaKey) {
+        if (ev.type === "keydown") {
+          const key = ev.key.toLowerCase();
+          if (key === "d" || key === "w" || key === "t" || key === "i") {
+            return false;
+          }
+          if (key === "c" && term.hasSelection()) {
+            navigator.clipboard
+              .writeText(term.getSelection())
+              .catch(() => undefined);
+            term.clearSelection();
+            return false;
+          }
+        }
+        return true;
+      }
+
+      const isControlOrNavCode =
+        ev.code === "Enter" ||
+        ev.code === "NumpadEnter" ||
+        ev.code === "Tab" ||
+        ev.code === "Escape" ||
+        ev.code === "ArrowUp" ||
+        ev.code === "ArrowDown" ||
+        ev.code === "ArrowLeft" ||
+        ev.code === "ArrowRight" ||
+        ev.code === "Home" ||
+        ev.code === "End" ||
+        ev.code === "PageUp" ||
+        ev.code === "PageDown" ||
+        ev.code === "Delete" ||
+        /^F([1-9]|1[0-2])$/.test(ev.code);
+
+      if (ev.ctrlKey || ev.altKey || isControlOrNavCode) {
+        if (ev.type === "keydown") {
+          resetTextareaBuffer(true);
+          if (
+            (ev.code === "Enter" || ev.code === "NumpadEnter") &&
+            (ev.keyCode === 229 || ev.isComposing)
+          ) {
+            ev.preventDefault();
+            if (
+              statusRef.current === "disconnected" ||
+              statusRef.current === "error"
+            ) {
+              onTriggerReconnect();
+            } else {
+              sendRawStringToPty("\r");
+            }
+            return false;
+          }
+        }
+        return true;
+      }
+
+      const isBackspace =
+        ev.code === "Backspace" || ev.key === "Backspace" || ev.keyCode === 8;
+      if (isBackspace) {
+        if (trackedInputRef.current.length > 0) {
+          // Let WKWebView + Vietnamese Telex natively delete inside textarea and trigger `input` diff
+          return false;
+        }
+        if (ev.type === "keydown" && (ev.keyCode === 229 || ev.isComposing)) {
+          ev.preventDefault();
+          sendRawStringToPty("\x7f");
+          return false;
+        }
+        return true;
+      }
+
+      const isImeOrPrintable =
+        ev.isComposing ||
+        ev.keyCode === 229 ||
+        ev.key === "Dead" ||
+        ev.key.length === 1;
+
+      if (isImeOrPrintable) {
+        // Do NOT call preventDefault() in xterm.js; let macOS WKWebView & Telex update term.textarea natively
+        return false;
+      }
+
       return true;
     });
 
@@ -142,11 +309,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         onTriggerReconnect();
         return;
       }
-      const bytes = Array.from(textEncoder.encode(data));
-      invoke("write_pane_input", {
-        paneId: leaf.paneId,
-        data: bytes,
-      }).catch(() => undefined);
+      sendRawStringToPty(data);
     });
 
     const binaryDisposable = term.onBinary((bin: string) => {
@@ -181,6 +344,11 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     return () => {
       cancelAnimationFrame(rafId);
       resizeObserver.disconnect();
+      el.removeEventListener("compositionstart", onCompositionEvent, true);
+      el.removeEventListener("compositionupdate", onCompositionEvent, true);
+      el.removeEventListener("compositionend", onCompositionEvent, true);
+      el.removeEventListener("input", onTextareaInput, true);
+      el.removeEventListener("paste", onPasteReset, true);
       inputDisposable.dispose();
       binaryDisposable.dispose();
       invoke("close_pane", { paneId: leaf.paneId }).catch(() => undefined);

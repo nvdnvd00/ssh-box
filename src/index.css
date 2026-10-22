@@ -12,6 +12,16 @@ html, body, #root {
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", sans-serif;
 }
 
+/* Keep xterm helper textarea within viewport with 1x1em bounds so macOS WKWebView IME (Vietnamese Telex) stays active */
+.xterm .xterm-helper-textarea {
+  left: 0 !important;
+  top: 0 !important;
+  width: 1em !important;
+  height: 1em !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
 /* Custom thin scrollbars */
 ::-webkit-scrollbar {
   width: 6px;

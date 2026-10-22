@@ -86,17 +86,17 @@ export const TelemetryDrawer: React.FC<TelemetryDrawerProps> = ({
           <Activity className="w-4 h-4 text-cyan-400 shrink-0" />
           <div className="min-w-0">
             <div className="text-xs font-semibold text-slate-100 truncate">
-              Server Box Telemetry
+              System Monitor
             </div>
             <div className="text-[10px] text-slate-400 font-mono truncate">
-              {hostLabel} · 2s exec poll
+              {hostLabel}
             </div>
           </div>
         </div>
         <button
           type="button"
           onClick={onClose}
-          title="Close Telemetry Drawer (Cmd+I)"
+          title="Close Monitor (Cmd+I)"
           className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-slate-200 cursor-pointer"
         >
           <X className="w-3.5 h-3.5" />

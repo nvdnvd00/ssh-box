@@ -74,7 +74,7 @@ export function createPaneId(): string {
   return `pane-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export function createLocalLeaf(title = "Local Shell (zsh)"): LeafPaneNode {
+export function createLocalLeaf(title = "Local"): LeafPaneNode {
   return {
     type: "leaf",
     paneId: createPaneId(),

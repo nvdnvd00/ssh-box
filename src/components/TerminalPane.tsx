@@ -52,7 +52,6 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   const fitRef = useRef<FitAddon | null>(null);
   const statusRef = useRef<PaneStatus>(leaf.status);
   const [retryPassword, setRetryPassword] = useState("");
-  const [webglActive, setWebglActive] = useState(false);
 
   statusRef.current = leaf.status;
 
@@ -107,12 +106,10 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       const webglAddon = new WebglAddon();
       webglAddon.onContextLoss(() => {
         webglAddon.dispose();
-        setWebglActive(false);
       });
       term.loadAddon(webglAddon);
-      setWebglActive(true);
     } catch {
-      setWebglActive(false);
+      // Fallback to default renderer
     }
 
     fitAddon.fit();
@@ -317,16 +314,13 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           </span>
           {leaf.fingerprint && (
             <span
-              title={`TOFU Verified Host Key: ${leaf.fingerprint}`}
+              title={`Host Key: ${leaf.fingerprint}`}
               className="hidden sm:inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 font-mono text-[10px] truncate max-w-[180px]"
             >
               <ShieldCheck className="w-2.5 h-2.5 shrink-0" />
               {leaf.fingerprint}
             </span>
           )}
-          <span className="px-1.5 py-0.2 rounded bg-cyan-500/10 text-cyan-300 border border-cyan-500/20 font-mono text-[9px]">
-            {webglActive ? "WebGL2 120Hz" : "Canvas 120Hz"}
-          </span>
         </div>
 
         <div className="flex items-center gap-1">

@@ -36,7 +36,7 @@ import { SplitWorkspace } from "./components/SplitWorkspace";
 import { TelemetryDrawer } from "./components/TelemetryDrawer";
 
 function createInitialTab(): WorkspaceTab {
-  const leaf = createLocalLeaf("Local Shell (zsh)");
+  const leaf = createLocalLeaf("Local");
   return {
     id: `tab-${leaf.paneId}`,
     title: leaf.title,
@@ -106,7 +106,7 @@ export default function App() {
     if (activeLeaf?.kind === "ssh" && activeLeaf.host) {
       return `${activeLeaf.host.user}@${activeLeaf.host.alias || activeLeaf.host.hostname}`;
     }
-    return "Local Machine (macOS)";
+    return "localhost";
   }, [activeLeaf]);
 
   // Subscribe to 2-second Telemetry stream for active host (or local machine)
@@ -179,7 +179,7 @@ export default function App() {
       const newLeaf =
         sourceLeaf.kind === "ssh" && sourceLeaf.host
           ? createSshLeaf(sourceLeaf.host, sourceLeaf.passwordOverride)
-          : createLocalLeaf("Local Shell (zsh)");
+          : createLocalLeaf("Local");
 
       setTabs((prev) =>
         prev.map((tab) => {
@@ -519,7 +519,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => setTelemetryOpen((p) => !p)}
-            title="Toggle Server Box Telemetry Inspector (Cmd+I)"
+            title="Toggle System Monitor (Cmd+I)"
             className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-colors cursor-pointer ${
               telemetryOpen
                 ? "bg-cyan-500/15 text-cyan-300 border border-cyan-500/30"
@@ -527,7 +527,7 @@ export default function App() {
             }`}
           >
             <Activity className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline text-[11px]">Inspector</span>
+            <span className="hidden sm:inline text-[11px]">Monitor</span>
           </button>
         </div>
       </header>
@@ -582,12 +582,16 @@ export default function App() {
             {activeLeaf?.kind === "ssh" ? (
               <>
                 <Server className="w-3 h-3 text-cyan-400" />
-                <span>SSH Multiplexed</span>
+                <span>
+                  {activeLeaf.host
+                    ? `${activeLeaf.host.hostname}:${activeLeaf.host.port}`
+                    : "SSH"}
+                </span>
               </>
             ) : (
               <>
                 <Laptop className="w-3 h-3 text-emerald-400" />
-                <span>Local PTY</span>
+                <span>Local</span>
               </>
             )}
           </span>
@@ -634,9 +638,9 @@ export default function App() {
         <div className="hidden lg:flex items-center gap-3 text-[10px] text-slate-500">
           <span>⌘D Split V</span>
           <span>⇧⌘D Split H</span>
-          <span>⌘W Close Pane</span>
-          <span>⌘T New Tab</span>
-          <span>⌘I Telemetry</span>
+          <span>⌘W Close</span>
+          <span>⌘T Tab</span>
+          <span>⌘I Monitor</span>
         </div>
       </footer>
     </div>

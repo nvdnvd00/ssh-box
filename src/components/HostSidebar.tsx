@@ -178,7 +178,7 @@ export const HostSidebar: React.FC<HostSidebarProps> = ({
             type="button"
             onClick={() => setShowModal(true)}
             className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-md bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 border border-cyan-500/30 text-xs font-medium transition-colors cursor-pointer"
-            title="Add Host to Keychain & hosts.json"
+            title="Add SSH Host"
           >
             <Plus className="w-3.5 h-3.5" />
             Host
@@ -201,7 +201,7 @@ export const HostSidebar: React.FC<HostSidebarProps> = ({
         <button
           type="button"
           onClick={onRefreshHosts}
-          title="Reload ~/.ssh/config & hosts.json"
+          title="Reload Hosts"
           className="p-1.5 rounded hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors cursor-pointer"
         >
           <RefreshCw className="w-3.5 h-3.5" />
@@ -254,11 +254,11 @@ export const HostSidebar: React.FC<HostSidebarProps> = ({
                           </span>
                           {h.source === "sshconfig" ? (
                             <span className="px-1 py-0.2 rounded bg-slate-800 text-slate-400 text-[9px] font-mono">
-                              ssh_config
+                              config
                             </span>
                           ) : (
                             <span
-                              title="Credentials managed in macOS Keychain"
+                              title="Saved Host"
                               className="inline-flex items-center text-emerald-400/80"
                             >
                               <KeyRound className="w-2.5 h-2.5" />
@@ -314,7 +314,7 @@ export const HostSidebar: React.FC<HostSidebarProps> = ({
               <div className="flex items-center gap-2">
                 <Server className="w-4 h-4 text-cyan-400" />
                 <h3 className="text-sm font-semibold text-slate-100">
-                  New SSH Host (macOS Keychain)
+                  New SSH Host
                 </h3>
               </div>
               <button
@@ -403,13 +403,13 @@ export const HostSidebar: React.FC<HostSidebarProps> = ({
               <div>
                 <label className="flex items-center gap-1.5 text-slate-400 mb-1">
                   <Lock className="w-3 h-3 text-emerald-400" />
-                  Password / Key Passphrase (stored in macOS Keychain)
+                  Password / Passphrase
                 </label>
                 <input
                   type="password"
                   value={secret}
                   onChange={(e) => setSecret(e.target.value)}
-                  placeholder="Leave blank if using SSH Agent or unencrypted key"
+                  placeholder="Optional"
                   className="w-full px-2.5 py-1.5 rounded bg-[#0b0e14] border border-slate-700 text-slate-100 focus:outline-none focus:border-cyan-500"
                 />
               </div>

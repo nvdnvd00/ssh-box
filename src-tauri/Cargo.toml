@@ -1,7 +1,7 @@
 [package]
 name = "ssh-box"
 version = "0.1.0"
-description = "High-performance Rust SSH & Terminal Manager inspired by Server Box & iTerm2"
+description = "SSH & Terminal Manager"
 authors = ["darien"]
 edition = "2021"
 

@@ -136,8 +136,66 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     termRef.current = term;
     fitRef.current = fitAddon;
 
+    // Guard xterm.js SelectionService against macOS WKWebView swallowed mouseup events:
+    // xterm's _handleMouseMove does not check `e.buttons`, so if WKWebView or NSTextInputContext
+    // consumes `mouseup`, moving the cursor with no button pressed would keep highlighting.
+    const selectionService = (
+      term as unknown as {
+        _core?: {
+          _selectionService?: {
+            _handleMouseMove?: (e: MouseEvent) => void;
+            _addMouseDownListeners?: () => void;
+            _removeMouseDownListeners?: () => void;
+            refresh?: (isLinuxMouseSelection?: boolean) => void;
+            _model?: {
+              selectionStart?: [number, number];
+              selectionEnd?: [number, number];
+            };
+          };
+        };
+      }
+    )._core?._selectionService;
+
+    if (selectionService) {
+      if (typeof selectionService._addMouseDownListeners === "function") {
+        const origAddListeners =
+          selectionService._addMouseDownListeners.bind(selectionService);
+        selectionService._addMouseDownListeners = () => {
+          selectionService._removeMouseDownListeners?.();
+          origAddListeners();
+        };
+      }
+
+      if (typeof selectionService._handleMouseMove === "function") {
+        const origMouseMove =
+          selectionService._handleMouseMove.bind(selectionService);
+        selectionService._handleMouseMove = (e: MouseEvent) => {
+          if ((e.buttons & 1) === 0) {
+            selectionService._removeMouseDownListeners?.();
+            if (
+              selectionService._model &&
+              !selectionService._model.selectionEnd
+            ) {
+              selectionService._model.selectionStart = undefined;
+              selectionService.refresh?.(false);
+            }
+            return;
+          }
+          origMouseMove(e);
+        };
+      }
+    }
+
+    const onWindowBlur = () => {
+      selectionService?._removeMouseDownListeners?.();
+    };
+    window.addEventListener("blur", onWindowBlur);
+
     const sendRawStringToPty = (str: string) => {
       if (!str) return;
+      if (term.hasSelection()) {
+        term.clearSelection();
+      }
       const bytes = Array.from(textEncoder.encode(str));
       invoke("write_pane_input", {
         paneId: leaf.paneId,
@@ -202,6 +260,11 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       const payload = "\x7f".repeat(backspaces) + insertText;
       if (payload) {
         sendRawStringToPty(payload);
+      }
+
+      if (rawValue.endsWith(" ")) {
+        trackedInputRef.current = "";
+        term.textarea.value = "";
       }
     };
 
@@ -344,6 +407,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     return () => {
       cancelAnimationFrame(rafId);
       resizeObserver.disconnect();
+      window.removeEventListener("blur", onWindowBlur);
       el.removeEventListener("compositionstart", onCompositionEvent, true);
       el.removeEventListener("compositionupdate", onCompositionEvent, true);
       el.removeEventListener("compositionend", onCompositionEvent, true);
@@ -569,7 +633,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       {/* Xterm.js WebGL2 Surface */}
       <div
         ref={containerRef}
-        className="flex-1 w-full h-full px-1.5 py-1 overflow-hidden select-text"
+        className="flex-1 w-full h-full px-1.5 py-1 overflow-hidden select-none"
       />
     </div>
   );

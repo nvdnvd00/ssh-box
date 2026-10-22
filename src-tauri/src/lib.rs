@@ -1,5 +1,6 @@
 pub mod frame_batcher;
 pub mod host_store;
+pub mod telemetry;
 pub mod vault;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

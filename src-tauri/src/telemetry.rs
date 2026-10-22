@@ -1,4 +1,7 @@
+use crate::ssh_pool::SshPool;
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
+use tauri::ipc::Channel;
 
 pub const TELEMETRY_PROBE_CMD: &str = r#"LC_ALL=C sh -c 'echo "---LOAD---"; cat /proc/loadavg 2>/dev/null || sysctl -n vm.loadavg 2>/dev/null; echo "---CPU---"; head -n 1 /proc/stat 2>/dev/null; echo "---MEM---"; grep -E "^(MemTotal|MemAvailable|SwapTotal|SwapFree):" /proc/meminfo 2>/dev/null; echo "---NET---"; cat /proc/net/dev 2>/dev/null; echo "---DISK---"; df -kP / 2>/dev/null | tail -n 1; echo "---PROC---"; (ps -eo pid,pcpu,pmem,comm --sort=-pcpu 2>/dev/null || ps -Ao pid,pcpu,pmem,comm -r 2>/dev/null) | head -n 6'"#;
 
@@ -139,7 +142,7 @@ pub fn parse_linux_telemetry(
         let cpu = if d_total > 0 {
             100.0 * (1.0 - (d_idle as f32 / d_total as f32))
         } else if !procs.is_empty() {
-            procs.iter().map(|pr| pr.cpu_pct).sum::<f32>().clamp(0.0, 100.0)
+            (procs.iter().map(|pr| pr.cpu_pct).sum::<f32>() / 8.0).clamp(0.0, 100.0)
         } else {
             0.0
         };
@@ -192,6 +195,56 @@ pub fn parse_linux_snapshot(
     elapsed_secs: f32,
 ) -> (ServerMetrics, RawCpuCounters) {
     parse_linux_telemetry(host_id, raw, prev, elapsed_secs)
+}
+
+async fn probe_local_snapshot() -> Result<String, String> {
+    let out = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(TELEMETRY_PROBE_CMD)
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+pub fn start_monitoring(
+    host_id: String,
+    pool: SshPool,
+    channel: Channel<ServerMetrics>,
+    mut stop_rx: tokio::sync::mpsc::Receiver<()>,
+) {
+    tokio::spawn(async move {
+        let mut prev_counters: Option<RawCpuCounters> = None;
+        let mut last_tick = Instant::now();
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
+
+        loop {
+            tokio::select! {
+                _ = stop_rx.recv() => break,
+                _ = interval.tick() => {
+                    let raw_res = if host_id == "local" {
+                        probe_local_snapshot().await
+                    } else {
+                        if !pool.has_active_session(&host_id).await {
+                            break;
+                        }
+                        pool.exec_command(&host_id, TELEMETRY_PROBE_CMD).await
+                    };
+
+                    if let Ok(raw) = raw_res {
+                        let elapsed = last_tick.elapsed().as_secs_f32().max(0.1);
+                        last_tick = Instant::now();
+                        let (metrics, counters) =
+                            parse_linux_telemetry(&host_id, &raw, prev_counters.as_ref(), elapsed);
+                        prev_counters = Some(counters);
+                        if channel.send(metrics).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]

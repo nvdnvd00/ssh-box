@@ -1,6 +1,6 @@
 import React, { useRef } from "react";
 import { LeafPaneNode, PaneNode, PaneStatus } from "../types";
-import { ThemeConfig } from "../themes";
+import { AppLanguage, ThemeConfig } from "../themes";
 import { TerminalPane } from "./TerminalPane";
 
 interface SplitWorkspaceProps {
@@ -8,6 +8,8 @@ interface SplitWorkspaceProps {
   activePaneId: string;
   totalPanes: number;
   themeConfig: ThemeConfig;
+  language?: AppLanguage;
+  broadcastTargetPaneIds?: string[];
   onFocusPane: (paneId: string) => void;
   onUpdateLeafStatus: (
     paneId: string,
@@ -33,6 +35,8 @@ export const SplitWorkspace: React.FC<SplitWorkspaceProps> = ({
   activePaneId,
   totalPanes,
   themeConfig,
+  language,
+  broadcastTargetPaneIds,
   onFocusPane,
   onUpdateLeafStatus,
   onTriggerReconnect,
@@ -49,6 +53,8 @@ export const SplitWorkspace: React.FC<SplitWorkspaceProps> = ({
         isActive={node.paneId === activePaneId}
         showFocusBorder={totalPanes > 1}
         themeConfig={themeConfig}
+        language={language}
+        broadcastTargetPaneIds={broadcastTargetPaneIds}
         onFocus={() => onFocusPane(node.paneId)}
         onUpdateStatus={(status, extra) =>
           onUpdateLeafStatus(node.paneId, status, extra)
@@ -109,6 +115,8 @@ export const SplitWorkspace: React.FC<SplitWorkspaceProps> = ({
           activePaneId={activePaneId}
           totalPanes={totalPanes}
           themeConfig={themeConfig}
+          language={language}
+          broadcastTargetPaneIds={broadcastTargetPaneIds}
           onFocusPane={onFocusPane}
           onUpdateLeafStatus={onUpdateLeafStatus}
           onTriggerReconnect={onTriggerReconnect}
@@ -145,6 +153,8 @@ export const SplitWorkspace: React.FC<SplitWorkspaceProps> = ({
           activePaneId={activePaneId}
           totalPanes={totalPanes}
           themeConfig={themeConfig}
+          language={language}
+          broadcastTargetPaneIds={broadcastTargetPaneIds}
           onFocusPane={onFocusPane}
           onUpdateLeafStatus={onUpdateLeafStatus}
           onTriggerReconnect={onTriggerReconnect}

@@ -7,6 +7,7 @@ use russh::client::{self, Handle};
 use russh::{ChannelMsg, Disconnect};
 use russh_keys::key::PublicKey;
 use russh_keys::PublicKeyBase64;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::Write;
@@ -112,6 +113,132 @@ pub fn default_known_hosts_path() -> PathBuf {
     crate::host_store::app_home_dir()
         .join(".ssh")
         .join("known_hosts")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KnownHostEntry {
+    pub id: String,
+    pub host_pattern: String,
+    pub key_type: String,
+    pub fingerprint: String,
+    pub public_key_base64: String,
+    pub line_index: usize,
+}
+
+pub fn compute_base64_fingerprint(key_base64: &str) -> String {
+    let raw_bytes = BASE64
+        .decode(key_base64.trim())
+        .unwrap_or_else(|_| key_base64.as_bytes().to_vec());
+    let digest = Sha256::digest(&raw_bytes);
+    format!("SHA256:{}", BASE64.encode(digest).trim_end_matches('='))
+}
+
+pub fn list_known_hosts_at(known_hosts_path: &Path) -> Vec<KnownHostEntry> {
+    let mut entries = Vec::new();
+    let Ok(raw) = std::fs::read_to_string(known_hosts_path) else {
+        return entries;
+    };
+    for (idx, line) in raw.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() >= 3 {
+            let host_pattern = parts[0].to_string();
+            let key_type = parts[1].to_string();
+            let public_key_base64 = parts[2].to_string();
+            let fingerprint = compute_base64_fingerprint(&public_key_base64);
+            entries.push(KnownHostEntry {
+                id: format!("kh:{idx}:{host_pattern}:{key_type}"),
+                host_pattern,
+                key_type,
+                fingerprint,
+                public_key_base64,
+                line_index: idx,
+            });
+        }
+    }
+    entries
+}
+
+pub fn delete_known_host_at(
+    known_hosts_path: &Path,
+    host_pattern: &str,
+    key_type: &str,
+) -> Result<Vec<KnownHostEntry>, String> {
+    if !known_hosts_path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(known_hosts_path).map_err(|e| e.to_string())?;
+    let mut kept_lines = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            kept_lines.push(line);
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() >= 3 && parts[0] == host_pattern && parts[1] == key_type {
+            continue;
+        }
+        kept_lines.push(line);
+    }
+    let updated = if kept_lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", kept_lines.join("\n"))
+    };
+    std::fs::write(known_hosts_path, updated).map_err(|e| e.to_string())?;
+    Ok(list_known_hosts_at(known_hosts_path))
+}
+
+pub fn clear_known_hosts_at(known_hosts_path: &Path) -> Result<Vec<KnownHostEntry>, String> {
+    if known_hosts_path.exists() {
+        std::fs::write(known_hosts_path, "").map_err(|e| e.to_string())?;
+    }
+    Ok(Vec::new())
+}
+
+pub fn parse_env_vars_pairs(raw: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let clean = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim();
+        if let Some((k, v)) = clean.split_once('=') {
+            let key = k.trim();
+            let val = v.trim().trim_matches('"').trim_matches('\'');
+            if !key.is_empty()
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                out.push((key.to_string(), val.to_string()));
+            }
+        }
+    }
+    out
+}
+
+pub fn build_shell_init_line(env_vars: &str, startup_command: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    for (k, v) in parse_env_vars_pairs(env_vars) {
+        let quoted_v = format!("'{}'", v.replace('\'', "'\\''"));
+        parts.push(format!("export {k}={quoted_v}"));
+    }
+    let cmd = startup_command.trim();
+    if !cmd.is_empty() {
+        parts.push(cmd.to_string());
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("{}\n", parts.join(" && ")))
+    }
 }
 
 pub fn verify_tofu_host_key(
@@ -421,14 +548,25 @@ impl SshPool {
             .await
             .map_err(|e| format!("Failed to request PTY: {e}"))?;
 
+        if host.agent_forwarding {
+            let _ = channel.agent_forward(false).await;
+        }
+
         let _ = channel.set_env(false, "COLORTERM", "truecolor").await;
         let _ = channel.set_env(false, "CLICOLOR", "1").await;
         let _ = channel.set_env(false, "LANG", "en_US.UTF-8").await;
+        for (k, v) in parse_env_vars_pairs(&host.env_vars) {
+            let _ = channel.set_env(false, &k, &v).await;
+        }
 
         channel
             .request_shell(false)
             .await
             .map_err(|e| format!("Failed to request shell: {e}"))?;
+
+        if let Some(init_line) = build_shell_init_line(&host.env_vars, &host.startup_command) {
+            let _ = channel.data(init_line.as_bytes()).await;
+        }
 
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SshPaneCommand>();
         let (bytes_tx, bytes_rx) = mpsc::channel::<Vec<u8>>(64);
@@ -580,6 +718,76 @@ impl SshPool {
     pub async fn exec_on_host(&self, host: &HostEntry, command: &str) -> Result<String, String> {
         let _ = self.get_or_connect(host, None).await?;
         self.exec_command(&host.id, command).await
+    }
+
+    pub async fn open_exec_channel(
+        &self,
+        host: &HostEntry,
+        command: &str,
+    ) -> Result<russh::Channel<client::Msg>, String> {
+        let session = self.get_or_connect(host, None).await?;
+        let channel = {
+            let handle = session.handle.lock().await;
+            handle
+                .channel_open_session()
+                .await
+                .map_err(|e| format!("Failed to open SSH channel: {e}"))?
+        };
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|e| format!("Failed to exec SSH command: {e}"))?;
+        Ok(channel)
+    }
+
+    pub async fn export_public_key_to_host(
+        &self,
+        host: &HostEntry,
+        public_key: &str,
+        password_override: Option<String>,
+    ) -> Result<(), String> {
+        let clean_pub = public_key.trim();
+        if clean_pub.is_empty() {
+            return Err("Public key is empty".to_string());
+        }
+        let session = self.get_or_connect(host, password_override).await?;
+        let mut channel = {
+            let handle = session.handle.lock().await;
+            handle
+                .channel_open_session()
+                .await
+                .map_err(|e| format!("Failed to open SSH channel: {e}"))?
+        };
+        let quoted_pub = format!("'{}'", clean_pub.replace('\'', "'\\''"));
+        let cmd = format!(
+            "umask 077; mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && (grep -qxF {quoted_pub} ~/.ssh/authorized_keys || printf '%s\\n' {quoted_pub} >> ~/.ssh/authorized_keys)"
+        );
+        channel
+            .exec(true, cmd.as_str())
+            .await
+            .map_err(|e| format!("Failed to install public key on host: {e}"))?;
+
+        let mut stderr_buf = Vec::new();
+        let mut exit_code: Option<u32> = None;
+        while let Some(msg) = channel.wait().await {
+            match msg {
+                ChannelMsg::ExtendedData { data, .. } => stderr_buf.extend_from_slice(&data),
+                ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status),
+                ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+        if let Some(code) = exit_code {
+            if code != 0 {
+                let err_msg = String::from_utf8_lossy(&stderr_buf).trim().to_string();
+                return Err(if err_msg.is_empty() {
+                    format!("Remote ssh-copy-id exited with code {code}")
+                } else {
+                    err_msg
+                });
+            }
+        }
+        Ok(())
     }
 
     pub async fn exec_bytes_on_host(
@@ -835,6 +1043,55 @@ mod tests {
         assert!(err.contains("IDENTIFICATION HAS CHANGED"));
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn manages_known_hosts_list_delete_and_clear() {
+        let tmp_dir =
+            std::env::temp_dir().join(format!("ssh-box-kh-mgr-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let kh_path = tmp_dir.join("known_hosts");
+
+        let _ = verify_tofu_host_key(
+            &kh_path,
+            "192.168.1.10",
+            "ssh-ed25519",
+            "AAAAC3NzaC1lZDI1NTE5AAAAIKeyOne",
+        )
+        .unwrap();
+        let _ = verify_tofu_host_key(
+            &kh_path,
+            "[10.0.0.5]:2222",
+            "ecdsa-sha2-nistp256",
+            "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIKeyTwo",
+        )
+        .unwrap();
+
+        let list = list_known_hosts_at(&kh_path);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].host_pattern, "192.168.1.10");
+        assert_eq!(list[1].host_pattern, "[10.0.0.5]:2222");
+
+        let after_del = delete_known_host_at(&kh_path, "192.168.1.10", "ssh-ed25519").unwrap();
+        assert_eq!(after_del.len(), 1);
+        assert_eq!(after_del[0].host_pattern, "[10.0.0.5]:2222");
+
+        let after_clear = clear_known_hosts_at(&kh_path).unwrap();
+        assert!(after_clear.is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn builds_shell_init_line_from_env_vars_and_startup_command() {
+        let env_raw = "APP_ENV=production\nexport TZ=\"Asia/Ho_Chi_Minh\"\n# comment";
+        let cmd = "tmux attach -t main || tmux new -s main";
+        let init = build_shell_init_line(env_raw, cmd).unwrap();
+        assert_eq!(
+            init,
+            "export APP_ENV='production' && export TZ='Asia/Ho_Chi_Minh' && tmux attach -t main || tmux new -s main\n"
+        );
+        assert!(build_shell_init_line("", "   ").is_none());
     }
 
     #[test]

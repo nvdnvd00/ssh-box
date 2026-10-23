@@ -14,8 +14,8 @@ use resources::{
     ResourcesStoreData, SnippetExecutionRecord, SnippetItem, SnippetPackage,
 };
 use serde::{Deserialize, Serialize};
-use sftp::SftpListResponse;
-use ssh_pool::SshPool;
+use sftp::{SftpListResponse, SftpTransferProgress, SftpTransferResult};
+use ssh_pool::{KnownHostEntry, SshPool};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -653,15 +653,168 @@ async fn sftp_transfer(
     source_path: String,
     target_host_id: String,
     target_dir: String,
-) -> Result<(), String> {
-    sftp::transfer_entry(
+    prefer_fast_sync: Option<bool>,
+    on_progress: Channel<SftpTransferProgress>,
+) -> Result<SftpTransferResult, String> {
+    let fast_sync = prefer_fast_sync.unwrap_or(true);
+    sftp::transfer_entry_with_progress(
         &state.ssh_pool,
         &source_host_id,
         &source_path,
         &target_host_id,
         &target_dir,
+        fast_sync,
+        move |ev| {
+            let _ = on_progress.send(ev);
+        },
     )
     .await
+}
+
+#[tauri::command]
+fn list_known_hosts() -> Result<Vec<KnownHostEntry>, String> {
+    Ok(ssh_pool::list_known_hosts_at(
+        &ssh_pool::default_known_hosts_path(),
+    ))
+}
+
+#[tauri::command]
+fn delete_known_host(
+    host_pattern: String,
+    key_type: String,
+) -> Result<Vec<KnownHostEntry>, String> {
+    ssh_pool::delete_known_host_at(
+        &ssh_pool::default_known_hosts_path(),
+        &host_pattern,
+        &key_type,
+    )
+}
+
+#[tauri::command]
+fn clear_known_hosts() -> Result<Vec<KnownHostEntry>, String> {
+    ssh_pool::clear_known_hosts_at(&ssh_pool::default_known_hosts_path())
+}
+
+#[tauri::command]
+async fn export_ssh_key_to_host(
+    state: State<'_, AppState>,
+    key_id: String,
+    host_id: String,
+    password: Option<String>,
+) -> Result<Vec<HostEntry>, String> {
+    let store = resources::load_resources();
+    let key_item = store
+        .ssh_keys
+        .iter()
+        .find(|k| k.id == key_id)
+        .ok_or_else(|| format!("SSH Key '{key_id}' not found"))?;
+    let all_hosts = host_store::load_all_hosts();
+    let mut host = all_hosts
+        .into_iter()
+        .find(|h| h.id == host_id)
+        .ok_or_else(|| format!("Host '{host_id}' not found"))?;
+
+    state
+        .ssh_pool
+        .export_public_key_to_host(&host, &key_item.public_key, password)
+        .await?;
+
+    if host.source == host_store::HostSource::Custom {
+        host.ssh_key_id = Some(key_id);
+        let _ = host_store::upsert_custom_host(host);
+    }
+    Ok(host_store::load_all_hosts())
+}
+
+#[tauri::command]
+fn save_session_log(
+    host_label: String,
+    content: String,
+    append: Option<bool>,
+    file_name: Option<String>,
+) -> Result<String, String> {
+    use std::io::Write;
+    let logs_dir = host_store::app_config_dir().join("session-logs");
+    std::fs::create_dir_all(&logs_dir).map_err(|e| e.to_string())?;
+    let safe_label: String = host_label
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let fname = file_name.unwrap_or_else(|| {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        format!("{safe_label}-{ts}.log")
+    });
+    let full_path = logs_dir.join(fname);
+    if append.unwrap_or(false) {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&full_path)
+            .map_err(|e| e.to_string())?;
+        f.write_all(content.as_bytes()).map_err(|e| e.to_string())?;
+    } else {
+        std::fs::write(&full_path, content.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    Ok(full_path.to_string_lossy().to_string())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultBackupBundle {
+    pub version: u32,
+    pub exported_at: u64,
+    pub custom_hosts: Vec<HostEntry>,
+    pub resources: ResourcesStoreData,
+}
+
+#[tauri::command]
+fn export_vault_backup() -> Result<String, String> {
+    let (_, custom_cfg) = host_store::default_paths();
+    let custom_hosts: Vec<HostEntry> = std::fs::read_to_string(&custom_cfg)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    let resources = resources::load_resources();
+    let exported_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let bundle = VaultBackupBundle {
+        version: 1,
+        exported_at,
+        custom_hosts,
+        resources,
+    };
+    let json = serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())?;
+    let backups_dir = host_store::app_config_dir().join("backups");
+    std::fs::create_dir_all(&backups_dir).map_err(|e| e.to_string())?;
+    let backup_file = backups_dir.join(format!("ssh-box-vault-{exported_at}.json"));
+    let _ = std::fs::write(&backup_file, &json);
+    Ok(json)
+}
+
+#[tauri::command]
+fn import_vault_backup(
+    state: State<'_, AppState>,
+    json_payload: String,
+) -> Result<ResourcesStoreData, String> {
+    let bundle: VaultBackupBundle =
+        serde_json::from_str(&json_payload).map_err(|e| format!("Invalid backup JSON: {e}"))?;
+    let (_, custom_cfg) = host_store::default_paths();
+    for host in bundle.custom_hosts {
+        let _ = host_store::upsert_custom_host_at(&custom_cfg, host);
+    }
+    resources::save_resources(&bundle.resources)?;
+    Ok(enrich_resources(bundle.resources, &state.ssh_pool))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -718,6 +871,13 @@ pub fn run() {
             sftp_read_text,
             sftp_write_text,
             sftp_transfer,
+            list_known_hosts,
+            delete_known_host,
+            clear_known_hosts,
+            export_ssh_key_to_host,
+            save_session_log,
+            export_vault_backup,
+            import_vault_backup,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

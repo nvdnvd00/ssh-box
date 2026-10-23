@@ -11,6 +11,8 @@ build-windows-installer:
   image: rust:1-bookworm
   tags:
     - runner-x86
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
   cache:
     key: ssh-box-win64-cache
     when: always

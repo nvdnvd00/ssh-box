@@ -73,6 +73,12 @@ pub struct HostEntry {
     #[serde(default)]
     pub selected_volume_device: Option<String>,
     #[serde(default)]
+    pub agent_forwarding: bool,
+    #[serde(default)]
+    pub startup_command: String,
+    #[serde(default)]
+    pub env_vars: String,
+    #[serde(default)]
     pub created_date: u64,
 }
 
@@ -107,6 +113,9 @@ impl Default for HostEntry {
             default_sftp_path: String::new(),
             selected_network_interface: None,
             selected_volume_device: None,
+            agent_forwarding: false,
+            startup_command: String::new(),
+            env_vars: String::new(),
             created_date: 0,
         }
     }
@@ -157,6 +166,10 @@ pub fn parse_ssh_config_str(input: &str) -> Vec<HostEntry> {
                 .unwrap_or(22);
             let identity_file = map.get("identityfile").cloned();
             let identity_agent = map.get("identityagent").cloned();
+            let agent_forwarding = map
+                .get("forwardagent")
+                .map(|v| v.eq_ignore_ascii_case("yes") || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
             out.push(HostEntry {
                 id: format!("sshcfg:{alias}"),
                 alias,
@@ -165,6 +178,7 @@ pub fn parse_ssh_config_str(input: &str) -> Vec<HostEntry> {
                 port,
                 identity_file,
                 identity_agent,
+                agent_forwarding,
                 group: "~/.ssh/config".into(),
                 source: HostSource::SshConfig,
                 ..Default::default()

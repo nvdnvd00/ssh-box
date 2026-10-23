@@ -26,6 +26,9 @@ export interface HostEntry {
   defaultSftpPath?: string;
   selectedNetworkInterface?: string | null;
   selectedVolumeDevice?: string | null;
+  agentForwarding?: boolean;
+  startupCommand?: string;
+  envVars?: string;
   createdDate?: number;
 }
 
@@ -141,11 +144,47 @@ export type TabResources =
   | "machines"
   | "identities"
   | "keys"
+  | "knownHosts"
   | "connectionProxyProfiles"
   | "portForwarding"
   | "snippets"
   | "docker"
   | "sftp";
+
+export interface KnownHostEntry {
+  id: string;
+  hostPattern: string;
+  keyType: string;
+  fingerprint: string;
+  publicKeyBase64: string;
+  lineIndex: number;
+}
+
+export type SftpTransferMode = "fast_sync" | "chunk_stream" | "local_copy";
+
+export interface SftpTransferProgress {
+  transferId: string;
+  fileName: string;
+  direction: "upload" | "download" | "remote_to_remote" | "local";
+  mode: SftpTransferMode;
+  modeDetail: string;
+  bytesTransferred: number;
+  totalBytes: number;
+  speedBytesPerSec: number;
+  percent: number;
+  status: "running" | "completed" | "failed";
+  errorMessage?: string | null;
+}
+
+export interface SftpTransferResult {
+  transferId: string;
+  fileName: string;
+  mode: SftpTransferMode;
+  modeDetail: string;
+  bytesTransferred: number;
+  durationMs: number;
+  speedBytesPerSec: number;
+}
 
 export interface SftpEntry {
   name: string;

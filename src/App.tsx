@@ -9,13 +9,18 @@ import {
   Globe,
   HardDrive,
   KeyRound,
+  Languages,
   Laptop,
   LayoutDashboard,
   PanelLeft,
+  Play,
   Plus,
+  Radio,
   Rows,
+  Search,
   Server,
   Settings,
+  ShieldCheck,
   Terminal as TerminalIcon,
   UserCheck,
   Waypoints,
@@ -32,6 +37,7 @@ import {
   removePaneFromTree,
   ResourcesStoreData,
   ServerMetrics,
+  SnippetItem,
   splitPaneInTree,
   TabResources,
   updateLeafInTree,
@@ -47,6 +53,11 @@ import {
   saveThemeConfig,
   ThemeConfig,
 } from "./themes";
+import {
+  extractSnippetVariables,
+  getI18n,
+  interpolateSnippetVariables,
+} from "./i18n";
 import { SplitWorkspace } from "./components/SplitWorkspace";
 import { TelemetryDrawer } from "./components/TelemetryDrawer";
 import { ResourcesWorkspace } from "./components/ResourcesWorkspace";
@@ -98,7 +109,21 @@ export default function App() {
     typeof window !== "undefined" ? window.innerWidth >= 768 : true,
   );
   const [telemetryDrawerOpen, setTelemetryDrawerOpen] = useState(false);
+  const [snippetsDrawerOpen, setSnippetsDrawerOpen] = useState(false);
+  const [snippetDrawerSearch, setSnippetDrawerSearch] = useState("");
+  const [broadcastMode, setBroadcastMode] = useState<"off" | "tab" | "all">(
+    "off",
+  );
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [commandPaletteQuery, setCommandPaletteQuery] = useState("");
+  const [pendingVarSnippet, setPendingVarSnippet] = useState<{
+    name: string;
+    code: string;
+    vars: string[];
+    values: Record<string, string>;
+  } | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const t = getI18n(appSettings.language);
   const isMacDesktop = useMemo(() => {
     if (typeof navigator === "undefined") return false;
     const ua = navigator.userAgent || "";
@@ -509,18 +534,58 @@ export default function App() {
     setHosts(updated);
   }, []);
 
-  const handleRunSnippetInActivePane = useCallback(
-    (code: string) => {
-      if (!activeLeaf) return;
-      const payload = code.endsWith("\n") ? code : `${code}\n`;
+  const broadcastTargetPaneIds = useMemo(() => {
+    if (broadcastMode === "off") return undefined;
+    if (broadcastMode === "tab") {
+      if (!activeTab) return undefined;
+      return collectLeaves(activeTab.root).map((l) => l.paneId);
+    }
+    const allIds: string[] = [];
+    for (const tab of tabs) {
+      for (const l of collectLeaves(tab.root)) {
+        allIds.push(l.paneId);
+      }
+    }
+    return allIds;
+  }, [broadcastMode, activeTab, tabs]);
+
+  const sendCommandToTargetPanes = useCallback(
+    (rawCode: string) => {
+      const payload = rawCode.endsWith("\n") ? rawCode : `${rawCode}\n`;
       const bytes = Array.from(new TextEncoder().encode(payload));
-      invoke("write_pane_input", {
-        paneId: activeLeaf.paneId,
-        data: bytes,
-      }).catch(() => undefined);
+      const targets =
+        broadcastTargetPaneIds && broadcastTargetPaneIds.length > 0
+          ? broadcastTargetPaneIds
+          : activeLeaf
+            ? [activeLeaf.paneId]
+            : [];
+      for (const paneId of targets) {
+        invoke("write_pane_input", { paneId, data: bytes }).catch(
+          () => undefined,
+        );
+      }
       setWorkspaceView("terminal");
     },
-    [activeLeaf],
+    [broadcastTargetPaneIds, activeLeaf],
+  );
+
+  const handleRunSnippetInActivePane = useCallback(
+    (code: string, snippetName = "Snippet") => {
+      const vars = extractSnippetVariables(code);
+      if (vars.length > 0) {
+        const initialValues: Record<string, string> = {};
+        for (const v of vars) initialValues[v] = "";
+        setPendingVarSnippet({
+          name: snippetName,
+          code,
+          vars,
+          values: initialValues,
+        });
+        return;
+      }
+      sendCommandToTargetPanes(code);
+    },
+    [sendCommandToTargetPanes],
   );
 
   // Global keyboard shortcuts
@@ -528,6 +593,13 @@ export default function App() {
     const onKeyDown = (e: KeyboardEvent) => {
       if (!e.metaKey) return;
       const key = e.key.toLowerCase();
+
+      if (key === "k") {
+        e.preventDefault();
+        setCommandPaletteOpen((prev) => !prev);
+        setCommandPaletteQuery("");
+        return;
+      }
 
       if (key === "d" && !e.shiftKey) {
         e.preventDefault();
@@ -583,25 +655,30 @@ export default function App() {
   }[] = [
     {
       id: "machines",
-      label: "Machine",
+      label: t.navMachines,
       count: hosts.length,
       icon: <Server className="w-4 h-4 text-emerald-400" />,
     },
     {
       id: "identities",
-      label: "Identity",
+      label: t.navIdentities,
       count: resources.identities.length,
       icon: <UserCheck className="w-4 h-4 text-violet-400" />,
     },
     {
       id: "keys",
-      label: "SSH Key",
+      label: t.navSshKeys,
       count: resources.sshKeys.length,
       icon: <KeyRound className="w-4 h-4 text-amber-400" />,
     },
     {
+      id: "knownHosts",
+      label: t.navKnownHosts,
+      icon: <ShieldCheck className="w-4 h-4 text-teal-400" />,
+    },
+    {
       id: "connectionProxyProfiles",
-      label: "Proxy",
+      label: t.navProxyProfiles,
       count: resources.proxyProfiles.length,
       icon: <Globe className="w-4 h-4 text-sky-400" />,
     },
@@ -615,23 +692,23 @@ export default function App() {
   }[] = [
     {
       id: "sftp",
-      label: "SFTP",
+      label: t.navSftp,
       icon: <HardDrive className="w-4 h-4 text-amber-400" />,
     },
     {
       id: "snippets",
-      label: "Snippet",
+      label: t.navSnippets,
       count: resources.snippets.length,
       icon: <Code2 className="w-4 h-4 text-pink-400" />,
     },
     {
       id: "docker",
-      label: "Docker",
+      label: t.navDocker,
       icon: <Container className="w-4 h-4 text-cyan-400" />,
     },
     {
       id: "portForwarding",
-      label: "Port Forwarding",
+      label: t.navPortForwarding,
       count: resources.portForwardingRules.length,
       icon: <Waypoints className="w-4 h-4 text-indigo-400" />,
     },
@@ -712,8 +789,82 @@ export default function App() {
 
         {/* Right Window Action Controls */}
         <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              setCommandPaletteQuery("");
+              setCommandPaletteOpen(true);
+            }}
+            title={t.quickConnectBtn}
+            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-secondary/70 hover:bg-accent text-xs font-medium text-muted-foreground hover:text-foreground border border-border/70 transition-all cursor-pointer"
+          >
+            <Search className="w-3.5 h-3.5 text-primary" />
+            <span className="hidden lg:inline">{t.quickConnectBtn}</span>
+            <kbd className="px-1.5 py-0.5 rounded-md bg-background/80 border border-border text-[10px] font-mono text-muted-foreground">
+              ⌘K
+            </kbd>
+          </button>
+
+          <button
+            type="button"
+            onClick={() =>
+              handleUpdateAppSettings((prev) => ({
+                ...prev,
+                language: prev.language === "vi" ? "en" : "vi",
+              }))
+            }
+            title={t.settingsLanguageDesc}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-secondary/70 hover:bg-accent text-xs font-semibold text-foreground border border-border/70 transition-all cursor-pointer"
+          >
+            <Languages className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="uppercase">{appSettings.language}</span>
+          </button>
+
           {workspaceView === "terminal" && activeLeaf && (
             <>
+              <button
+                type="button"
+                onClick={() =>
+                  setBroadcastMode((prev) =>
+                    prev === "off" ? "tab" : prev === "tab" ? "all" : "off",
+                  )
+                }
+                title={t.termBroadcastActive}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                  broadcastMode !== "off"
+                    ? "bg-amber-500/15 text-amber-400 border-amber-500/40"
+                    : "bg-secondary/70 text-muted-foreground hover:bg-accent hover:text-foreground border-border/70"
+                }`}
+              >
+                <Radio
+                  className={`w-3.5 h-3.5 ${
+                    broadcastMode !== "off" ? "animate-pulse" : ""
+                  }`}
+                />
+                <span className="hidden md:inline">
+                  {t.termBroadcastLabel}
+                  {broadcastMode === "tab"
+                    ? " (Tab)"
+                    : broadcastMode === "all"
+                      ? " (All)"
+                      : ""}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setSnippetsDrawerOpen((p) => !p)}
+                title={t.termSnippetsDrawer}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                  snippetsDrawerOpen
+                    ? "bg-primary/15 text-primary border-primary/40"
+                    : "bg-secondary/70 text-muted-foreground hover:bg-accent hover:text-foreground border-border/70"
+                }`}
+              >
+                <Code2 className="w-3.5 h-3.5 text-pink-400" />
+                <span className="hidden md:inline">{t.termSnippetsDrawer}</span>
+              </button>
+
               <button
                 type="button"
                 onClick={() =>
@@ -801,7 +952,7 @@ export default function App() {
                     <span className="p-1.5 rounded-xl bg-card border border-border/70 shadow-2xs">
                       <LayoutDashboard className="w-4 h-4 text-emerald-400" />
                     </span>
-                    <span>Dashboard</span>
+                    <span>{t.navDashboard}</span>
                   </span>
                 </button>
               </div>
@@ -809,7 +960,7 @@ export default function App() {
               {/* 2. Resources Section */}
               <div className="space-y-1">
                 <div className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/75">
-                  Resources
+                  {t.navResources}
                 </div>
                 {resourceItems.map((item) => {
                   const active =
@@ -967,7 +1118,7 @@ export default function App() {
                 <span className="p-1.5 rounded-xl bg-card border border-border/70">
                   <Laptop className="w-4 h-4 text-emerald-400" />
                 </span>
-                <span>Local Terminal</span>
+                <span>{t.newLocalShell}</span>
               </button>
 
               <button
@@ -986,7 +1137,7 @@ export default function App() {
                   <span className="p-1.5 rounded-xl bg-card border border-border/70">
                     <Settings className="w-4 h-4 text-primary" />
                   </span>
-                  <span>Settings</span>
+                  <span>{t.navSettings}</span>
                 </span>
                 <kbd className="text-[10px] font-mono text-muted-foreground">
                   ⌘,
@@ -1012,6 +1163,8 @@ export default function App() {
                 activePaneId={activeTab.activePaneId}
                 totalPanes={totalPanesInActiveTab}
                 themeConfig={themeConfig}
+                language={appSettings.language}
+                broadcastTargetPaneIds={broadcastTargetPaneIds}
                 onFocusPane={handleFocusPane}
                 onUpdateLeafStatus={handleUpdateLeafStatus}
                 onTriggerReconnect={handleTriggerReconnect}
@@ -1056,6 +1209,7 @@ export default function App() {
             <ResourcesWorkspace
               hosts={hosts}
               resources={resources}
+              appSettings={appSettings}
               activeHostId={inspectedHostId || activeTerminalHostId}
               initialTab={resourceSubTab}
               hideSidebar={true}
@@ -1087,9 +1241,92 @@ export default function App() {
               onChangeTheme={handleUpdateTheme}
               onChangeAppSettings={handleUpdateAppSettings}
               onUpdateResources={setResources}
+              onRefreshHosts={loadHosts}
             />
           )}
         </main>
+
+        {/* Quick Snippets Side Drawer inside Terminal View */}
+        {workspaceView === "terminal" && snippetsDrawerOpen && (
+          <aside className="w-72 shrink-0 bg-header/95 border-l border-border/80 flex flex-col h-full z-20">
+            <div className="h-11 px-3.5 border-b border-border/70 flex items-center justify-between">
+              <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
+                <Code2 className="w-4 h-4 text-pink-400" />
+                <span>{t.termSnippetsDrawer}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSnippetsDrawerOpen(false)}
+                className="p-1 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <div className="p-2.5 border-b border-border/60">
+              <div className="relative flex items-center">
+                <Search className="w-3.5 h-3.5 text-muted-foreground absolute left-2.5 pointer-events-none" />
+                <input
+                  type="text"
+                  value={snippetDrawerSearch}
+                  onChange={(e) => setSnippetDrawerSearch(e.target.value)}
+                  placeholder="Tìm kiếm snippet..."
+                  className="w-full pl-8 pr-2.5 py-1.5 rounded-xl bg-background/80 border border-border/70 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary"
+                />
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-2.5 space-y-2">
+              {resources.snippets
+                .filter((s: SnippetItem) => {
+                  const q = snippetDrawerSearch.trim().toLowerCase();
+                  if (!q) return true;
+                  return (
+                    s.name.toLowerCase().includes(q) ||
+                    s.code.toLowerCase().includes(q)
+                  );
+                })
+                .map((s: SnippetItem) => {
+                  const vars = extractSnippetVariables(s.code);
+                  return (
+                    <div
+                      key={s.id}
+                      className="p-2.5 rounded-xl bg-card/80 border border-border/70 hover:border-primary/40 transition-all space-y-1.5"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-semibold text-foreground truncate">
+                          {s.name}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleRunSnippetInActivePane(s.code, s.name)
+                          }
+                          className="px-2 py-1 rounded-lg bg-primary text-primary-foreground text-[11px] font-semibold inline-flex items-center gap-1 hover:opacity-90 cursor-pointer shrink-0"
+                        >
+                          <Play className="w-3 h-3" />
+                          <span>{t.termRunBtn}</span>
+                        </button>
+                      </div>
+                      <pre className="text-[10px] font-mono text-muted-foreground bg-background/70 px-2 py-1 rounded-lg overflow-x-auto max-h-16">
+                        {s.code}
+                      </pre>
+                      {vars.length > 0 && (
+                        <div className="flex flex-wrap gap-1">
+                          {vars.map((v) => (
+                            <span
+                              key={v}
+                              className="px-1.5 py-0.5 rounded-md bg-pink-500/15 text-pink-300 border border-pink-500/30 font-mono text-[10px]"
+                            >
+                              {`{{${v}}}`}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+            </div>
+          </aside>
+        )}
 
         {/* On-Demand Side Monitor Drawer (Only when inside Terminal view and explicitly toggled open) */}
         {workspaceView === "terminal" && (
@@ -1111,6 +1348,308 @@ export default function App() {
           />
         )}
       </div>
+
+      {/* Dynamic Snippet Variable Prompt Modal */}
+      {pendingVarSnippet && (
+        <div
+          onClick={() => setPendingVarSnippet(null)}
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+        >
+          <form
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={(e) => {
+              e.preventDefault();
+              const finalCmd = interpolateSnippetVariables(
+                pendingVarSnippet.code,
+                pendingVarSnippet.values,
+              );
+              setPendingVarSnippet(null);
+              sendCommandToTargetPanes(finalCmd);
+            }}
+            className="w-full max-w-md rounded-2xl bg-card border border-border p-5 shadow-2xl space-y-4"
+          >
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-semibold text-foreground">
+                  {t.termFillVariablesTitle}: {pendingVarSnippet.name}
+                </h3>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Điền giá trị cho các biến động trước khi gửi vào Terminal
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPendingVarSnippet(null)}
+                className="p-1 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              {pendingVarSnippet.vars.map((varName, idx) => (
+                <div key={varName} className="space-y-1">
+                  <label className="text-xs font-mono font-medium text-pink-400">
+                    {`{{${varName}}}`}
+                  </label>
+                  <input
+                    type="text"
+                    autoFocus={idx === 0}
+                    required
+                    value={pendingVarSnippet.values[varName] ?? ""}
+                    onChange={(e) =>
+                      setPendingVarSnippet((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              values: {
+                                ...prev.values,
+                                [varName]: e.target.value,
+                              },
+                            }
+                          : null,
+                      )
+                    }
+                    placeholder={`Nhập giá trị cho ${varName}...`}
+                    className="w-full px-3 py-2 rounded-xl bg-background border border-border text-xs text-foreground focus:outline-none focus:border-primary"
+                  />
+                </div>
+              ))}
+            </div>
+
+            <div className="p-2.5 rounded-xl bg-background/80 border border-border/70">
+              <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+                Preview
+              </div>
+              <pre className="text-xs font-mono text-emerald-400 whitespace-pre-wrap break-all">
+                {interpolateSnippetVariables(
+                  pendingVarSnippet.code,
+                  pendingVarSnippet.values,
+                )}
+              </pre>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setPendingVarSnippet(null)}
+                className="px-3.5 py-2 rounded-xl bg-secondary text-xs font-medium text-foreground hover:bg-accent cursor-pointer"
+              >
+                {t.termCancelBtn}
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-semibold hover:opacity-90 cursor-pointer"
+              >
+                {t.termRunBtn}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Global Command Palette (Cmd+K) */}
+      {commandPaletteOpen && (
+        <div
+          onClick={() => setCommandPaletteOpen(false)}
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-start justify-center pt-20 p-4"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-xl rounded-2xl bg-card border border-border shadow-2xl overflow-hidden"
+          >
+            <div className="flex items-center gap-2.5 px-4 py-3 border-b border-border bg-header/70">
+              <Search className="w-4 h-4 text-primary shrink-0" />
+              <input
+                type="text"
+                autoFocus
+                value={commandPaletteQuery}
+                onChange={(e) => setCommandPaletteQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    setCommandPaletteOpen(false);
+                  }
+                }}
+                placeholder={t.cmdPalettePlaceholder}
+                className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
+              />
+              <kbd className="px-2 py-0.5 rounded-md bg-secondary text-[10px] font-mono text-muted-foreground">
+                ESC
+              </kbd>
+            </div>
+
+            <div className="max-h-96 overflow-y-auto p-3 space-y-4">
+              {/* Hosts section */}
+              <div>
+                <div className="px-2 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  {t.cmdPaletteSectionHosts}
+                </div>
+                <div className="space-y-1">
+                  {hosts
+                    .filter((h) => {
+                      const q = commandPaletteQuery.trim().toLowerCase();
+                      if (!q) return true;
+                      return (
+                        h.alias.toLowerCase().includes(q) ||
+                        h.hostname.toLowerCase().includes(q) ||
+                        h.user.toLowerCase().includes(q) ||
+                        h.group.toLowerCase().includes(q)
+                      );
+                    })
+                    .map((h) => (
+                      <div
+                        key={h.id}
+                        className="flex items-center justify-between px-3 py-2 rounded-xl hover:bg-accent/70 transition-colors"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <Server className="w-4 h-4 text-emerald-400 shrink-0" />
+                          <div className="min-w-0">
+                            <div className="text-xs font-semibold text-foreground truncate">
+                              {h.alias || h.hostname}
+                            </div>
+                            <div className="text-[11px] font-mono text-muted-foreground truncate">
+                              {h.user}@{h.hostname}:{h.port}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCommandPaletteOpen(false);
+                              handleConnectHostTab(h);
+                            }}
+                            className="px-2.5 py-1 rounded-lg bg-primary text-primary-foreground text-[11px] font-semibold hover:opacity-90 cursor-pointer"
+                          >
+                            {t.cmdActionOpenSsh}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCommandPaletteOpen(false);
+                              setInspectedHostId(h.id);
+                              setResourceSubTab("sftp");
+                              setWorkspaceView("resources");
+                            }}
+                            className="px-2.5 py-1 rounded-lg bg-secondary hover:bg-accent text-foreground text-[11px] font-medium border border-border/70 cursor-pointer"
+                          >
+                            {t.cmdActionOpenSftp}
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+
+              {/* Snippets section */}
+              {resources.snippets.length > 0 && (
+                <div>
+                  <div className="px-2 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    {t.cmdPaletteSectionSnippets}
+                  </div>
+                  <div className="space-y-1">
+                    {resources.snippets
+                      .filter((s) => {
+                        const q = commandPaletteQuery.trim().toLowerCase();
+                        if (!q) return true;
+                        return (
+                          s.name.toLowerCase().includes(q) ||
+                          s.code.toLowerCase().includes(q)
+                        );
+                      })
+                      .map((s) => (
+                        <div
+                          key={s.id}
+                          className="flex items-center justify-between px-3 py-2 rounded-xl hover:bg-accent/70 transition-colors"
+                        >
+                          <div className="min-w-0 pr-3">
+                            <div className="text-xs font-semibold text-foreground truncate">
+                              {s.name}
+                            </div>
+                            <div className="text-[11px] font-mono text-muted-foreground truncate">
+                              {s.code}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCommandPaletteOpen(false);
+                              handleRunSnippetInActivePane(s.code, s.name);
+                            }}
+                            className="px-2.5 py-1 rounded-lg bg-pink-500/20 text-pink-300 border border-pink-500/30 text-[11px] font-semibold hover:bg-pink-500/30 cursor-pointer shrink-0"
+                          >
+                            {t.cmdActionRunSnippet}
+                          </button>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Port Forwarding section */}
+              {resources.portForwardingRules.length > 0 && (
+                <div>
+                  <div className="px-2 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    {t.cmdPaletteSectionPortForward}
+                  </div>
+                  <div className="space-y-1">
+                    {resources.portForwardingRules
+                      .filter((r) => {
+                        const q = commandPaletteQuery.trim().toLowerCase();
+                        if (!q) return true;
+                        return r.name.toLowerCase().includes(q);
+                      })
+                      .map((r) => {
+                        const isRunning = r.status === "running";
+                        return (
+                          <div
+                            key={r.id}
+                            className="flex items-center justify-between px-3 py-2 rounded-xl hover:bg-accent/70 transition-colors"
+                          >
+                            <div className="min-w-0">
+                              <div className="text-xs font-semibold text-foreground truncate">
+                                {r.name} ({r.mode.toUpperCase()})
+                              </div>
+                              <div className="text-[11px] font-mono text-muted-foreground truncate">
+                                {r.localHost}:{r.localPort} → {r.targetHost}:
+                                {r.targetPort}
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                try {
+                                  const next =
+                                    await invoke<ResourcesStoreData>(
+                                      "toggle_port_forwarding_rule",
+                                      {
+                                        ruleId: r.id,
+                                        active: !isRunning,
+                                      },
+                                    );
+                                  setResources(next);
+                                } catch {
+                                  // ignore
+                                }
+                              }}
+                              className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold cursor-pointer ${
+                                isRunning
+                                  ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                                  : "bg-secondary text-foreground border border-border"
+                              }`}
+                            >
+                              {isRunning ? "Running (Stop)" : "Start Tunnel"}
+                            </button>
+                          </div>
+                        );
+                      })}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

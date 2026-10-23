@@ -1,11 +1,13 @@
 use crate::host_store;
 use crate::ssh_pool::SshPool;
+use russh::ChannelMsg;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::UNIX_EPOCH;
+use std::time::{Instant, UNIX_EPOCH};
 
 fn local_permissions_mode(meta: &fs::Metadata, is_dir: bool) -> u32 {
     #[cfg(unix)]
@@ -65,6 +67,83 @@ pub fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
 }
 
 const MAX_TEXT_FILE_BYTES: u64 = 2 * 1024 * 1024; // 2 MB safety limit for quick text editor
+pub const SFTP_CHUNK_SIZE: usize = 65536; // 64 KB streaming chunk
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SftpTransferProgress {
+    pub transfer_id: String,
+    pub file_name: String,
+    pub direction: String,
+    pub mode: String, // "fast_sync" | "chunk_stream" | "local_copy"
+    pub mode_detail: String,
+    pub bytes_transferred: u64,
+    pub total_bytes: u64,
+    pub speed_bytes_per_sec: u64,
+    pub percent: u8,
+    pub status: String, // "running" | "completed" | "failed"
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SftpTransferResult {
+    pub transfer_id: String,
+    pub file_name: String,
+    pub mode: String,
+    pub mode_detail: String,
+    pub bytes_transferred: u64,
+    pub duration_ms: u64,
+    pub speed_bytes_per_sec: u64,
+}
+
+pub fn is_already_compressed(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    [
+        ".zip", ".gz", ".tgz", ".bz2", ".xz", ".zst", ".7z", ".rar", ".mp4", ".mkv", ".mov",
+        ".avi", ".webm", ".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp3", ".aac", ".flac",
+        ".dmg", ".iso", ".deb", ".rpm", ".apk", ".ipa",
+    ]
+    .iter()
+    .any(|ext| lower.ends_with(ext))
+}
+
+pub fn compute_local_dir_size(path: &Path) -> u64 {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if meta.is_file() {
+        return meta.len();
+    }
+    if !meta.is_dir() {
+        return 0;
+    }
+    let mut sum = 0u64;
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            sum = sum.saturating_add(compute_local_dir_size(&entry.path()));
+        }
+    }
+    sum
+}
+
+pub fn compute_local_file_sha256(path: &Path, max_bytes: u64) -> Option<String> {
+    let meta = fs::metadata(path).ok()?;
+    if meta.len() > max_bytes {
+        return None;
+    }
+    let mut file = fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; SFTP_CHUNK_SIZE];
+    loop {
+        let n = file.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Some(format!("{:x}", hasher.finalize()))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -459,33 +538,111 @@ pub async fn write_text_file(
         .map(|_| ())
 }
 
+async fn finish_exec_channel(
+    channel: &mut russh::Channel<russh::client::Msg>,
+) -> Result<(), String> {
+    let _ = channel.eof().await;
+    let mut stderr_buf = Vec::new();
+    let mut exit_code: Option<u32> = None;
+    while let Some(msg) = channel.wait().await {
+        match msg {
+            ChannelMsg::ExtendedData { data, .. } => stderr_buf.extend_from_slice(&data),
+            ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status),
+            ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+    if let Some(code) = exit_code {
+        if code != 0 {
+            let err_text = String::from_utf8_lossy(&stderr_buf).trim().to_string();
+            return Err(if err_text.is_empty() {
+                format!("Remote transfer command exited with status {code}")
+            } else {
+                err_text
+            });
+        }
+    }
+    Ok(())
+}
+
 pub async fn transfer_entry(
     pool: &SshPool,
     source_host_id: &str,
     source_path: &str,
     target_host_id: &str,
     target_dir: &str,
-) -> Result<(), String> {
+) -> Result<SftpTransferResult, String> {
+    transfer_entry_with_progress(
+        pool,
+        source_host_id,
+        source_path,
+        target_host_id,
+        target_dir,
+        true,
+        |_| {},
+    )
+    .await
+}
+
+pub async fn transfer_entry_with_progress<F>(
+    pool: &SshPool,
+    source_host_id: &str,
+    source_path: &str,
+    target_host_id: &str,
+    target_dir: &str,
+    prefer_fast_sync: bool,
+    mut on_progress: F,
+) -> Result<SftpTransferResult, String>
+where
+    F: FnMut(SftpTransferProgress),
+{
+    let transfer_id = format!("tx:{}", uuid::Uuid::new_v4());
+    let started_at = Instant::now();
+
     if source_host_id == "local" && target_host_id == "local" {
         let src = resolve_local_path(source_path);
         let dst_dir = resolve_local_path(target_dir);
         let file_name = src
             .file_name()
-            .ok_or_else(|| "Invalid source path".to_string())?;
-        let dst = dst_dir.join(file_name);
-        if src == dst {
-            return Ok(());
+            .ok_or_else(|| "Invalid source path".to_string())?
+            .to_string_lossy()
+            .to_string();
+        let total_bytes = compute_local_dir_size(&src);
+        let dst = dst_dir.join(&file_name);
+        if src != dst {
+            if src.is_dir() {
+                copy_dir_recursive(&src, &dst)?;
+            } else {
+                fs::copy(&src, &dst).map_err(|e| format!("Failed to copy local file: {e}"))?;
+            }
         }
-        if src.is_dir() {
-            return copy_dir_recursive(&src, &dst);
-        } else {
-            fs::copy(&src, &dst)
-                .map_err(|e| format!("Failed to copy local file: {e}"))?;
-            return Ok(());
-        }
+        let duration_ms = started_at.elapsed().as_millis().max(1) as u64;
+        let speed = (total_bytes.saturating_mul(1000)) / duration_ms;
+        on_progress(SftpTransferProgress {
+            transfer_id: transfer_id.clone(),
+            file_name: file_name.clone(),
+            direction: "local".to_string(),
+            mode: "local_copy".to_string(),
+            mode_detail: "Local filesystem copy".to_string(),
+            bytes_transferred: total_bytes,
+            total_bytes,
+            speed_bytes_per_sec: speed,
+            percent: 100,
+            status: "completed".to_string(),
+            error_message: None,
+        });
+        return Ok(SftpTransferResult {
+            transfer_id,
+            file_name,
+            mode: "local_copy".to_string(),
+            mode_detail: "Local filesystem copy".to_string(),
+            bytes_transferred: total_bytes,
+            duration_ms,
+            speed_bytes_per_sec: speed,
+        });
     }
 
-    // Upload: Local -> Remote
+    // Upload: Local -> Remote (Streaming 64KB chunks + Auto Fast Sync)
     if source_host_id == "local" && target_host_id != "local" {
         let src = resolve_local_path(source_path);
         let host = find_host_by_id(target_host_id)?;
@@ -494,52 +651,324 @@ pub async fn transfer_entry(
             .ok_or_else(|| "Invalid local source file name".to_string())?
             .to_string_lossy()
             .to_string();
+        let total_bytes = compute_local_dir_size(&src).max(1);
 
         if src.is_dir() {
             let parent = src.parent().unwrap_or_else(|| Path::new("/"));
-            let output = Command::new("tar")
-                .args([
-                    "-cf",
-                    "-",
-                    "-C",
-                    &parent.to_string_lossy(),
-                    &file_name,
-                ])
-                .output()
-                .map_err(|e| format!("Failed to archive local directory '{}': {e}", src.display()))?;
-            if !output.status.success() {
-                return Err(format!(
-                    "Local tar failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ));
+            let has_remote_rsync = if prefer_fast_sync {
+                pool.exec_on_host(
+                    &host,
+                    "command -v rsync >/dev/null 2>&1 && printf 'YES' || printf 'NO'",
+                )
+                .await
+                .map(|s| s.trim() == "YES")
+                .unwrap_or(false)
+            } else {
+                false
+            };
+
+            let (mode, mode_detail, tar_args, remote_cmd) = if prefer_fast_sync {
+                let detail = if has_remote_rsync {
+                    "Fast Sync (rsync + tar-gz 64KB stream)"
+                } else {
+                    "Fast Sync (tar-gz 64KB stream)"
+                };
+                let rcmd = if has_remote_rsync {
+                    let stage_dir = format!("/tmp/.sshbox_sync_{}", uuid::Uuid::new_v4());
+                    format!(
+                        "mkdir -p -- {stage} {dst} && tar -xzf - -C {stage} && rsync -a --inplace {stage}/{fname}/ {dst}/{fname}/ && rm -rf -- {stage}",
+                        stage = shell_quote(&stage_dir),
+                        dst = shell_quote(target_dir),
+                        fname = shell_quote(&file_name)
+                    )
+                } else {
+                    format!(
+                        "mkdir -p -- {} && tar -xzf - -C {}",
+                        shell_quote(target_dir),
+                        shell_quote(target_dir)
+                    )
+                };
+                (
+                    "fast_sync".to_string(),
+                    detail.to_string(),
+                    vec!["-czf", "-", "-C"],
+                    rcmd,
+                )
+            } else {
+                (
+                    "chunk_stream".to_string(),
+                    "Chunk Stream (64KB tar)".to_string(),
+                    vec!["-cf", "-", "-C"],
+                    format!(
+                        "mkdir -p -- {} && tar -xf - -C {}",
+                        shell_quote(target_dir),
+                        shell_quote(target_dir)
+                    ),
+                )
+            };
+
+            let mut child = Command::new("tar")
+                .args(&tar_args)
+                .arg(&parent.to_string_lossy().to_string())
+                .arg(&file_name)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to spawn local tar stream: {e}"))?;
+
+            let mut stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| "Failed to open local tar stdout".to_string())?;
+            let mut channel = pool.open_exec_channel(&host, &remote_cmd).await?;
+
+            let mut buf = vec![0u8; SFTP_CHUNK_SIZE];
+            let mut sent_bytes = 0u64;
+            loop {
+                let n = stdout
+                    .read(&mut buf)
+                    .map_err(|e| format!("Failed reading local tar stream: {e}"))?;
+                if n == 0 {
+                    break;
+                }
+                channel
+                    .data(&buf[..n])
+                    .await
+                    .map_err(|e| format!("Failed streaming chunk to remote host: {e}"))?;
+                sent_bytes = sent_bytes.saturating_add(n as u64);
+                let elapsed_ms = started_at.elapsed().as_millis().max(1) as u64;
+                let speed = (sent_bytes.saturating_mul(1000)) / elapsed_ms;
+                let pct = ((sent_bytes.saturating_mul(100)) / total_bytes).min(99) as u8;
+                on_progress(SftpTransferProgress {
+                    transfer_id: transfer_id.clone(),
+                    file_name: file_name.clone(),
+                    direction: "upload".to_string(),
+                    mode: mode.clone(),
+                    mode_detail: mode_detail.clone(),
+                    bytes_transferred: sent_bytes,
+                    total_bytes,
+                    speed_bytes_per_sec: speed,
+                    percent: pct,
+                    status: "running".to_string(),
+                    error_message: None,
+                });
             }
-            let cmd = format!(
-                "mkdir -p -- {} && tar -xf - -C {}",
-                shell_quote(target_dir),
-                shell_quote(target_dir)
-            );
-            pool.exec_bytes_on_host(&host, &cmd, Some(&output.stdout))
-                .await?;
-            return Ok(());
+
+            let _ = child.wait();
+            finish_exec_channel(&mut channel).await?;
+
+            let duration_ms = started_at.elapsed().as_millis().max(1) as u64;
+            let speed = (sent_bytes.saturating_mul(1000)) / duration_ms;
+            on_progress(SftpTransferProgress {
+                transfer_id: transfer_id.clone(),
+                file_name: file_name.clone(),
+                direction: "upload".to_string(),
+                mode: mode.clone(),
+                mode_detail: mode_detail.clone(),
+                bytes_transferred: sent_bytes,
+                total_bytes: sent_bytes.max(1),
+                speed_bytes_per_sec: speed,
+                percent: 100,
+                status: "completed".to_string(),
+                error_message: None,
+            });
+            return Ok(SftpTransferResult {
+                transfer_id,
+                file_name,
+                mode,
+                mode_detail,
+                bytes_transferred: sent_bytes,
+                duration_ms,
+                speed_bytes_per_sec: speed,
+            });
         } else {
-            let bytes = fs::read(&src)
-                .map_err(|e| format!("Failed to read local file '{}': {e}", src.display()))?;
             let remote_dest = join_posix_path(target_dir, &file_name);
-            let mode = fs::metadata(&src)
+            let mode_bits = fs::metadata(&src)
                 .map(|m| local_permissions_mode(&m, false))
                 .unwrap_or(0o644);
-            let cmd = format!(
-                "cat > {} && chmod {:o} -- {}",
-                shell_quote(&remote_dest),
+
+            // Fast Sync Step 1: Delta / SHA-256 unchanged check
+            if prefer_fast_sync {
+                if let Some(local_sha) = compute_local_file_sha256(&src, 64 * 1024 * 1024) {
+                    let probe_cmd = format!(
+                        "if [ -f {p} ]; then (sha256sum {p} 2>/dev/null || shasum -a 256 {p} 2>/dev/null) | awk '{{print $1}}'; fi",
+                        p = shell_quote(&remote_dest)
+                    );
+                    if let Ok(remote_sha) = pool.exec_on_host(&host, &probe_cmd).await {
+                        if remote_sha.trim().eq_ignore_ascii_case(&local_sha) {
+                            let duration_ms = started_at.elapsed().as_millis().max(1) as u64;
+                            let detail = "Fast Sync (rsync delta: unchanged - skipped)".to_string();
+                            on_progress(SftpTransferProgress {
+                                transfer_id: transfer_id.clone(),
+                                file_name: file_name.clone(),
+                                direction: "upload".to_string(),
+                                mode: "fast_sync".to_string(),
+                                mode_detail: detail.clone(),
+                                bytes_transferred: total_bytes,
+                                total_bytes,
+                                speed_bytes_per_sec: (total_bytes.saturating_mul(1000))
+                                    / duration_ms,
+                                percent: 100,
+                                status: "completed".to_string(),
+                                error_message: None,
+                            });
+                            return Ok(SftpTransferResult {
+                                transfer_id,
+                                file_name,
+                                mode: "fast_sync".to_string(),
+                                mode_detail: detail,
+                                bytes_transferred: total_bytes,
+                                duration_ms,
+                                speed_bytes_per_sec: (total_bytes.saturating_mul(1000))
+                                    / duration_ms,
+                            });
+                        }
+                    }
+                }
+            }
+
+            let use_gzip_stream = prefer_fast_sync && !is_already_compressed(&file_name);
+            let (mode, mode_detail, remote_cmd) = if use_gzip_stream {
+                (
+                    "fast_sync".to_string(),
+                    "Fast Sync (zstream 64KB chunks)".to_string(),
+                    format!(
+                        "gzip -d > {dst} && chmod {:o} -- {dst}",
+                        mode_bits,
+                        dst = shell_quote(&remote_dest)
+                    ),
+                )
+            } else if prefer_fast_sync {
+                (
+                    "fast_sync".to_string(),
+                    "Fast Sync (direct 64KB stream)".to_string(),
+                    format!(
+                        "cat > {dst} && chmod {:o} -- {dst}",
+                        mode_bits,
+                        dst = shell_quote(&remote_dest)
+                    ),
+                )
+            } else {
+                (
+                    "chunk_stream".to_string(),
+                    "Chunk Stream (64KB)".to_string(),
+                    format!(
+                        "cat > {dst} && chmod {:o} -- {dst}",
+                        mode_bits,
+                        dst = shell_quote(&remote_dest)
+                    ),
+                )
+            };
+
+            let mut channel = pool.open_exec_channel(&host, &remote_cmd).await?;
+            let mut sent_bytes = 0u64;
+            let mut buf = vec![0u8; SFTP_CHUNK_SIZE];
+
+            if use_gzip_stream {
+                let mut child = Command::new("gzip")
+                    .args(["-1", "-c", &src.to_string_lossy()])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("Failed to spawn gzip stream: {e}"))?;
+                let mut stdout = child
+                    .stdout
+                    .take()
+                    .ok_or_else(|| "Failed to read gzip stdout".to_string())?;
+                loop {
+                    let n = stdout
+                        .read(&mut buf)
+                        .map_err(|e| format!("Failed reading compressed stream: {e}"))?;
+                    if n == 0 {
+                        break;
+                    }
+                    channel
+                        .data(&buf[..n])
+                        .await
+                        .map_err(|e| format!("Failed streaming chunk to remote host: {e}"))?;
+                    sent_bytes = sent_bytes.saturating_add(n as u64);
+                    let elapsed_ms = started_at.elapsed().as_millis().max(1) as u64;
+                    let speed = (sent_bytes.saturating_mul(1000)) / elapsed_ms;
+                    let pct = ((sent_bytes.saturating_mul(100)) / total_bytes).min(99) as u8;
+                    on_progress(SftpTransferProgress {
+                        transfer_id: transfer_id.clone(),
+                        file_name: file_name.clone(),
+                        direction: "upload".to_string(),
+                        mode: mode.clone(),
+                        mode_detail: mode_detail.clone(),
+                        bytes_transferred: sent_bytes,
+                        total_bytes,
+                        speed_bytes_per_sec: speed,
+                        percent: pct,
+                        status: "running".to_string(),
+                        error_message: None,
+                    });
+                }
+                let _ = child.wait();
+            } else {
+                let mut file = fs::File::open(&src)
+                    .map_err(|e| format!("Failed to open local file '{}': {e}", src.display()))?;
+                loop {
+                    let n = file
+                        .read(&mut buf)
+                        .map_err(|e| format!("Failed reading local file chunk: {e}"))?;
+                    if n == 0 {
+                        break;
+                    }
+                    channel
+                        .data(&buf[..n])
+                        .await
+                        .map_err(|e| format!("Failed streaming chunk to remote host: {e}"))?;
+                    sent_bytes = sent_bytes.saturating_add(n as u64);
+                    let elapsed_ms = started_at.elapsed().as_millis().max(1) as u64;
+                    let speed = (sent_bytes.saturating_mul(1000)) / elapsed_ms;
+                    let pct = ((sent_bytes.saturating_mul(100)) / total_bytes).min(99) as u8;
+                    on_progress(SftpTransferProgress {
+                        transfer_id: transfer_id.clone(),
+                        file_name: file_name.clone(),
+                        direction: "upload".to_string(),
+                        mode: mode.clone(),
+                        mode_detail: mode_detail.clone(),
+                        bytes_transferred: sent_bytes,
+                        total_bytes,
+                        speed_bytes_per_sec: speed,
+                        percent: pct,
+                        status: "running".to_string(),
+                        error_message: None,
+                    });
+                }
+            }
+
+            finish_exec_channel(&mut channel).await?;
+
+            let duration_ms = started_at.elapsed().as_millis().max(1) as u64;
+            let speed = (sent_bytes.saturating_mul(1000)) / duration_ms;
+            on_progress(SftpTransferProgress {
+                transfer_id: transfer_id.clone(),
+                file_name: file_name.clone(),
+                direction: "upload".to_string(),
+                mode: mode.clone(),
+                mode_detail: mode_detail.clone(),
+                bytes_transferred: total_bytes,
+                total_bytes,
+                speed_bytes_per_sec: speed,
+                percent: 100,
+                status: "completed".to_string(),
+                error_message: None,
+            });
+            return Ok(SftpTransferResult {
+                transfer_id,
+                file_name,
                 mode,
-                shell_quote(&remote_dest)
-            );
-            pool.exec_bytes_on_host(&host, &cmd, Some(&bytes)).await?;
-            return Ok(());
+                mode_detail,
+                bytes_transferred: total_bytes,
+                duration_ms,
+                speed_bytes_per_sec: speed,
+            });
         }
     }
 
-    // Download: Remote -> Local
+    // Download: Remote -> Local (Streaming 64KB chunks + Auto Fast Sync)
     if source_host_id != "local" && target_host_id == "local" {
         let host = find_host_by_id(source_host_id)?;
         let dst_dir = resolve_local_path(target_dir);
@@ -551,59 +980,374 @@ pub async fn transfer_entry(
             .rsplit('/')
             .next()
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| "Invalid remote source path".to_string())?;
+            .ok_or_else(|| "Invalid remote source path".to_string())?
+            .to_string();
         let parent_dir = match trimmed_src.rfind('/') {
             Some(0) | None => "/",
             Some(idx) => &trimmed_src[..idx],
         };
 
-        let check_dir_cmd = format!(
-            "if [ -d {} ]; then printf 'DIR'; else printf 'FILE'; fi",
-            shell_quote(trimmed_src)
+        let probe_cmd = format!(
+            "if [ -d {p} ]; then printf 'DIR\\t'; (du -sb {p} 2>/dev/null | awk '{{print $1}}') || printf '0'; else printf 'FILE\\t'; (stat -c '%s' {p} 2>/dev/null || stat -f '%z' {p} 2>/dev/null || printf '0'); fi",
+            p = shell_quote(trimmed_src)
         );
-        let kind_bytes = pool.exec_bytes_on_host(&host, &check_dir_cmd, None).await?;
-        let is_dir = String::from_utf8_lossy(&kind_bytes).trim() == "DIR";
+        let probe_out = pool.exec_on_host(&host, &probe_cmd).await?;
+        let mut parts = probe_out.trim().splitn(2, '\t');
+        let is_dir = parts.next().unwrap_or("FILE").trim() == "DIR";
+        let total_bytes = parts
+            .next()
+            .and_then(|s| s.lines().next())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(0)
+            .max(1);
 
         if is_dir {
-            let tar_cmd = format!(
-                "tar -cf - -C {} {}",
-                shell_quote(parent_dir),
-                shell_quote(file_name)
-            );
-            let tar_bytes = pool.exec_bytes_on_host(&host, &tar_cmd, None).await?;
+            let (mode, mode_detail, remote_tar_cmd, local_tar_flags) = if prefer_fast_sync {
+                (
+                    "fast_sync".to_string(),
+                    "Fast Sync (tar-gz 64KB stream)".to_string(),
+                    format!(
+                        "tar -czf - -C {} {}",
+                        shell_quote(parent_dir),
+                        shell_quote(&file_name)
+                    ),
+                    vec!["-xzf", "-", "-C"],
+                )
+            } else {
+                (
+                    "chunk_stream".to_string(),
+                    "Chunk Stream (64KB tar)".to_string(),
+                    format!(
+                        "tar -cf - -C {} {}",
+                        shell_quote(parent_dir),
+                        shell_quote(&file_name)
+                    ),
+                    vec!["-xf", "-", "-C"],
+                )
+            };
+
+            let mut channel = pool.open_exec_channel(&host, &remote_tar_cmd).await?;
             let mut child = Command::new("tar")
-                .args(["-xf", "-", "-C", &dst_dir.to_string_lossy()])
+                .args(&local_tar_flags)
+                .arg(&dst_dir.to_string_lossy().to_string())
                 .stdin(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
-                .map_err(|e| format!("Failed to spawn local tar: {e}"))?;
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(&tar_bytes)
-                    .map_err(|e| format!("Failed to write tar stream locally: {e}"))?;
+                .map_err(|e| format!("Failed to spawn local tar extractor: {e}"))?;
+
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| "Failed to open local tar stdin".to_string())?;
+            let mut received_bytes = 0u64;
+            let mut stderr_buf = Vec::new();
+            let mut exit_code: Option<u32> = None;
+
+            while let Some(msg) = channel.wait().await {
+                match msg {
+                    ChannelMsg::Data { data } => {
+                        stdin
+                            .write_all(&data)
+                            .map_err(|e| format!("Failed writing to local tar stream: {e}"))?;
+                        received_bytes = received_bytes.saturating_add(data.len() as u64);
+                        let elapsed_ms = started_at.elapsed().as_millis().max(1) as u64;
+                        let speed = (received_bytes.saturating_mul(1000)) / elapsed_ms;
+                        let pct = ((received_bytes.saturating_mul(100)) / total_bytes).min(99) as u8;
+                        on_progress(SftpTransferProgress {
+                            transfer_id: transfer_id.clone(),
+                            file_name: file_name.clone(),
+                            direction: "download".to_string(),
+                            mode: mode.clone(),
+                            mode_detail: mode_detail.clone(),
+                            bytes_transferred: received_bytes,
+                            total_bytes,
+                            speed_bytes_per_sec: speed,
+                            percent: pct,
+                            status: "running".to_string(),
+                            error_message: None,
+                        });
+                    }
+                    ChannelMsg::ExtendedData { data, .. } => stderr_buf.extend_from_slice(&data),
+                    ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status),
+                    ChannelMsg::Close => break,
+                    _ => {}
+                }
             }
+            drop(stdin);
             let out = child
                 .wait_with_output()
                 .map_err(|e| format!("Failed waiting for local tar: {e}"))?;
+            if let Some(code) = exit_code {
+                if code != 0 {
+                    return Err(format!(
+                        "Remote archive failed: {}",
+                        String::from_utf8_lossy(&stderr_buf)
+                    ));
+                }
+            }
             if !out.status.success() {
                 return Err(format!(
                     "Failed extracting downloaded folder: {}",
                     String::from_utf8_lossy(&out.stderr)
                 ));
             }
-            return Ok(());
+
+            let duration_ms = started_at.elapsed().as_millis().max(1) as u64;
+            let speed = (received_bytes.saturating_mul(1000)) / duration_ms;
+            on_progress(SftpTransferProgress {
+                transfer_id: transfer_id.clone(),
+                file_name: file_name.clone(),
+                direction: "download".to_string(),
+                mode: mode.clone(),
+                mode_detail: mode_detail.clone(),
+                bytes_transferred: received_bytes,
+                total_bytes: received_bytes.max(1),
+                speed_bytes_per_sec: speed,
+                percent: 100,
+                status: "completed".to_string(),
+                error_message: None,
+            });
+            return Ok(SftpTransferResult {
+                transfer_id,
+                file_name,
+                mode,
+                mode_detail,
+                bytes_transferred: received_bytes,
+                duration_ms,
+                speed_bytes_per_sec: speed,
+            });
         } else {
+            let local_dest = dst_dir.join(&file_name);
+
+            // Fast Sync delta check on download
+            if prefer_fast_sync && local_dest.exists() {
+                if let Some(local_sha) = compute_local_file_sha256(&local_dest, 64 * 1024 * 1024) {
+                    let sha_cmd = format!(
+                        "(sha256sum {p} 2>/dev/null || shasum -a 256 {p} 2>/dev/null) | awk '{{print $1}}'",
+                        p = shell_quote(trimmed_src)
+                    );
+                    if let Ok(remote_sha) = pool.exec_on_host(&host, &sha_cmd).await {
+                        if remote_sha.trim().eq_ignore_ascii_case(&local_sha) {
+                            let duration_ms = started_at.elapsed().as_millis().max(1) as u64;
+                            let detail = "Fast Sync (rsync delta: unchanged - skipped)".to_string();
+                            on_progress(SftpTransferProgress {
+                                transfer_id: transfer_id.clone(),
+                                file_name: file_name.clone(),
+                                direction: "download".to_string(),
+                                mode: "fast_sync".to_string(),
+                                mode_detail: detail.clone(),
+                                bytes_transferred: total_bytes,
+                                total_bytes,
+                                speed_bytes_per_sec: (total_bytes.saturating_mul(1000))
+                                    / duration_ms,
+                                percent: 100,
+                                status: "completed".to_string(),
+                                error_message: None,
+                            });
+                            return Ok(SftpTransferResult {
+                                transfer_id,
+                                file_name,
+                                mode: "fast_sync".to_string(),
+                                mode_detail: detail,
+                                bytes_transferred: total_bytes,
+                                duration_ms,
+                                speed_bytes_per_sec: (total_bytes.saturating_mul(1000))
+                                    / duration_ms,
+                            });
+                        }
+                    }
+                }
+            }
+
+            let (mode, mode_detail) = if prefer_fast_sync {
+                (
+                    "fast_sync".to_string(),
+                    "Fast Sync (direct 64KB stream)".to_string(),
+                )
+            } else {
+                (
+                    "chunk_stream".to_string(),
+                    "Chunk Stream (64KB)".to_string(),
+                )
+            };
+
             let cat_cmd = format!("cat -- {}", shell_quote(trimmed_src));
-            let file_bytes = pool.exec_bytes_on_host(&host, &cat_cmd, None).await?;
-            let local_dest = dst_dir.join(file_name);
-            fs::write(&local_dest, &file_bytes).map_err(|e| {
+            let mut channel = pool.open_exec_channel(&host, &cat_cmd).await?;
+            let mut out_file = fs::File::create(&local_dest).map_err(|e| {
                 format!(
-                    "Failed to save downloaded file '{}': {e}",
+                    "Failed to create downloaded file '{}': {e}",
                     local_dest.display()
                 )
             })?;
-            return Ok(());
+
+            let mut received_bytes = 0u64;
+            let mut stderr_buf = Vec::new();
+            let mut exit_code: Option<u32> = None;
+
+            while let Some(msg) = channel.wait().await {
+                match msg {
+                    ChannelMsg::Data { data } => {
+                        out_file
+                            .write_all(&data)
+                            .map_err(|e| format!("Failed writing chunk to local file: {e}"))?;
+                        received_bytes = received_bytes.saturating_add(data.len() as u64);
+                        let elapsed_ms = started_at.elapsed().as_millis().max(1) as u64;
+                        let speed = (received_bytes.saturating_mul(1000)) / elapsed_ms;
+                        let pct = ((received_bytes.saturating_mul(100)) / total_bytes).min(99) as u8;
+                        on_progress(SftpTransferProgress {
+                            transfer_id: transfer_id.clone(),
+                            file_name: file_name.clone(),
+                            direction: "download".to_string(),
+                            mode: mode.clone(),
+                            mode_detail: mode_detail.clone(),
+                            bytes_transferred: received_bytes,
+                            total_bytes,
+                            speed_bytes_per_sec: speed,
+                            percent: pct,
+                            status: "running".to_string(),
+                            error_message: None,
+                        });
+                    }
+                    ChannelMsg::ExtendedData { data, .. } => stderr_buf.extend_from_slice(&data),
+                    ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status),
+                    ChannelMsg::Close => break,
+                    _ => {}
+                }
+            }
+            out_file
+                .flush()
+                .map_err(|e| format!("Failed flushing downloaded file: {e}"))?;
+            if let Some(code) = exit_code {
+                if code != 0 {
+                    return Err(format!(
+                        "Remote read failed: {}",
+                        String::from_utf8_lossy(&stderr_buf)
+                    ));
+                }
+            }
+
+            let duration_ms = started_at.elapsed().as_millis().max(1) as u64;
+            let speed = (received_bytes.saturating_mul(1000)) / duration_ms;
+            on_progress(SftpTransferProgress {
+                transfer_id: transfer_id.clone(),
+                file_name: file_name.clone(),
+                direction: "download".to_string(),
+                mode: mode.clone(),
+                mode_detail: mode_detail.clone(),
+                bytes_transferred: received_bytes,
+                total_bytes: received_bytes.max(1),
+                speed_bytes_per_sec: speed,
+                percent: 100,
+                status: "completed".to_string(),
+                error_message: None,
+            });
+            return Ok(SftpTransferResult {
+                transfer_id,
+                file_name,
+                mode,
+                mode_detail,
+                bytes_transferred: received_bytes,
+                duration_ms,
+                speed_bytes_per_sec: speed,
+            });
         }
+    }
+
+    // Remote A -> Remote B direct chunk streaming bridge
+    if source_host_id != "local" && target_host_id != "local" {
+        let src_host = find_host_by_id(source_host_id)?;
+        let dst_host = find_host_by_id(target_host_id)?;
+        let trimmed_src = source_path.trim_end_matches('/');
+        let file_name = trimmed_src
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "Invalid remote source path".to_string())?
+            .to_string();
+        let parent_dir = match trimmed_src.rfind('/') {
+            Some(0) | None => "/",
+            Some(idx) => &trimmed_src[..idx],
+        };
+
+        let (mode, mode_detail, src_cmd, dst_cmd) = if prefer_fast_sync {
+            (
+                "fast_sync".to_string(),
+                "Fast Sync (Remote-to-Remote tar-gz bridge)".to_string(),
+                format!(
+                    "tar -czf - -C {} {}",
+                    shell_quote(parent_dir),
+                    shell_quote(&file_name)
+                ),
+                format!(
+                    "mkdir -p -- {} && tar -xzf - -C {}",
+                    shell_quote(target_dir),
+                    shell_quote(target_dir)
+                ),
+            )
+        } else {
+            (
+                "chunk_stream".to_string(),
+                "Chunk Stream (Remote-to-Remote 64KB)".to_string(),
+                format!(
+                    "tar -cf - -C {} {}",
+                    shell_quote(parent_dir),
+                    shell_quote(&file_name)
+                ),
+                format!(
+                    "mkdir -p -- {} && tar -xf - -C {}",
+                    shell_quote(target_dir),
+                    shell_quote(target_dir)
+                ),
+            )
+        };
+
+        let mut src_channel = pool.open_exec_channel(&src_host, &src_cmd).await?;
+        let mut dst_channel = pool.open_exec_channel(&dst_host, &dst_cmd).await?;
+        let mut bridged_bytes = 0u64;
+
+        while let Some(msg) = src_channel.wait().await {
+            match msg {
+                ChannelMsg::Data { data } => {
+                    for chunk in data.chunks(SFTP_CHUNK_SIZE) {
+                        dst_channel
+                            .data(chunk)
+                            .await
+                            .map_err(|e| format!("Failed writing chunk to target host: {e}"))?;
+                    }
+                    bridged_bytes = bridged_bytes.saturating_add(data.len() as u64);
+                    let elapsed_ms = started_at.elapsed().as_millis().max(1) as u64;
+                    let speed = (bridged_bytes.saturating_mul(1000)) / elapsed_ms;
+                    on_progress(SftpTransferProgress {
+                        transfer_id: transfer_id.clone(),
+                        file_name: file_name.clone(),
+                        direction: "remote_to_remote".to_string(),
+                        mode: mode.clone(),
+                        mode_detail: mode_detail.clone(),
+                        bytes_transferred: bridged_bytes,
+                        total_bytes: bridged_bytes,
+                        speed_bytes_per_sec: speed,
+                        percent: 50,
+                        status: "running".to_string(),
+                        error_message: None,
+                    });
+                }
+                ChannelMsg::Close | ChannelMsg::Eof => break,
+                _ => {}
+            }
+        }
+
+        finish_exec_channel(&mut dst_channel).await?;
+        let duration_ms = started_at.elapsed().as_millis().max(1) as u64;
+        let speed = (bridged_bytes.saturating_mul(1000)) / duration_ms;
+        return Ok(SftpTransferResult {
+            transfer_id,
+            file_name,
+            mode,
+            mode_detail,
+            bytes_transferred: bridged_bytes,
+            duration_ms,
+            speed_bytes_per_sec: speed,
+        });
     }
 
     Err("Unsupported transfer direction".to_string())
@@ -699,6 +1443,50 @@ lrwxr-xr-x\t777\t12\t1700000300\tcurrent\n\
                 .unwrap();
             let listing_after = list_dir(&pool, "local", &tmp_str).await.unwrap();
             assert_eq!(listing_after.entries.len(), 1);
+        });
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn detects_compressed_files_and_computes_sha256_and_progress() {
+        assert!(is_already_compressed("archive.tar.gz"));
+        assert!(is_already_compressed("video.MP4"));
+        assert!(!is_already_compressed("app.tsx"));
+        assert!(!is_already_compressed("server.log"));
+
+        let pool = SshPool::default();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let tmp = std::env::temp_dir().join(format!("ssh-box-fastsync-test-{}", uuid::Uuid::new_v4()));
+        let src_dir = tmp.join("src");
+        let dst_dir = tmp.join("dst");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&dst_dir).unwrap();
+
+        let sample_file = src_dir.join("data.txt");
+        fs::write(&sample_file, b"fast-sync-chunk-payload").unwrap();
+
+        let sha = compute_local_file_sha256(&sample_file, 1024 * 1024).unwrap();
+        assert_eq!(sha.len(), 64);
+        assert_eq!(compute_local_dir_size(&src_dir), 23);
+
+        rt.block_on(async {
+            let mut events = Vec::new();
+            let res = transfer_entry_with_progress(
+                &pool,
+                "local",
+                &sample_file.to_string_lossy(),
+                "local",
+                &dst_dir.to_string_lossy(),
+                true,
+                |ev| events.push(ev),
+            )
+            .await
+            .unwrap();
+            assert_eq!(res.file_name, "data.txt");
+            assert_eq!(res.bytes_transferred, 23);
+            assert!(!events.is_empty());
+            assert_eq!(events.last().unwrap().percent, 100);
         });
 
         let _ = fs::remove_dir_all(&tmp);

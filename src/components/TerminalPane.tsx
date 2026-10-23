@@ -32,6 +32,7 @@ interface TerminalPaneProps {
   isActive: boolean;
   showFocusBorder: boolean;
   themeConfig: ThemeConfig;
+  isVisible?: boolean;
   language?: AppLanguage;
   broadcastTargetPaneIds?: string[];
   onFocus: () => void;
@@ -81,6 +82,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   isActive,
   showFocusBorder,
   themeConfig,
+  isVisible = true,
   language = "vi",
   broadcastTargetPaneIds,
   onFocus,
@@ -702,8 +704,14 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     const fitAddon = fitRef.current;
     if (!term) return;
 
-    term.options.theme = { ...resolveXtermTheme(themeConfig) };
+    const nextTheme = resolveXtermTheme(themeConfig);
+    term.options.theme = { ...nextTheme };
     term.options.cursorStyle = themeConfig.cursorStyle;
+
+    if (!isVisible) {
+      return;
+    }
+
     const nextFontCss = resolveTerminalFontCss(themeConfig.fontFamily);
     const nextLineHeight = themeConfig.lineHeight || 1.2;
     const nextLetterSpacing = themeConfig.letterSpacing ?? 0;
@@ -714,10 +722,12 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       term.options.lineHeight !== nextLineHeight ||
       term.options.letterSpacing !== nextLetterSpacing;
 
-    term.options.fontSize = themeConfig.fontSize;
-    term.options.fontFamily = nextFontCss;
-    term.options.lineHeight = nextLineHeight;
-    term.options.letterSpacing = nextLetterSpacing;
+    if (layoutChanged) {
+      term.options.fontSize = themeConfig.fontSize;
+      term.options.fontFamily = nextFontCss;
+      term.options.lineHeight = nextLineHeight;
+      term.options.letterSpacing = nextLetterSpacing;
+    }
 
     try {
       term.refresh(0, Math.max(0, term.rows - 1));
@@ -725,24 +735,24 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       // ignore refresh error before open
     }
 
-    if (layoutChanged) {
-      requestAnimationFrame(() => {
-        if (!fitAddon || !termRef.current) return;
-        try {
-          fitAddon.fit();
-          const cols = Math.max(20, termRef.current.cols);
-          const rows = Math.max(5, termRef.current.rows);
-          invoke("resize_pane", {
-            paneId: leaf.paneId,
-            cols,
-            rows,
-          }).catch(() => undefined);
-        } catch {
-          // ignore transient fit error
-        }
-      });
-    }
+    requestAnimationFrame(() => {
+      if (!fitAddon || !termRef.current) return;
+      try {
+        fitAddon.fit();
+        termRef.current.refresh(0, Math.max(0, termRef.current.rows - 1));
+        const cols = Math.max(20, termRef.current.cols);
+        const rows = Math.max(5, termRef.current.rows);
+        invoke("resize_pane", {
+          paneId: leaf.paneId,
+          cols,
+          rows,
+        }).catch(() => undefined);
+      } catch {
+        // ignore transient fit error
+      }
+    });
   }, [
+    isVisible,
     themeConfig.terminalPreset,
     themeConfig.cursorStyle,
     themeConfig.fontFamily,
@@ -1038,7 +1048,11 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       {/* Xterm.js WebGL2 Surface */}
       <div
         ref={containerRef}
-        className="flex-1 w-full h-full px-1.5 py-1 overflow-hidden select-none"
+        style={{
+          backgroundColor: resolvedXtermTheme.background,
+          color: resolvedXtermTheme.foreground,
+        }}
+        className="flex-1 w-full h-full px-1.5 py-1 overflow-hidden select-none transition-colors duration-150"
       />
 
       {/* Mobile / Touch Extra Keys Bar (iOS, iPadOS, Android & Touch Screens) */}

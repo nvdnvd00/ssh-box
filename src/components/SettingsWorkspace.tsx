@@ -1010,6 +1010,115 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
                   </div>
                 </section>
 
+                {/* Color & Cursor Configuration Group */}
+                <section className="space-y-2">
+                  <h2 className="text-[13px] font-semibold text-foreground px-1">
+                    Color
+                  </h2>
+                  <div className="rounded-2xl border border-border/80 bg-card/65 divide-y divide-border/60">
+                    <div className="flex items-center justify-between px-4 py-3.5">
+                      <span className="text-[13px] font-medium text-foreground">
+                        Color Palette
+                      </span>
+                      <div className="w-56">
+                        <SelectField
+                          value={themeConfig.terminalPreset}
+                          onChange={(val) =>
+                            onChangeTheme((prev) => ({
+                              ...prev,
+                              terminalPreset: val as TerminalPresetId,
+                            }))
+                          }
+                          options={TERMINAL_PRESETS.map((p) => ({
+                            value: p.id,
+                            label: p.name,
+                          }))}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between px-4 py-3.5">
+                      <span className="text-[13px] font-medium text-foreground">
+                        Cursor Style
+                      </span>
+                      <div className="inline-flex p-0.5 rounded-xl bg-secondary/90 border border-border/80">
+                        {(
+                          [
+                            { id: "block", label: "Block" },
+                            { id: "bar", label: "Bar" },
+                            { id: "underline", label: "Underline" },
+                          ] as { id: TerminalCursorStyle; label: string }[]
+                        ).map((c) => (
+                          <button
+                            key={c.id}
+                            type="button"
+                            onClick={() =>
+                              onChangeTheme((prev) => ({
+                                ...prev,
+                                cursorStyle: c.id,
+                              }))
+                            }
+                            className={`px-3 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+                              themeConfig.cursorStyle === c.id
+                                ? "bg-card text-foreground shadow-2xs"
+                                : "text-muted-foreground hover:text-foreground"
+                            }`}
+                          >
+                            {c.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Visual Color Palette Grid */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-2">
+                    {TERMINAL_PRESETS.map((preset) => {
+                      const active = themeConfig.terminalPreset === preset.id;
+                      return (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          onClick={() =>
+                            onChangeTheme((prev) => ({
+                              ...prev,
+                              terminalPreset: preset.id,
+                            }))
+                          }
+                          className={`flex flex-col gap-2 p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                            active
+                              ? "border-primary bg-primary/10 shadow-xs"
+                              : "border-border/70 bg-card/50 hover:bg-accent/40"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-medium text-foreground truncate">
+                              {preset.name}
+                            </span>
+                            {active && (
+                              <Check className="w-3.5 h-3.5 text-primary shrink-0" />
+                            )}
+                          </div>
+                          <div
+                            className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg border border-white/10"
+                            style={{
+                              backgroundColor: preset.theme.background,
+                            }}
+                          >
+                            {preset.swatches.map((hex, i) => (
+                              <span
+                                key={i}
+                                className="w-3 h-3 rounded-full"
+                                style={{ backgroundColor: hex }}
+                              />
+                            ))}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+
                 {/* Font Configuration Group */}
                 <section className="space-y-2">
                   <h2 className="text-[13px] font-semibold text-foreground px-1">
@@ -1204,115 +1313,6 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
                         </div>
                       </div>
                     </div>
-                  </div>
-                </section>
-
-                {/* Color & Cursor Configuration Group */}
-                <section className="space-y-2">
-                  <h2 className="text-[13px] font-semibold text-foreground px-1">
-                    Color
-                  </h2>
-                  <div className="rounded-2xl border border-border/80 bg-card/65 divide-y divide-border/60">
-                    <div className="flex items-center justify-between px-4 py-3.5">
-                      <span className="text-[13px] font-medium text-foreground">
-                        Color Palette
-                      </span>
-                      <div className="w-56">
-                        <SelectField
-                          value={themeConfig.terminalPreset}
-                          onChange={(val) =>
-                            onChangeTheme((prev) => ({
-                              ...prev,
-                              terminalPreset: val as TerminalPresetId,
-                            }))
-                          }
-                          options={TERMINAL_PRESETS.map((p) => ({
-                            value: p.id,
-                            label: p.name,
-                          }))}
-                        />
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-between px-4 py-3.5">
-                      <span className="text-[13px] font-medium text-foreground">
-                        Cursor Style
-                      </span>
-                      <div className="inline-flex p-0.5 rounded-xl bg-secondary/90 border border-border/80">
-                        {(
-                          [
-                            { id: "block", label: "Block" },
-                            { id: "bar", label: "Bar" },
-                            { id: "underline", label: "Underline" },
-                          ] as { id: TerminalCursorStyle; label: string }[]
-                        ).map((c) => (
-                          <button
-                            key={c.id}
-                            type="button"
-                            onClick={() =>
-                              onChangeTheme((prev) => ({
-                                ...prev,
-                                cursorStyle: c.id,
-                              }))
-                            }
-                            className={`px-3 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer ${
-                              themeConfig.cursorStyle === c.id
-                                ? "bg-card text-foreground shadow-2xs"
-                                : "text-muted-foreground hover:text-foreground"
-                            }`}
-                          >
-                            {c.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Visual Color Palette Grid */}
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-2">
-                    {TERMINAL_PRESETS.map((preset) => {
-                      const active = themeConfig.terminalPreset === preset.id;
-                      return (
-                        <button
-                          key={preset.id}
-                          type="button"
-                          onClick={() =>
-                            onChangeTheme((prev) => ({
-                              ...prev,
-                              terminalPreset: preset.id,
-                            }))
-                          }
-                          className={`flex flex-col gap-2 p-3 rounded-xl border text-left transition-all cursor-pointer ${
-                            active
-                              ? "border-primary bg-primary/10 shadow-xs"
-                              : "border-border/70 bg-card/50 hover:bg-accent/40"
-                          }`}
-                        >
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-medium text-foreground truncate">
-                              {preset.name}
-                            </span>
-                            {active && (
-                              <Check className="w-3.5 h-3.5 text-primary shrink-0" />
-                            )}
-                          </div>
-                          <div
-                            className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg border border-white/10"
-                            style={{
-                              backgroundColor: preset.theme.background,
-                            }}
-                          >
-                            {preset.swatches.map((hex, i) => (
-                              <span
-                                key={i}
-                                className="w-3 h-3 rounded-full"
-                                style={{ backgroundColor: hex }}
-                              />
-                            ))}
-                          </div>
-                        </button>
-                      );
-                    })}
                   </div>
                 </section>
               </>

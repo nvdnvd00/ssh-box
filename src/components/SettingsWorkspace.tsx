@@ -1,8 +1,10 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Activity,
   Check,
+  Download,
+  Globe,
   Info,
   KeyRound,
   LayoutGrid,
@@ -16,13 +18,16 @@ import {
   Tag,
   Terminal as TerminalIcon,
   Trash2,
+  Upload,
   Wifi,
   Wrench,
+  Zap,
 } from "lucide-react";
 import {
   ACCENT_COLORS,
   AccentColorId,
   APP_THEMES,
+  AppLanguage,
   AppSettingsConfig,
   AppThemeId,
   DEFAULT_APP_SETTINGS,
@@ -35,6 +40,7 @@ import {
   TerminalPresetId,
   ThemeConfig,
 } from "../themes";
+import { getI18n } from "../i18n";
 import { MachineTag, ResourcesStoreData } from "../types";
 import { SelectField } from "./SelectField";
 
@@ -58,6 +64,7 @@ interface SettingsWorkspaceProps {
     updater: (prev: AppSettingsConfig) => AppSettingsConfig,
   ) => void;
   onUpdateResources: (next: ResourcesStoreData) => void;
+  onRefreshHosts?: () => void;
 }
 
 const TAG_COLORS = [
@@ -79,14 +86,65 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
   onChangeTheme,
   onChangeAppSettings,
   onUpdateResources,
+  onRefreshHosts,
 }) => {
+  const lang: AppLanguage = appSettings.language ?? "vi";
+  const i18n = getI18n(lang);
   const [activeTab, setActiveTab] = useState<SettingsTabId>(initialSection);
   const [newTagName, setNewTagName] = useState("");
   const [newTagColor, setNewTagColor] = useState(TAG_COLORS[0]);
+  const [vaultStatusMsg, setVaultStatusMsg] = useState<string | null>(null);
+  const vaultFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const activePreset =
     TERMINAL_PRESETS.find((p) => p.id === themeConfig.terminalPreset) ??
     TERMINAL_PRESETS[0];
+
+  const handleExportVaultBackup = async () => {
+    try {
+      const jsonContent = await invoke<string>("export_vault_backup");
+      const blob = new Blob([jsonContent], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ssh-box-vault-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setVaultStatusMsg(
+        lang === "vi"
+          ? "Đã xuất bản sao lưu Vault (.json) thành công!"
+          : "Vault backup (.json) exported successfully!",
+      );
+      setTimeout(() => setVaultStatusMsg(null), 4500);
+    } catch (e) {
+      setVaultStatusMsg(String(e));
+    }
+  };
+
+  const handleImportVaultBackup = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const updatedResources = await invoke<ResourcesStoreData>(
+        "import_vault_backup",
+        { jsonPayload: text },
+      );
+      onUpdateResources(updatedResources);
+      onRefreshHosts?.();
+      setVaultStatusMsg(
+        lang === "vi"
+          ? "Đã khôi phục cấu hình Vault từ file JSON thành công!"
+          : "Vault configuration restored from JSON successfully!",
+      );
+      setTimeout(() => setVaultStatusMsg(null), 4500);
+    } catch (err) {
+      setVaultStatusMsg(String(err));
+    }
+  };
 
   const handleAddTag = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -123,56 +181,56 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
     items: { id: SettingsTabId; label: string; icon: React.ReactNode }[];
   }[] = [
     {
-      title: "App",
+      title: lang === "vi" ? "Ứng dụng" : "App",
       items: [
         {
           id: "general",
-          label: "General",
+          label: lang === "vi" ? "Tổng quan" : "General",
           icon: <Sliders className="w-4 h-4 text-sky-400" />,
         },
         {
           id: "security",
-          label: "Security & Privacy",
+          label: lang === "vi" ? "Bảo mật & Sao lưu" : "Security & Privacy",
           icon: <ShieldCheck className="w-4 h-4 text-emerald-400" />,
         },
       ],
     },
     {
-      title: "Features",
+      title: lang === "vi" ? "Tính năng" : "Features",
       items: [
         {
           id: "connections",
-          label: "Connections",
+          label: lang === "vi" ? "Kết nối" : "Connections",
           icon: <Wifi className="w-4 h-4 text-cyan-400" />,
         },
         {
           id: "dashboard",
-          label: "Dashboard",
+          label: i18n.navDashboard,
           icon: <LayoutGrid className="w-4 h-4 text-indigo-400" />,
         },
         {
           id: "terminal",
-          label: "Terminal",
+          label: i18n.navTerminal,
           icon: <TerminalIcon className="w-4 h-4 text-amber-400" />,
         },
         {
           id: "tags",
-          label: "Machine Tags",
+          label: lang === "vi" ? "Nhãn máy chủ (Tags)" : "Machine Tags",
           icon: <Tag className="w-4 h-4 text-pink-400" />,
         },
       ],
     },
     {
-      title: "Help",
+      title: lang === "vi" ? "Trợ giúp" : "Help",
       items: [
         {
           id: "diagnostics",
-          label: "Diagnostics",
+          label: lang === "vi" ? "Chẩn đoán" : "Diagnostics",
           icon: <Wrench className="w-4 h-4 text-orange-400" />,
         },
         {
           id: "about",
-          label: "About",
+          label: lang === "vi" ? "Giới thiệu" : "About",
           icon: <Info className="w-4 h-4 text-violet-400" />,
         },
       ],
@@ -242,9 +300,109 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
 
         <div className="flex-1 overflow-y-auto px-8 py-6">
           <div className="max-w-2xl space-y-7 pb-10 ui-fade-slide">
-            {/* GENERAL TAB: App Theme & Accent Color (Separated from Terminal Theme) */}
+            {/* GENERAL TAB: Language, Fast Sync, App Theme & Accent Color */}
             {activeTab === "general" && (
               <>
+                <section className="space-y-2.5">
+                  <h2 className="text-[13px] font-semibold text-foreground px-1">
+                    {i18n.settingsLanguageLabel}
+                  </h2>
+                  <div className="rounded-2xl border border-border/80 bg-card/65 divide-y divide-border/60 overflow-hidden">
+                    <div className="flex items-center justify-between px-4 py-3.5">
+                      <div className="flex items-start gap-3">
+                        <div className="p-2 rounded-xl bg-sky-500/10 text-sky-400 border border-sky-500/20">
+                          <Globe className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <div className="text-[13px] font-medium text-foreground">
+                            {i18n.settingsLanguageLabel}
+                          </div>
+                          <div className="text-[11px] text-muted-foreground">
+                            {i18n.settingsLanguageDesc}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 bg-secondary/70 p-1 rounded-xl border border-border/70">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onChangeAppSettings((prev) => ({
+                              ...prev,
+                              language: "vi",
+                            }))
+                          }
+                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                            lang === "vi"
+                              ? "bg-primary text-primary-foreground shadow-xs"
+                              : "text-muted-foreground hover:text-foreground"
+                          }`}
+                        >
+                          Tiếng Việt
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onChangeAppSettings((prev) => ({
+                              ...prev,
+                              language: "en",
+                            }))
+                          }
+                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                            lang === "en"
+                              ? "bg-primary text-primary-foreground shadow-xs"
+                              : "text-muted-foreground hover:text-foreground"
+                          }`}
+                        >
+                          English
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between px-4 py-3.5">
+                      <div className="flex items-start gap-3">
+                        <div className="p-2 rounded-xl bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                          <Zap className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <div className="text-[13px] font-medium text-foreground flex items-center gap-2">
+                            <span>{i18n.settingsFastSyncLabel}</span>
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/35">
+                              {i18n.sftpFastSyncTag}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-muted-foreground">
+                            {i18n.settingsFastSyncDesc}
+                          </div>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={appSettings.fastSyncEnabled ?? true}
+                        onClick={() =>
+                          onChangeAppSettings((prev) => ({
+                            ...prev,
+                            fastSyncEnabled: !(prev.fastSyncEnabled ?? true),
+                          }))
+                        }
+                        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                          (appSettings.fastSyncEnabled ?? true)
+                            ? "bg-primary"
+                            : "bg-secondary"
+                        }`}
+                      >
+                        <span
+                          className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                            (appSettings.fastSyncEnabled ?? true)
+                              ? "translate-x-5"
+                              : "translate-x-0"
+                          }`}
+                        />
+                      </button>
+                    </div>
+                  </div>
+                </section>
+
                 <section className="space-y-2.5">
                   <h2 className="text-[13px] font-semibold text-foreground px-1">
                     Application Surface Theme
@@ -405,6 +563,47 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
                       Enforced
                     </span>
                   </div>
+                </div>
+
+                <h2 className="text-[13px] font-semibold text-foreground px-1 pt-2">
+                  {i18n.settingsBackupTitle}
+                </h2>
+                <div className="rounded-2xl border border-border/80 bg-card/65 p-4 space-y-3">
+                  <div className="text-xs text-muted-foreground">
+                    {lang === "vi"
+                      ? "Xuất hoặc khôi phục toàn bộ cấu hình Máy chủ, Định danh, Khóa SSH, Proxy, Chuyển tiếp cổng và Snippets dưới dạng file JSON (mật khẩu và khóa bí mật vẫn được bảo vệ riêng trong macOS Keychain)."
+                      : "Export or restore all Hosts, Identities, SSH Keys, Proxy Profiles, Port Forwarding rules, and Snippets as a JSON file (passwords and private keys remain protected inside macOS Keychain)."}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <button
+                      type="button"
+                      onClick={handleExportVaultBackup}
+                      className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold bg-primary text-primary-foreground hover:opacity-90 transition-all cursor-pointer"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      {i18n.settingsBackupExport}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => vaultFileInputRef.current?.click()}
+                      className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold bg-secondary text-foreground border border-border hover:bg-accent/70 transition-all cursor-pointer"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      {i18n.settingsBackupImport}
+                    </button>
+                    <input
+                      ref={vaultFileInputRef}
+                      type="file"
+                      accept=".json,application/json"
+                      className="hidden"
+                      onChange={handleImportVaultBackup}
+                    />
+                  </div>
+                  {vaultStatusMsg && (
+                    <div className="text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/25 rounded-xl px-3 py-2">
+                      {vaultStatusMsg}
+                    </div>
+                  )}
                 </div>
               </section>
             )}

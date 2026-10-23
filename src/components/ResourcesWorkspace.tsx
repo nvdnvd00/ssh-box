@@ -42,6 +42,7 @@ import {
   DockerPanelTab,
   HostEntry,
   IdentityItem,
+  KnownHostEntry,
   MachineAuthMethod,
   MachineGroup,
   MachineTag,
@@ -54,12 +55,15 @@ import {
   SshKeyItem,
   TabResources,
 } from "../types";
+import { AppSettingsConfig } from "../themes";
+import { getI18n } from "../i18n";
 import { SelectField } from "./SelectField";
 import { SftpWorkspace } from "./SftpWorkspace";
 
 interface ResourcesWorkspaceProps {
   hosts: HostEntry[];
   resources: ResourcesStoreData;
+  appSettings?: AppSettingsConfig;
   activeHostId: string;
   initialTab?: TabResources;
   hideSidebar?: boolean;
@@ -71,7 +75,7 @@ interface ResourcesWorkspaceProps {
   onConnectHost: (host: HostEntry) => void;
   onInspectMachine?: (hostId: string) => void;
   onOpenLocalTerminal?: () => void;
-  onRunSnippetInActivePane?: (code: string) => void;
+  onRunSnippetInActivePane?: (code: string, snippetName?: string) => void;
 }
 
 const TAG_PALETTE = [
@@ -92,6 +96,7 @@ function formatUnixDate(ts?: number | null): string {
 export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
   hosts,
   resources,
+  appSettings,
   activeHostId,
   initialTab = "machines",
   hideSidebar = false,
@@ -105,7 +110,28 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
   onOpenLocalTerminal,
   onRunSnippetInActivePane,
 }) => {
+  const t = getI18n(appSettings?.language);
   const [activeSubTab, setActiveSubTab] = useState<TabResources>(initialTab);
+  const [knownHosts, setKnownHosts] = useState<KnownHostEntry[]>([]);
+  const [exportKeyModal, setExportKeyModal] = useState<{
+    keyItem: SshKeyItem;
+    targetHostId: string;
+    password: string;
+    busy: boolean;
+    successMsg?: string;
+  } | null>(null);
+
+  const loadKnownHosts = useCallback(() => {
+    invoke<KnownHostEntry[]>("list_known_hosts")
+      .then((list) => setKnownHosts(list))
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    if (activeSubTab === "knownHosts") {
+      loadKnownHosts();
+    }
+  }, [activeSubTab, loadKnownHosts]);
   const [sftpTargetHostId, setSftpTargetHostId] = useState<string>(activeHostId);
   const [displayStyle, setDisplayStyle] =
     useState<ResourceDisplayStyle>("grid");
@@ -1496,24 +1522,41 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                         </div>
                       )}
                     </div>
-                    <div className="flex items-center justify-between pt-2.5 border-t border-border/60">
-                      <button
-                        type="button"
-                        onClick={() => handleCopyPubKey(k)}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-secondary hover:bg-accent text-xs font-medium text-foreground cursor-pointer"
-                      >
-                        {copiedKeyId === k.id ? (
-                          <>
-                            <Check className="w-3.5 h-3.5 text-emerald-400" />
-                            Copied Public Key
-                          </>
-                        ) : (
-                          <>
-                            <Copy className="w-3.5 h-3.5 text-primary" />
-                            Copy Public Key
-                          </>
-                        )}
-                      </button>
+                    <div className="flex items-center justify-between pt-2.5 border-t border-border/60 gap-2">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <button
+                          type="button"
+                          onClick={() => handleCopyPubKey(k)}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-secondary hover:bg-accent text-xs font-medium text-foreground cursor-pointer"
+                        >
+                          {copiedKeyId === k.id ? (
+                            <>
+                              <Check className="w-3.5 h-3.5 text-emerald-400" />
+                              Copied
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3.5 h-3.5 text-primary" />
+                              Copy Public Key
+                            </>
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setExportKeyModal({
+                              keyItem: k,
+                              targetHostId: hosts[0]?.id ?? "",
+                              password: "",
+                              busy: false,
+                            })
+                          }
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-primary/15 hover:bg-primary/25 text-xs font-semibold text-primary border border-primary/30 cursor-pointer"
+                        >
+                          <Server className="w-3.5 h-3.5" />
+                          <span>{t.exportKeyToHostBtn}</span>
+                        </button>
+                      </div>
                       <button
                         type="button"
                         onClick={() => handleDeleteKey(k.id)}
@@ -1525,6 +1568,125 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                     </div>
                   </div>
                 ))
+              )}
+            </div>
+          )}
+
+          {/* 3B. KNOWN HOSTS MANAGER TAB */}
+          {activeSubTab === "knownHosts" && (
+            <div className="space-y-4">
+              <div className="p-4 rounded-2xl bg-card border border-border flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+                    <Shield className="w-4 h-4 text-teal-400" />
+                    <span>{t.knownHostsTitle}</span>
+                  </h3>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    {t.knownHostsSubtitle}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={loadKnownHosts}
+                    className="px-3 py-1.5 rounded-xl bg-secondary hover:bg-accent text-xs font-medium text-foreground inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>{t.sftpRefresh}</span>
+                  </button>
+                  {knownHosts.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          const next =
+                            await invoke<KnownHostEntry[]>("clear_known_hosts");
+                          setKnownHosts(next);
+                        } catch (err) {
+                          setErrorBanner(String(err));
+                        }
+                      }}
+                      className="px-3 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-xs font-semibold text-rose-300 border border-rose-500/30 inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>{t.knownHostsClearAll}</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {knownHosts.length === 0 ? (
+                <div className="py-12 text-center text-xs text-muted-foreground rounded-2xl bg-card/50 border border-border/60">
+                  {t.knownHostsEmpty}
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {knownHosts
+                    .filter((kh) => {
+                      const q = searchQuery.trim().toLowerCase();
+                      if (!q) return true;
+                      return (
+                        kh.hostPattern.toLowerCase().includes(q) ||
+                        kh.keyType.toLowerCase().includes(q) ||
+                        kh.fingerprint.toLowerCase().includes(q)
+                      );
+                    })
+                    .map((kh) => (
+                      <div
+                        key={kh.id}
+                        className="p-4 rounded-2xl bg-card border border-border hover:border-teal-500/40 transition-all flex items-center justify-between gap-3"
+                      >
+                        <div className="min-w-0 space-y-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold font-mono text-foreground truncate">
+                              {kh.hostPattern}
+                            </span>
+                            <span className="px-2 py-0.5 rounded-full bg-teal-500/15 text-teal-300 border border-teal-500/30 font-mono text-[10px]">
+                              {kh.keyType}
+                            </span>
+                          </div>
+                          <div className="text-[11px] font-mono text-emerald-400 truncate">
+                            {kh.fingerprint}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              navigator.clipboard
+                                .writeText(kh.fingerprint)
+                                .catch(() => undefined);
+                            }}
+                            title="Copy SHA-256 Fingerprint"
+                            className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground hover:text-foreground cursor-pointer"
+                          >
+                            <Copy className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                const next = await invoke<KnownHostEntry[]>(
+                                  "delete_known_host",
+                                  {
+                                    hostPattern: kh.hostPattern,
+                                    keyType: kh.keyType,
+                                  },
+                                );
+                                setKnownHosts(next);
+                              } catch (err) {
+                                setErrorBanner(String(err));
+                              }
+                            }}
+                            title={t.knownHostsDelete}
+                            className="p-1.5 rounded-lg hover:bg-rose-500/20 text-muted-foreground hover:text-rose-400 cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                </div>
               )}
             </div>
           )}
@@ -2591,6 +2753,8 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
               <SftpWorkspace
                 hosts={hosts}
                 initialRemoteHostId={sftpTargetHostId || activeHostId}
+                language={appSettings?.language}
+                defaultFastSync={appSettings?.fastSyncEnabled}
               />
             </div>
           )}
@@ -2939,6 +3103,85 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                       </div>
                     </>
                   )}
+                </div>
+              </div>
+
+              {/* 5. Advanced SSH Security & Startup Automation (Agent Forwarding, Startup Command, Env Vars) */}
+              <div className="space-y-1.5">
+                <div className="text-xs font-semibold text-foreground px-1">
+                  SSH Automation & Agent Forwarding
+                </div>
+                <div className="rounded-2xl border border-border/80 bg-card/70 divide-y divide-border/60">
+                  <div className="flex items-center justify-between px-4 py-3 gap-4">
+                    <div>
+                      <div className="text-[13px] font-medium text-foreground">
+                        {t.hostAgentForwarding}
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">
+                        {t.hostAgentForwardingDesc}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={Boolean(editingHost.agentForwarding)}
+                      onClick={() =>
+                        setEditingHost({
+                          ...editingHost,
+                          agentForwarding: !editingHost.agentForwarding,
+                        })
+                      }
+                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ${
+                        editingHost.agentForwarding
+                          ? "bg-primary"
+                          : "bg-secondary"
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md transition duration-200 ${
+                          editingHost.agentForwarding
+                            ? "translate-x-5"
+                            : "translate-x-0"
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  <div className="px-4 py-2.5 space-y-1.5">
+                    <div className="text-[12px] font-medium text-foreground">
+                      {t.hostStartupCommand}
+                    </div>
+                    <input
+                      type="text"
+                      value={editingHost.startupCommand ?? ""}
+                      onChange={(e) =>
+                        setEditingHost({
+                          ...editingHost,
+                          startupCommand: e.target.value,
+                        })
+                      }
+                      placeholder={t.hostStartupCommandPlaceholder}
+                      className="w-full px-3 py-1.5 rounded-xl bg-secondary/75 border border-border/80 text-xs font-mono text-foreground focus:outline-none focus:border-primary"
+                    />
+                  </div>
+
+                  <div className="px-4 py-2.5 space-y-1.5">
+                    <div className="text-[12px] font-medium text-foreground">
+                      {t.hostEnvVars}
+                    </div>
+                    <textarea
+                      rows={2}
+                      value={editingHost.envVars ?? ""}
+                      onChange={(e) =>
+                        setEditingHost({
+                          ...editingHost,
+                          envVars: e.target.value,
+                        })
+                      }
+                      placeholder={t.hostEnvVarsPlaceholder}
+                      className="w-full px-3 py-1.5 rounded-xl bg-secondary/75 border border-border/80 text-xs font-mono text-foreground focus:outline-none focus:border-primary resize-none"
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -3988,6 +4231,127 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                 {dockerLogsModal.logs || "(No logs output)"}
               </pre>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* 1-Click Export SSH Key to Host Modal (ssh-copy-id) */}
+      {exportKeyModal && (
+        <div className="ui-modal-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
+          <div className="ui-modal-content w-full max-w-md rounded-2xl bg-popover border border-border shadow-2xl overflow-visible">
+            <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <KeyRound className="w-4 h-4 text-primary" />
+                <h3 className="text-sm font-semibold">
+                  {t.exportKeyModalTitle}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setExportKeyModal(null)}
+                className="p-1 rounded-lg hover:bg-secondary cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!exportKeyModal.targetHostId) return;
+                setExportKeyModal({
+                  ...exportKeyModal,
+                  busy: true,
+                  successMsg: undefined,
+                });
+                setErrorBanner(null);
+                try {
+                  await invoke("export_ssh_key_to_host", {
+                    keyId: exportKeyModal.keyItem.id,
+                    hostId: exportKeyModal.targetHostId,
+                    password: exportKeyModal.password.trim() || null,
+                  });
+                  onRefreshHosts();
+                  setExportKeyModal({
+                    ...exportKeyModal,
+                    busy: false,
+                    successMsg: t.exportKeySuccess,
+                  });
+                } catch (err) {
+                  setExportKeyModal({ ...exportKeyModal, busy: false });
+                  setErrorBanner(String(err));
+                }
+              }}
+              className="p-5 space-y-4 text-xs"
+            >
+              <p className="text-muted-foreground leading-relaxed">
+                {t.exportKeyModalSubtitle}
+              </p>
+
+              <div className="p-2.5 rounded-xl bg-secondary/60 border border-border font-mono text-[11px] truncate">
+                {exportKeyModal.keyItem.name} ({exportKeyModal.keyItem.keyType})
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="ui-label">Target SSH Host *</label>
+                <SelectField
+                  value={exportKeyModal.targetHostId}
+                  onChange={(val) =>
+                    setExportKeyModal({
+                      ...exportKeyModal,
+                      targetHostId: val,
+                    })
+                  }
+                  options={hosts.map((h) => ({
+                    value: h.id,
+                    label: `${h.alias || h.hostname} (${h.user}@${h.hostname}:${h.port})`,
+                  }))}
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="ui-label">
+                  Host Password (optional if already in Keychain)
+                </label>
+                <input
+                  type="password"
+                  value={exportKeyModal.password}
+                  onChange={(e) =>
+                    setExportKeyModal({
+                      ...exportKeyModal,
+                      password: e.target.value,
+                    })
+                  }
+                  placeholder="One-time password for ssh-copy-id..."
+                  className="ui-input"
+                />
+              </div>
+
+              {exportKeyModal.successMsg && (
+                <div className="p-3 rounded-xl bg-emerald-500/15 border border-emerald-500/35 text-emerald-300 font-medium flex items-center gap-2">
+                  <Check className="w-4 h-4 shrink-0" />
+                  <span>{exportKeyModal.successMsg}</span>
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setExportKeyModal(null)}
+                  className="h-9 px-4 rounded-xl bg-secondary hover:bg-accent cursor-pointer"
+                >
+                  {t.termCancelBtn}
+                </button>
+                <button
+                  type="submit"
+                  disabled={exportKeyModal.busy || !exportKeyModal.targetHostId}
+                  className="h-9 px-4 rounded-xl bg-primary text-primary-foreground font-semibold disabled:opacity-50 cursor-pointer"
+                >
+                  {exportKeyModal.busy
+                    ? "Exporting..."
+                    : t.exportKeyToHostBtn}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

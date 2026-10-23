@@ -4,27 +4,36 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import {
+  ArrowDown,
+  ArrowUp,
   Columns,
+  Download,
   Keyboard,
   KeyRound,
+  Radio,
   RefreshCw,
   Rows,
+  Search,
   ShieldCheck,
   Terminal as TerminalIcon,
   X,
 } from "lucide-react";
 import { LeafPaneNode, PaneStatus } from "../types";
 import {
+  AppLanguage,
   resolveTerminalFontCss,
   resolveXtermTheme,
   ThemeConfig,
 } from "../themes";
+import { getI18n } from "../i18n";
 
 interface TerminalPaneProps {
   leaf: LeafPaneNode;
   isActive: boolean;
   showFocusBorder: boolean;
   themeConfig: ThemeConfig;
+  language?: AppLanguage;
+  broadcastTargetPaneIds?: string[];
   onFocus: () => void;
   onUpdateStatus: (
     status: PaneStatus,
@@ -41,6 +50,12 @@ interface TerminalPaneProps {
 }
 
 const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
+function stripAnsiCodes(raw: string): string {
+  // eslint-disable-next-line no-control-regex
+  return raw.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*(\x07|\x1b\\)/g, "");
+}
 
 export function computeImeDiff(
   prevRaw: string,
@@ -66,6 +81,8 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   isActive,
   showFocusBorder,
   themeConfig,
+  language = "vi",
+  broadcastTargetPaneIds,
   onFocus,
   onUpdateStatus,
   onTriggerReconnect,
@@ -73,12 +90,32 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   onSplitHorizontal,
   onClosePane,
 }) => {
+  const t = getI18n(language);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const statusRef = useRef<PaneStatus>(leaf.status);
   const trackedInputRef = useRef<string>("");
+  const broadcastTargetsRef = useRef<string[] | undefined>(
+    broadcastTargetPaneIds,
+  );
+  broadcastTargetsRef.current = broadcastTargetPaneIds;
+
   const [retryPassword, setRetryPassword] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchMatchInfo, setSearchMatchInfo] = useState<string>("");
+  const searchCursorRef = useRef<{ row: number; col: number }>({
+    row: -1,
+    col: -1,
+  });
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [isRecordingLog, setIsRecordingLog] = useState(false);
+  const isRecordingLogRef = useRef(false);
+  isRecordingLogRef.current = isRecordingLog;
+  const recordingFileNameRef = useRef<string>("");
+  const [savedLogNotice, setSavedLogNotice] = useState<string | null>(null);
   const [showExtraKeys, setShowExtraKeys] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     return (
@@ -115,11 +152,105 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       setAltArmed(false);
     }
     const bytes = Array.from(textEncoder.encode(out));
-    invoke("write_pane_input", {
-      paneId: leaf.paneId,
-      data: bytes,
-    }).catch(() => undefined);
+    const targets =
+      broadcastTargetsRef.current && broadcastTargetsRef.current.length > 0
+        ? broadcastTargetsRef.current
+        : [leaf.paneId];
+    for (const targetPaneId of targets) {
+      invoke("write_pane_input", {
+        paneId: targetPaneId,
+        data: bytes,
+      }).catch(() => undefined);
+    }
     term?.focus();
+  };
+
+  const runBufferSearch = (query: string, direction: "next" | "prev") => {
+    const term = termRef.current;
+    if (!term || !query.trim()) {
+      setSearchMatchInfo("");
+      return;
+    }
+    const q = query.toLowerCase();
+    const buf = term.buffer.active;
+    const totalLines = buf.length;
+    const matches: { row: number; col: number }[] = [];
+
+    for (let r = 0; r < totalLines; r++) {
+      const lineStr = buf.getLine(r)?.translateToString(true) ?? "";
+      const lower = lineStr.toLowerCase();
+      let idx = lower.indexOf(q);
+      while (idx !== -1) {
+        matches.push({ row: r, col: idx });
+        idx = lower.indexOf(q, idx + 1);
+      }
+    }
+
+    if (matches.length === 0) {
+      setSearchMatchInfo("0/0");
+      term.clearSelection();
+      return;
+    }
+
+    const cur = searchCursorRef.current;
+    let pickIdx = 0;
+    if (direction === "next") {
+      const found = matches.findIndex(
+        (m) => m.row > cur.row || (m.row === cur.row && m.col > cur.col),
+      );
+      pickIdx = found !== -1 ? found : 0;
+    } else {
+      let found = -1;
+      for (let i = matches.length - 1; i >= 0; i--) {
+        if (
+          matches[i].row < cur.row ||
+          (matches[i].row === cur.row && matches[i].col < cur.col)
+        ) {
+          found = i;
+          break;
+        }
+      }
+      pickIdx = found !== -1 ? found : matches.length - 1;
+    }
+
+    const chosen = matches[pickIdx];
+    searchCursorRef.current = chosen;
+    setSearchMatchInfo(`${pickIdx + 1}/${matches.length}`);
+    term.select(chosen.col, chosen.row, query.length);
+    term.scrollToLine(Math.max(0, chosen.row - 4));
+  };
+
+  const handleToggleLiveLog = () => {
+    if (isRecordingLog) {
+      setIsRecordingLog(false);
+    } else {
+      const safeTitle = leaf.title.replace(/[^a-zA-Z0-9._-]/g, "_");
+      recordingFileNameRef.current = `${safeTitle}-${Date.now()}.log`;
+      setIsRecordingLog(true);
+    }
+  };
+
+  const handleExportSessionLog = async () => {
+    const term = termRef.current;
+    if (!term) return;
+    const buf = term.buffer.active;
+    const lines: string[] = [];
+    for (let r = 0; r < buf.length; r++) {
+      const line = buf.getLine(r)?.translateToString(true) ?? "";
+      lines.push(line);
+    }
+    const content = lines.join("\n").trimEnd() + "\n";
+    try {
+      const savedPath = await invoke<string>("save_session_log", {
+        hostLabel: leaf.title,
+        content,
+        append: false,
+      });
+      setSavedLogNotice(savedPath);
+      setTimeout(() => setSavedLogNotice(null), 4000);
+    } catch {
+      // ignore
+    }
   };
 
   useEffect(() => {
@@ -225,10 +356,16 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         setAltArmed(false);
       }
       const bytes = Array.from(textEncoder.encode(finalStr));
-      invoke("write_pane_input", {
-        paneId: leaf.paneId,
-        data: bytes,
-      }).catch(() => undefined);
+      const targets =
+        broadcastTargetsRef.current && broadcastTargetsRef.current.length > 0
+          ? broadcastTargetsRef.current
+          : [leaf.paneId];
+      for (const targetPaneId of targets) {
+        invoke("write_pane_input", {
+          paneId: targetPaneId,
+          data: bytes,
+        }).catch(() => undefined);
+      }
     };
 
     const resetTextareaBuffer = (resetImeContext = false) => {
@@ -310,11 +447,18 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       if (ev.metaKey) {
         if (ev.type === "keydown") {
           const key = ev.key.toLowerCase();
+          if (key === "f") {
+            ev.preventDefault();
+            setSearchOpen(true);
+            setTimeout(() => searchInputRef.current?.focus(), 20);
+            return false;
+          }
           if (
             key === "d" ||
             key === "w" ||
             key === "t" ||
             key === "i" ||
+            key === "k" ||
             key === ","
           ) {
             return false;
@@ -473,6 +617,19 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       const bytes =
         payload instanceof Uint8Array ? payload : new Uint8Array(payload);
       termRef.current.write(bytes);
+      if (isRecordingLogRef.current && recordingFileNameRef.current) {
+        const cleanText = stripAnsiCodes(
+          textDecoder.decode(bytes, { stream: true }),
+        );
+        if (cleanText) {
+          invoke("save_session_log", {
+            hostLabel: leaf.title,
+            content: cleanText,
+            append: true,
+            fileName: recordingFileNameRef.current,
+          }).catch(() => undefined);
+        }
+      }
     };
 
     onUpdateStatus("connecting", { errorMessage: undefined });
@@ -652,6 +809,79 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         </div>
 
         <div className="flex items-center gap-0.5">
+          {broadcastTargetPaneIds && broadcastTargetPaneIds.length > 1 && (
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 mr-1 rounded-md bg-amber-500/15 text-amber-400 border border-amber-500/30 font-semibold text-[10px]">
+              <Radio className="w-2.5 h-2.5 animate-pulse" />
+              {t.termBroadcastLabel}
+            </span>
+          )}
+          {savedLogNotice && (
+            <span
+              title={savedLogNotice}
+              className="hidden md:inline-flex items-center gap-1 px-1.5 py-0.5 mr-1 rounded-md bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 text-[10px] max-w-[200px] truncate"
+            >
+              {t.termSessionLogSaved}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setSearchOpen((p) => {
+                const next = !p;
+                if (next) {
+                  setTimeout(() => searchInputRef.current?.focus(), 20);
+                } else {
+                  termRef.current?.clearSelection();
+                  termRef.current?.focus();
+                }
+                return next;
+              });
+            }}
+            title={`${t.termSearchPlaceholder} (⌘F)`}
+            className={`p-1 rounded-md transition-colors cursor-pointer ${
+              searchOpen
+                ? "bg-primary/20 text-primary"
+                : "hover:bg-accent hover:text-foreground"
+            }`}
+          >
+            <Search className="w-3 h-3" />
+          </button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              handleToggleLiveLog();
+            }}
+            title={
+              isRecordingLog ? t.termSessionLogStop : t.termSessionLogStart
+            }
+            className={`px-1.5 py-0.5 rounded-md text-[10px] font-semibold inline-flex items-center gap-1 transition-colors cursor-pointer ${
+              isRecordingLog
+                ? "bg-rose-500/20 text-rose-400 border border-rose-500/40"
+                : "hover:bg-accent hover:text-foreground"
+            }`}
+          >
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                isRecordingLog
+                  ? "bg-rose-400 animate-ping"
+                  : "bg-muted-foreground"
+              }`}
+            />
+            <span>REC</span>
+          </button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              handleExportSessionLog();
+            }}
+            title={t.termSessionLogExport}
+            className="p-1 hover:bg-accent hover:text-foreground rounded-md transition-colors cursor-pointer"
+          >
+            <Download className="w-3 h-3" />
+          </button>
           <button
             type="button"
             onClick={(e) => {
@@ -673,7 +903,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
               e.stopPropagation();
               onSplitVertical();
             }}
-            title="Split Vertically (Cmd+D)"
+            title={`${t.termSplitVertical} (⌘D)`}
             className="p-1 hover:bg-accent hover:text-foreground rounded-md transition-colors cursor-pointer"
           >
             <Columns className="w-3 h-3" />
@@ -684,7 +914,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
               e.stopPropagation();
               onSplitHorizontal();
             }}
-            title="Split Horizontally (Cmd+Shift+D)"
+            title={`${t.termSplitHorizontal} (⌘⇧D)`}
             className="p-1 hover:bg-accent hover:text-foreground rounded-md transition-colors cursor-pointer"
           >
             <Rows className="w-3 h-3" />
@@ -695,13 +925,77 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
               e.stopPropagation();
               onClosePane();
             }}
-            title="Close Pane (Cmd+W)"
+            title={`${t.termClosePane} (⌘W)`}
             className="p-1 hover:bg-rose-500/20 hover:text-rose-400 rounded-md transition-colors cursor-pointer"
           >
             <X className="w-3 h-3" />
           </button>
         </div>
       </div>
+
+      {/* Inline Search Bar Overlay (Cmd+F) */}
+      {searchOpen && (
+        <div
+          onMouseDown={(e) => e.stopPropagation()}
+          className="absolute top-8 right-3 z-20 flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-card/95 border border-border shadow-xl backdrop-blur-md"
+        >
+          <Search className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+          <input
+            ref={searchInputRef}
+            type="text"
+            value={searchQuery}
+            onChange={(e) => {
+              const val = e.target.value;
+              setSearchQuery(val);
+              searchCursorRef.current = { row: -1, col: -1 };
+              runBufferSearch(val, "next");
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                runBufferSearch(searchQuery, e.shiftKey ? "prev" : "next");
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                setSearchOpen(false);
+                termRef.current?.clearSelection();
+                termRef.current?.focus();
+              }
+            }}
+            placeholder={t.termSearchPlaceholder}
+            className="w-48 bg-transparent text-xs text-foreground placeholder:text-muted-foreground focus:outline-none"
+          />
+          {searchMatchInfo && (
+            <span className="text-[10px] font-mono text-muted-foreground px-1">
+              {searchMatchInfo}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => runBufferSearch(searchQuery, "prev")}
+            className="p-1 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground cursor-pointer"
+          >
+            <ArrowUp className="w-3 h-3" />
+          </button>
+          <button
+            type="button"
+            onClick={() => runBufferSearch(searchQuery, "next")}
+            className="p-1 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground cursor-pointer"
+          >
+            <ArrowDown className="w-3 h-3" />
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setSearchOpen(false);
+              termRef.current?.clearSelection();
+              termRef.current?.focus();
+            }}
+            className="p-1 rounded-md hover:bg-rose-500/20 text-muted-foreground hover:text-rose-400 cursor-pointer"
+          >
+            <X className="w-3 h-3" />
+          </button>
+        </div>
+      )}
 
       {/* Reconnect / Auth Banner Overlay when Disconnected or Error */}
       {(leaf.status === "disconnected" || leaf.status === "error") && (

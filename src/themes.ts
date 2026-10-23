@@ -48,7 +48,11 @@ export interface TerminalThemeConfig {
   cursorStyle: TerminalCursorStyle;
 }
 
+export type AppLanguage = "vi" | "en";
+
 export interface AppSettingsConfig {
+  language: AppLanguage;
+  fastSyncEnabled: boolean;
   connectionTimeoutSecs: number;
   snippetTimeoutSecs: number;
   keepAliveEnabled: boolean;
@@ -481,6 +485,8 @@ export const DEFAULT_TERMINAL_THEME: TerminalThemeConfig = {
 };
 
 export const DEFAULT_APP_SETTINGS: AppSettingsConfig = {
+  language: "vi",
+  fastSyncEnabled: true,
   connectionTimeoutSecs: 15,
   snippetTimeoutSecs: 300,
   keepAliveEnabled: true,
@@ -580,6 +586,14 @@ export function loadAppSettings(): AppSettingsConfig {
     if (!raw) return DEFAULT_APP_SETTINGS;
     const parsed = JSON.parse(raw) as Partial<AppSettingsConfig>;
     return {
+      language:
+        parsed.language === "en" || parsed.language === "vi"
+          ? parsed.language
+          : DEFAULT_APP_SETTINGS.language,
+      fastSyncEnabled:
+        typeof parsed.fastSyncEnabled === "boolean"
+          ? parsed.fastSyncEnabled
+          : DEFAULT_APP_SETTINGS.fastSyncEnabled,
       connectionTimeoutSecs:
         typeof parsed.connectionTimeoutSecs === "number" &&
         parsed.connectionTimeoutSecs >= 3 &&

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import {
   ArrowLeft,
   ArrowRight,
@@ -24,13 +24,24 @@ import {
   Trash2,
   Type,
   X,
+  Zap,
 } from "lucide-react";
-import { HostEntry, SftpEntry, SftpListResponse } from "../types";
+import {
+  HostEntry,
+  SftpEntry,
+  SftpListResponse,
+  SftpTransferProgress,
+  SftpTransferResult,
+} from "../types";
+import { AppLanguage } from "../themes";
+import { getI18n } from "../i18n";
 import { SelectField } from "./SelectField";
 
 interface SftpWorkspaceProps {
   hosts: HostEntry[];
   initialRemoteHostId?: string;
+  language?: AppLanguage;
+  defaultFastSync?: boolean;
 }
 
 type Side = "local" | "remote";
@@ -96,7 +107,16 @@ function bitsToOctal(bits: boolean[]): string {
 export const SftpWorkspace: React.FC<SftpWorkspaceProps> = ({
   hosts,
   initialRemoteHostId,
+  language = "vi",
+  defaultFastSync = true,
 }) => {
+  const t = getI18n(language);
+  const [fastSyncEnabled, setFastSyncEnabled] =
+    useState<boolean>(defaultFastSync);
+  const [transferProgress, setTransferProgress] =
+    useState<SftpTransferProgress | null>(null);
+  const [lastTransferResult, setLastTransferResult] =
+    useState<SftpTransferResult | null>(null);
   // Local pane state
   const [localCwd, setLocalCwd] = useState<string>("~");
   const [localPathInput, setLocalPathInput] = useState<string>("~");
@@ -305,19 +325,27 @@ export const SftpWorkspace: React.FC<SftpWorkspaceProps> = ({
 
       setTransferBusy(true);
       setStatusMessage(null);
+      setTransferProgress(null);
       try {
-        await invoke("sftp_transfer", {
+        const progressChannel = new Channel<SftpTransferProgress>();
+        progressChannel.onmessage = (ev) => {
+          setTransferProgress(ev);
+        };
+        const res = await invoke<SftpTransferResult>("sftp_transfer", {
           sourceHostId,
           sourcePath: entry.path,
           targetHostId,
           targetDir,
+          preferFastSync: fastSyncEnabled,
+          onProgress: progressChannel,
         });
+        setLastTransferResult(res);
         setStatusMessage({
           type: "success",
           text:
             direction === "upload"
-              ? `Uploaded "${entry.name}" to ${targetDir}`
-              : `Downloaded "${entry.name}" to ${targetDir}`,
+              ? `${t.sftpTransferCompleted}: "${entry.name}" → ${targetDir}`
+              : `${t.sftpTransferCompleted}: "${entry.name}" → ${targetDir}`,
         });
         if (direction === "upload") {
           await loadRemoteDir(remoteHostId, remoteCwd || "~");
@@ -339,6 +367,8 @@ export const SftpWorkspace: React.FC<SftpWorkspaceProps> = ({
       selectedRemoteEntry,
       remoteCwd,
       localCwd,
+      fastSyncEnabled,
+      t.sftpTransferCompleted,
       loadRemoteDir,
       loadLocalDir,
     ],
@@ -968,10 +998,63 @@ export const SftpWorkspace: React.FC<SftpWorkspaceProps> = ({
 
   return (
     <div className="flex flex-col h-full w-full overflow-hidden gap-3">
-      {/* Status Banner */}
+      {/* Fast Sync & Chunk Streaming Control Bar */}
+      <div className="px-3.5 py-2 rounded-2xl border border-border/80 bg-card/70 flex flex-wrap items-center justify-between gap-2 shrink-0">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <button
+            type="button"
+            onClick={() => setFastSyncEnabled((v) => !v)}
+            className={`px-2.5 py-1 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-all cursor-pointer ${
+              fastSyncEnabled
+                ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/40 shadow-2xs"
+                : "bg-sky-500/15 text-sky-300 border-sky-500/40"
+            }`}
+          >
+            <Zap
+              className={`w-3.5 h-3.5 ${
+                fastSyncEnabled ? "text-emerald-400" : "text-sky-400"
+              }`}
+            />
+            <span>
+              {fastSyncEnabled ? t.sftpFastSyncTag : t.sftpChunkStreamTag}
+            </span>
+          </button>
+          <span className="text-xs text-muted-foreground truncate">
+            {fastSyncEnabled
+              ? t.sftpFastSyncActiveDesc
+              : t.sftpChunkStreamActiveDesc}
+          </span>
+        </div>
+
+        {(transferProgress || lastTransferResult) && (
+          <div className="flex items-center gap-2 text-xs">
+            {(() => {
+              const activeMode =
+                transferProgress?.mode ?? lastTransferResult?.mode;
+              const activeDetail =
+                transferProgress?.modeDetail ?? lastTransferResult?.modeDetail;
+              const isFast = activeMode === "fast_sync";
+              return (
+                <span
+                  className={`px-2 py-0.5 rounded-lg font-mono text-[10px] font-semibold inline-flex items-center gap-1 border ${
+                    isFast
+                      ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+                      : "bg-sky-500/20 text-sky-300 border-sky-500/40"
+                  }`}
+                >
+                  {isFast ? "⚡ FAST SYNC" : "📦 CHUNK STREAM"}
+                  {activeDetail ? ` • ${activeDetail}` : ""}
+                </span>
+              );
+            })()}
+          </div>
+        )}
+      </div>
+
+      {/* Live Chunk Transfer Progress & Status Banner */}
       {(statusMessage || transferBusy) && (
         <div
-          className={`px-4 py-2 rounded-xl border text-xs flex items-center justify-between gap-2 shrink-0 ${
+          className={`px-4 py-2.5 rounded-xl border text-xs flex flex-col gap-1.5 shrink-0 ${
             transferBusy
               ? "bg-primary/15 border-primary/35 text-primary"
               : statusMessage?.type === "error"
@@ -979,28 +1062,60 @@ export const SftpWorkspace: React.FC<SftpWorkspaceProps> = ({
                 : "bg-emerald-500/15 border-emerald-500/35 text-emerald-300"
           }`}
         >
-          <div className="flex items-center gap-2 truncate">
-            {transferBusy ? (
-              <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
-            ) : statusMessage?.type === "success" ? (
-              <Check className="w-3.5 h-3.5 shrink-0" />
-            ) : (
-              <File className="w-3.5 h-3.5 shrink-0" />
-            )}
-            <span className="truncate">
-              {transferBusy
-                ? "Transferring file data over SSH..."
-                : statusMessage?.text}
-            </span>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 truncate">
+              {transferBusy ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
+              ) : statusMessage?.type === "success" ? (
+                <Check className="w-3.5 h-3.5 shrink-0" />
+              ) : (
+                <File className="w-3.5 h-3.5 shrink-0" />
+              )}
+              <span className="truncate font-medium">
+                {transferBusy
+                  ? `${t.sftpTransferProgress} ${transferProgress?.fileName ?? ""}`
+                  : statusMessage?.text}
+              </span>
+              {transferProgress && (
+                <span
+                  className={`px-2 py-0.5 rounded-md font-mono text-[10px] font-bold border shrink-0 ${
+                    transferProgress.mode === "fast_sync"
+                      ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+                      : "bg-sky-500/20 text-sky-300 border-sky-500/40"
+                  }`}
+                >
+                  {transferProgress.mode === "fast_sync"
+                    ? t.sftpFastSyncTag
+                    : t.sftpChunkStreamTag}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2 shrink-0 font-mono text-[11px]">
+              {transferProgress && (
+                <span>
+                  {formatFileSize(transferProgress.bytesTransferred, "file")} •{" "}
+                  {formatFileSize(transferProgress.speedBytesPerSec, "file")}/s
+                  ({transferProgress.percent}%)
+                </span>
+              )}
+              {!transferBusy && (
+                <button
+                  type="button"
+                  onClick={() => setStatusMessage(null)}
+                  className="p-0.5 rounded hover:bg-black/20 cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
           </div>
-          {!transferBusy && (
-            <button
-              type="button"
-              onClick={() => setStatusMessage(null)}
-              className="p-0.5 rounded hover:bg-black/20 cursor-pointer"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
+          {transferBusy && transferProgress && (
+            <div className="w-full h-1.5 rounded-full bg-background/60 overflow-hidden">
+              <div
+                style={{ width: `${transferProgress.percent}%` }}
+                className="h-full bg-primary transition-all duration-150"
+              />
+            </div>
           )}
         </div>
       )}

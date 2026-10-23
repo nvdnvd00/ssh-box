@@ -63,6 +63,7 @@ import { TelemetryDrawer } from "./components/TelemetryDrawer";
 import { ResourcesWorkspace } from "./components/ResourcesWorkspace";
 import { DashboardWorkspace } from "./components/DashboardWorkspace";
 import { SettingsTabId, SettingsWorkspace } from "./components/SettingsWorkspace";
+import { ThemePopover } from "./components/ThemePopover";
 
 type WorkspaceViewMode = "dashboard" | "resources" | "terminal" | "settings";
 
@@ -110,6 +111,7 @@ export default function App() {
   );
   const [telemetryDrawerOpen, setTelemetryDrawerOpen] = useState(false);
   const [snippetsDrawerOpen, setSnippetsDrawerOpen] = useState(false);
+  const [themePopoverOpen, setThemePopoverOpen] = useState(false);
   const [snippetDrawerSearch, setSnippetDrawerSearch] = useState("");
   const [broadcastMode, setBroadcastMode] = useState<"off" | "tab" | "all">(
     "off",
@@ -805,6 +807,14 @@ export default function App() {
             </kbd>
           </button>
 
+          <ThemePopover
+            config={themeConfig}
+            isOpen={themePopoverOpen}
+            onToggle={() => setThemePopoverOpen((p) => !p)}
+            onClose={() => setThemePopoverOpen(false)}
+            onChange={handleUpdateTheme}
+          />
+
           <button
             type="button"
             onClick={() =>
@@ -1163,6 +1173,7 @@ export default function App() {
                 activePaneId={activeTab.activePaneId}
                 totalPanes={totalPanesInActiveTab}
                 themeConfig={themeConfig}
+                isVisible={workspaceView === "terminal"}
                 language={appSettings.language}
                 broadcastTargetPaneIds={broadcastTargetPaneIds}
                 onFocusPane={handleFocusPane}

@@ -78,16 +78,61 @@ fn resolve_platform_shell(shell_override: Option<&str>) -> (String, Vec<String>)
         return ("/bin/sh".to_string(), Vec::new());
     }
     if let Ok(sh) = std::env::var("SHELL") {
-        if !sh.trim().is_empty() && Path::new(sh.trim()).exists() {
-            return (sh, Vec::new());
+        let trimmed = sh.trim();
+        if !trimmed.is_empty() && Path::new(trimmed).exists() {
+            return (trimmed.to_string(), vec!["-l".to_string()]);
         }
     }
     for candidate in ["/bin/zsh", "/bin/bash", "/bin/sh"] {
         if Path::new(candidate).exists() {
-            return (candidate.to_string(), Vec::new());
+            return (candidate.to_string(), vec!["-l".to_string()]);
         }
     }
-    ("/bin/sh".to_string(), Vec::new())
+    ("/bin/sh".to_string(), vec!["-l".to_string()])
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+fn build_native_shell_path(inherited_path: Option<&str>, home: &Path) -> String {
+    let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+    let mut entries: Vec<String> = Vec::new();
+    let mut push_unique = |dir: String| {
+        if !dir.is_empty() && !entries.iter().any(|e| e == &dir) {
+            entries.push(dir);
+        }
+    };
+
+    if !cfg!(target_os = "windows") {
+        for user_rel in [".local/bin", ".orbstack/bin", ".bun/bin", ".cargo/bin"] {
+            let p = home.join(user_rel);
+            if p.exists() {
+                push_unique(p.to_string_lossy().to_string());
+            }
+        }
+        for sys_dir in [
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "/usr/local/sbin",
+        ] {
+            if Path::new(sys_dir).exists() {
+                push_unique(sys_dir.to_string());
+            }
+        }
+    }
+
+    if let Some(raw) = inherited_path {
+        for part in raw.split(sep) {
+            push_unique(part.trim().to_string());
+        }
+    }
+
+    if !cfg!(target_os = "windows") {
+        for fallback in ["/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
+            push_unique(fallback.to_string());
+        }
+    }
+
+    entries.join(sep)
 }
 
 impl LocalPtyManager {
@@ -188,19 +233,26 @@ impl LocalPtyManager {
         for arg in args {
             cmd.arg(arg);
         }
+        let home = crate::host_store::app_home_dir();
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        cmd.env("TERM_PROGRAM", "SSH-Box");
         cmd.env("CLICOLOR", "1");
         cmd.env("CLICOLOR_FORCE", "1");
         cmd.env("LANG", "en_US.UTF-8");
+        cmd.env("SHELL", &shell);
         if cfg!(target_os = "android") {
             cmd.env(
                 "PATH",
                 "/system/bin:/system/xbin:/sbin:/vendor/bin:/data/local/tmp",
             );
+        } else if !cfg!(target_os = "windows") {
+            let inherited_path = std::env::var("PATH").ok();
+            let full_path = build_native_shell_path(inherited_path.as_deref(), &home);
+            cmd.env("PATH", full_path);
         }
-        let home = crate::host_store::app_home_dir();
         if home.exists() {
+            cmd.env("HOME", home.to_string_lossy().to_string());
             cmd.cwd(home);
         }
 
@@ -1275,5 +1327,31 @@ mod tests {
             output_str
         );
         assert!(mgr.close(&pane_id));
+    }
+
+    #[cfg(not(any(target_os = "ios", target_os = "android", target_os = "windows")))]
+    #[test]
+    fn unix_shell_spawns_as_login_shell_with_homebrew_path_fallbacks() {
+        let (shell, args) = resolve_platform_shell(None);
+        assert!(!shell.is_empty());
+        assert_eq!(
+            args,
+            vec!["-l".to_string()],
+            "Unix local shell must be spawned as a login shell (-l) so ~/.zprofile is sourced"
+        );
+
+        let home = crate::host_store::app_home_dir();
+        let minimal_gui_path = "/usr/bin:/bin:/usr/sbin:/sbin";
+        let resolved_path = build_native_shell_path(Some(minimal_gui_path), &home);
+        if Path::new("/opt/homebrew/bin").exists() {
+            assert!(
+                resolved_path.split(':').any(|p| p == "/opt/homebrew/bin"),
+                "PATH should include /opt/homebrew/bin when present on macOS, got: {resolved_path}"
+            );
+        }
+        assert!(
+            resolved_path.split(':').any(|p| p == "/usr/bin"),
+            "PATH should preserve standard system bin directories"
+        );
     }
 }

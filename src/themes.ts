@@ -100,28 +100,32 @@ export const TERMINAL_FONT_FAMILIES: {
   {
     id: "sf-mono",
     label: "SF Mono",
-    cssValue: '"SF Mono", Menlo, Monaco, "Courier New", monospace',
+    cssValue:
+      '"SF Mono", "JetBrainsMono Nerd Font", "JetBrainsMono Nerd Font Mono", "Hack Nerd Font", Menlo, Monaco, "Courier New", monospace',
   },
   {
     id: "jetbrains",
     label: "JetBrains Mono",
     cssValue:
-      '"JetBrains Mono", "SF Mono", Menlo, Monaco, "Courier New", monospace',
+      '"JetBrainsMono Nerd Font", "JetBrainsMono Nerd Font Mono", "JetBrains Mono", "SF Mono", "Hack Nerd Font", Menlo, Monaco, "Courier New", monospace',
   },
   {
     id: "menlo",
     label: "Menlo Regular",
-    cssValue: 'Menlo, Monaco, "SF Mono", "Courier New", monospace',
+    cssValue:
+      'Menlo, "JetBrainsMono Nerd Font", "Hack Nerd Font", Monaco, "SF Mono", "Courier New", monospace',
   },
   {
     id: "fira-code",
     label: "Fira Code",
-    cssValue: '"Fira Code", "JetBrains Mono", Menlo, monospace',
+    cssValue:
+      '"FiraCode Nerd Font", "Fira Code", "Hack Nerd Font", "JetBrainsMono Nerd Font", "JetBrains Mono", Menlo, monospace',
   },
   {
     id: "system-mono",
     label: "System Monospace",
-    cssValue: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+    cssValue:
+      'ui-monospace, SFMono-Regular, "SF Mono", "JetBrainsMono Nerd Font", "Hack Nerd Font", Menlo, Monaco, Consolas, monospace',
   },
 ];
 

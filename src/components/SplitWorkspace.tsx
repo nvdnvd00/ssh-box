@@ -8,6 +8,7 @@ interface SplitWorkspaceProps {
   activePaneId: string;
   totalPanes: number;
   themeConfig: ThemeConfig;
+  isVisible?: boolean;
   language?: AppLanguage;
   broadcastTargetPaneIds?: string[];
   onFocusPane: (paneId: string) => void;
@@ -35,6 +36,7 @@ export const SplitWorkspace: React.FC<SplitWorkspaceProps> = ({
   activePaneId,
   totalPanes,
   themeConfig,
+  isVisible = true,
   language,
   broadcastTargetPaneIds,
   onFocusPane,
@@ -53,6 +55,7 @@ export const SplitWorkspace: React.FC<SplitWorkspaceProps> = ({
         isActive={node.paneId === activePaneId}
         showFocusBorder={totalPanes > 1}
         themeConfig={themeConfig}
+        isVisible={isVisible}
         language={language}
         broadcastTargetPaneIds={broadcastTargetPaneIds}
         onFocus={() => onFocusPane(node.paneId)}
@@ -115,6 +118,7 @@ export const SplitWorkspace: React.FC<SplitWorkspaceProps> = ({
           activePaneId={activePaneId}
           totalPanes={totalPanes}
           themeConfig={themeConfig}
+          isVisible={isVisible}
           language={language}
           broadcastTargetPaneIds={broadcastTargetPaneIds}
           onFocusPane={onFocusPane}
@@ -153,6 +157,7 @@ export const SplitWorkspace: React.FC<SplitWorkspaceProps> = ({
           activePaneId={activePaneId}
           totalPanes={totalPanes}
           themeConfig={themeConfig}
+          isVisible={isVisible}
           language={language}
           broadcastTargetPaneIds={broadcastTargetPaneIds}
           onFocusPane={onFocusPane}

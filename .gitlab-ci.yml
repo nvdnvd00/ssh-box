@@ -13,11 +13,13 @@ build-windows-installer:
     - runner-x86
   cache:
     key: ssh-box-win64-cache
+    when: always
     paths:
       - .xwin-cache/
       - node_modules/
   script:
     - apt-get update && apt-get install -y --no-install-recommends curl ca-certificates xz-utils llvm clang lld nsis pkg-config libssl-dev
+    - mkdir -p /usr/share/nsis/Include/Win && curl -fsSL https://raw.githubusercontent.com/kichik/nsis/master/Include/Win/RestartManager.nsh -o /usr/share/nsis/Include/Win/RestartManager.nsh
     - curl -fsSL https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz | tar -xJ -C /usr/local --strip-components=1
     - node -v && npm -v
     - curl -fsSL https://github.com/rust-cross/cargo-xwin/releases/download/v0.23.1/cargo-xwin-v0.23.1.x86_64-unknown-linux-musl.tar.gz | tar -xz -C /usr/local/bin

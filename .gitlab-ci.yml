@@ -1,0 +1,35 @@
+stages:
+  - build
+
+variables:
+  CARGO_TERM_COLOR: "always"
+  XWIN_ACCEPT_LICENSE: "1"
+
+build-windows-installer:
+  stage: build
+  image: rust:1-bookworm
+  tags:
+    - runner-x86
+  cache:
+    key: ssh-box-win64-cache
+    paths:
+      - .xwin-cache/
+      - node_modules/
+  script:
+    - apt-get update && apt-get install -y --no-install-recommends curl ca-certificates xz-utils llvm clang lld nsis pkg-config libssl-dev
+    - curl -fsSL https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz | tar -xJ -C /usr/local --strip-components=1
+    - node -v && npm -v
+    - curl -fsSL https://github.com/rust-cross/cargo-xwin/releases/download/v0.18.4/cargo-xwin-v0.18.4.x86_64-unknown-linux-musl.tar.gz | tar -xz -C /usr/local/bin
+    - cargo-xwin --version
+    - rustup target add x86_64-pc-windows-msvc
+    - npm ci
+    - XWIN_CACHE_DIR="$CI_PROJECT_DIR/.xwin-cache" npx tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis
+    - mkdir -p artifacts/windows
+    - cp -v src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe artifacts/windows/
+    - cp -v src-tauri/target/x86_64-pc-windows-msvc/release/ssh-box.exe artifacts/windows/
+    - ls -lh artifacts/windows/
+  artifacts:
+    name: "ssh-box-windows-installer-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - artifacts/windows/
+    expire_in: 30 days

@@ -1,11 +1,13 @@
 import React, { useRef } from "react";
 import { LeafPaneNode, PaneNode, PaneStatus } from "../types";
+import { ThemeConfig } from "../themes";
 import { TerminalPane } from "./TerminalPane";
 
 interface SplitWorkspaceProps {
   node: PaneNode;
   activePaneId: string;
   totalPanes: number;
+  themeConfig: ThemeConfig;
   onFocusPane: (paneId: string) => void;
   onUpdateLeafStatus: (
     paneId: string,
@@ -30,6 +32,7 @@ export const SplitWorkspace: React.FC<SplitWorkspaceProps> = ({
   node,
   activePaneId,
   totalPanes,
+  themeConfig,
   onFocusPane,
   onUpdateLeafStatus,
   onTriggerReconnect,
@@ -45,6 +48,7 @@ export const SplitWorkspace: React.FC<SplitWorkspaceProps> = ({
         leaf={node}
         isActive={node.paneId === activePaneId}
         showFocusBorder={totalPanes > 1}
+        themeConfig={themeConfig}
         onFocus={() => onFocusPane(node.paneId)}
         onUpdateStatus={(status, extra) =>
           onUpdateLeafStatus(node.paneId, status, extra)
@@ -104,6 +108,7 @@ export const SplitWorkspace: React.FC<SplitWorkspaceProps> = ({
           node={node.first}
           activePaneId={activePaneId}
           totalPanes={totalPanes}
+          themeConfig={themeConfig}
           onFocusPane={onFocusPane}
           onUpdateLeafStatus={onUpdateLeafStatus}
           onTriggerReconnect={onTriggerReconnect}
@@ -113,14 +118,21 @@ export const SplitWorkspace: React.FC<SplitWorkspaceProps> = ({
         />
       </div>
 
+      {/* shadcn-style ResizableHandle with animated grip indicator */}
       <div
         onMouseDown={handleMouseDownDivider}
-        className={`shrink-0 bg-slate-800/90 hover:bg-cyan-500/80 active:bg-cyan-400 transition-colors z-10 ${
+        className={`group relative shrink-0 bg-border hover:bg-primary/70 active:bg-primary transition-colors duration-150 z-10 flex items-center justify-center ${
           isVerticalSplit
             ? "w-1 cursor-col-resize"
             : "h-1 cursor-row-resize"
         }`}
-      />
+      >
+        <span
+          className={`rounded-full bg-muted-foreground/40 group-hover:bg-primary group-hover:scale-125 transition-all duration-150 pointer-events-none ${
+            isVerticalSplit ? "w-0.5 h-5" : "h-0.5 w-5"
+          }`}
+        />
+      </div>
 
       <div
         style={{
@@ -132,6 +144,7 @@ export const SplitWorkspace: React.FC<SplitWorkspaceProps> = ({
           node={node.second}
           activePaneId={activePaneId}
           totalPanes={totalPanes}
+          themeConfig={themeConfig}
           onFocusPane={onFocusPane}
           onUpdateLeafStatus={onUpdateLeafStatus}
           onTriggerReconnect={onTriggerReconnect}

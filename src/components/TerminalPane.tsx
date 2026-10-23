@@ -2,10 +2,10 @@ import React, { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
-import { WebglAddon } from "@xterm/addon-webgl";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import {
   Columns,
+  Keyboard,
   KeyRound,
   RefreshCw,
   Rows,
@@ -14,11 +14,17 @@ import {
   X,
 } from "lucide-react";
 import { LeafPaneNode, PaneStatus } from "../types";
+import {
+  resolveTerminalFontCss,
+  resolveXtermTheme,
+  ThemeConfig,
+} from "../themes";
 
 interface TerminalPaneProps {
   leaf: LeafPaneNode;
   isActive: boolean;
   showFocusBorder: boolean;
+  themeConfig: ThemeConfig;
   onFocus: () => void;
   onUpdateStatus: (
     status: PaneStatus,
@@ -59,6 +65,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   leaf,
   isActive,
   showFocusBorder,
+  themeConfig,
   onFocus,
   onUpdateStatus,
   onTriggerReconnect,
@@ -72,8 +79,48 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   const statusRef = useRef<PaneStatus>(leaf.status);
   const trackedInputRef = useRef<string>("");
   const [retryPassword, setRetryPassword] = useState("");
+  const [showExtraKeys, setShowExtraKeys] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return (
+      (navigator.maxTouchPoints ?? 0) > 0 ||
+      window.matchMedia?.("(pointer: coarse)").matches ||
+      window.innerWidth < 900
+    );
+  });
+  const [ctrlArmed, setCtrlArmed] = useState(false);
+  const [altArmed, setAltArmed] = useState(false);
+  const ctrlArmedRef = useRef(false);
+  const altArmedRef = useRef(false);
+  const resolvedXtermTheme = resolveXtermTheme(themeConfig);
 
+  ctrlArmedRef.current = ctrlArmed;
+  altArmedRef.current = altArmed;
   statusRef.current = leaf.status;
+
+  const sendVirtualKey = (seq: string) => {
+    const term = termRef.current;
+    if (term?.hasSelection()) {
+      term.clearSelection();
+    }
+    let out = seq;
+    if (ctrlArmedRef.current && seq.length === 1) {
+      const code = seq.toUpperCase().charCodeAt(0);
+      if (code >= 64 && code <= 95) {
+        out = String.fromCharCode(code - 64);
+      }
+      setCtrlArmed(false);
+    }
+    if (altArmedRef.current) {
+      out = "\x1b" + out;
+      setAltArmed(false);
+    }
+    const bytes = Array.from(textEncoder.encode(out));
+    invoke("write_pane_input", {
+      paneId: leaf.paneId,
+      data: bytes,
+    }).catch(() => undefined);
+    term?.focus();
+  };
 
   useEffect(() => {
     const el = containerRef.current;
@@ -82,36 +129,14 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     const term = new Terminal({
       allowProposedApi: true,
       cursorBlink: true,
-      cursorStyle: "block",
-      fontSize: 13,
-      lineHeight: 1.22,
-      fontFamily:
-        '"JetBrains Mono", "SF Mono", Menlo, Monaco, "Courier New", monospace',
+      cursorStyle: themeConfig.cursorStyle,
+      fontSize: themeConfig.fontSize,
+      lineHeight: themeConfig.lineHeight || 1.2,
+      letterSpacing: themeConfig.letterSpacing ?? 0,
+      fontFamily: resolveTerminalFontCss(themeConfig.fontFamily),
       scrollback: 10000,
       macOptionIsMeta: true,
-      theme: {
-        background: "#0b0e14",
-        foreground: "#e2e8f0",
-        cursor: "#38bdf8",
-        cursorAccent: "#0b0e14",
-        selectionBackground: "rgba(56, 189, 248, 0.28)",
-        black: "#1e293b",
-        red: "#f87171",
-        green: "#4ade80",
-        yellow: "#facc15",
-        blue: "#60a5fa",
-        magenta: "#c084fc",
-        cyan: "#22d3ee",
-        white: "#f1f5f9",
-        brightBlack: "#475569",
-        brightRed: "#fca5a5",
-        brightGreen: "#86efac",
-        brightYellow: "#fde047",
-        brightBlue: "#93c5fd",
-        brightMagenta: "#d8b4fe",
-        brightCyan: "#67e8f9",
-        brightWhite: "#ffffff",
-      },
+      theme: resolveXtermTheme(themeConfig),
     });
 
     const fitAddon = new FitAddon();
@@ -121,17 +146,6 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     term.unicode.activeVersion = "11";
 
     term.open(el);
-
-    try {
-      const webglAddon = new WebglAddon();
-      webglAddon.onContextLoss(() => {
-        webglAddon.dispose();
-      });
-      term.loadAddon(webglAddon);
-    } catch {
-      // Fallback to default renderer
-    }
-
     fitAddon.fit();
     termRef.current = term;
     fitRef.current = fitAddon;
@@ -196,7 +210,21 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       if (term.hasSelection()) {
         term.clearSelection();
       }
-      const bytes = Array.from(textEncoder.encode(str));
+      let finalStr = str;
+      if (ctrlArmedRef.current && str.length === 1) {
+        const code = str.toUpperCase().charCodeAt(0);
+        if (code >= 64 && code <= 95) {
+          finalStr = String.fromCharCode(code - 64);
+        }
+        ctrlArmedRef.current = false;
+        setCtrlArmed(false);
+      }
+      if (altArmedRef.current) {
+        finalStr = "\x1b" + finalStr;
+        altArmedRef.current = false;
+        setAltArmed(false);
+      }
+      const bytes = Array.from(textEncoder.encode(finalStr));
       invoke("write_pane_input", {
         paneId: leaf.paneId,
         data: bytes,
@@ -282,7 +310,13 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       if (ev.metaKey) {
         if (ev.type === "keydown") {
           const key = ev.key.toLowerCase();
-          if (key === "d" || key === "w" || key === "t" || key === "i") {
+          if (
+            key === "d" ||
+            key === "w" ||
+            key === "t" ||
+            key === "i" ||
+            key === ","
+          ) {
             return false;
           }
           if (key === "c" && term.hasSelection()) {
@@ -505,6 +539,62 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [leaf.paneId, leaf.reconnectNonce]);
 
+  // Dynamically apply theme, font family, font size, line height, letter spacing, and cursor style changes without re-creating the PTY/SSH session
+  useEffect(() => {
+    const term = termRef.current;
+    const fitAddon = fitRef.current;
+    if (!term) return;
+
+    term.options.theme = { ...resolveXtermTheme(themeConfig) };
+    term.options.cursorStyle = themeConfig.cursorStyle;
+    const nextFontCss = resolveTerminalFontCss(themeConfig.fontFamily);
+    const nextLineHeight = themeConfig.lineHeight || 1.2;
+    const nextLetterSpacing = themeConfig.letterSpacing ?? 0;
+
+    const layoutChanged =
+      term.options.fontSize !== themeConfig.fontSize ||
+      term.options.fontFamily !== nextFontCss ||
+      term.options.lineHeight !== nextLineHeight ||
+      term.options.letterSpacing !== nextLetterSpacing;
+
+    term.options.fontSize = themeConfig.fontSize;
+    term.options.fontFamily = nextFontCss;
+    term.options.lineHeight = nextLineHeight;
+    term.options.letterSpacing = nextLetterSpacing;
+
+    try {
+      term.refresh(0, Math.max(0, term.rows - 1));
+    } catch {
+      // ignore refresh error before open
+    }
+
+    if (layoutChanged) {
+      requestAnimationFrame(() => {
+        if (!fitAddon || !termRef.current) return;
+        try {
+          fitAddon.fit();
+          const cols = Math.max(20, termRef.current.cols);
+          const rows = Math.max(5, termRef.current.rows);
+          invoke("resize_pane", {
+            paneId: leaf.paneId,
+            cols,
+            rows,
+          }).catch(() => undefined);
+        } catch {
+          // ignore transient fit error
+        }
+      });
+    }
+  }, [
+    themeConfig.terminalPreset,
+    themeConfig.cursorStyle,
+    themeConfig.fontFamily,
+    themeConfig.fontSize,
+    themeConfig.lineHeight,
+    themeConfig.letterSpacing,
+    leaf.paneId,
+  ]);
+
   useEffect(() => {
     if (isActive && termRef.current && leaf.status === "connected") {
       termRef.current.focus();
@@ -520,34 +610,40 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   return (
     <div
       onMouseDown={onFocus}
-      className={`relative flex flex-col h-full w-full bg-[#0b0e14] overflow-hidden transition-colors ${
+      style={{ backgroundColor: resolvedXtermTheme.background }}
+      className={`relative flex flex-col h-full w-full overflow-hidden transition-all duration-200 ${
         showFocusBorder
           ? isActive
-            ? "ring-1 ring-inset ring-cyan-500/60"
-            : "ring-1 ring-inset ring-slate-800/80 opacity-90"
+            ? "ring-1 ring-inset ring-primary/65"
+            : "ring-1 ring-inset ring-border/80 opacity-92"
           : ""
       }`}
     >
       {/* Pane Micro-Header */}
-      <div className="flex items-center justify-between h-7 px-2.5 bg-[#0f131c] border-b border-slate-800/80 text-[11px] text-slate-400 shrink-0">
+      <div className="flex items-center justify-between h-7 px-2.5 bg-card/90 backdrop-blur-xs border-b border-border text-[11px] text-muted-foreground shrink-0 transition-colors">
         <div className="flex items-center gap-2 min-w-0">
-          <span
-            className={`h-2 w-2 rounded-full shrink-0 ${
-              leaf.status === "connected"
-                ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.7)]"
-                : leaf.status === "connecting"
-                  ? "bg-amber-400 animate-pulse"
-                  : "bg-rose-500"
-            }`}
-          />
-          <TerminalIcon className="w-3 h-3 text-slate-400 shrink-0" />
-          <span className="font-medium text-slate-200 truncate">
+          <span className="relative flex h-2 w-2 shrink-0">
+            {leaf.status === "connecting" && (
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
+            )}
+            <span
+              className={`relative inline-flex rounded-full h-2 w-2 transition-colors ${
+                leaf.status === "connected"
+                  ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.75)]"
+                  : leaf.status === "connecting"
+                    ? "bg-amber-400"
+                    : "bg-rose-500"
+              }`}
+            />
+          </span>
+          <TerminalIcon className="w-3 h-3 text-muted-foreground shrink-0" />
+          <span className="font-medium text-foreground truncate">
             {leaf.title}
           </span>
           {leaf.fingerprint && (
             <span
               title={`Host Key: ${leaf.fingerprint}`}
-              className="hidden sm:inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 font-mono text-[10px] truncate max-w-[180px]"
+              className="hidden sm:inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono text-[10px] truncate max-w-[180px]"
             >
               <ShieldCheck className="w-2.5 h-2.5 shrink-0" />
               {leaf.fingerprint}
@@ -555,7 +651,22 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           )}
         </div>
 
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-0.5">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowExtraKeys((p) => !p);
+            }}
+            title="Toggle Touch Extra Keys Bar"
+            className={`p-1 rounded-md transition-colors cursor-pointer ${
+              showExtraKeys
+                ? "bg-primary/20 text-primary"
+                : "hover:bg-accent hover:text-foreground"
+            }`}
+          >
+            <Keyboard className="w-3 h-3" />
+          </button>
           <button
             type="button"
             onClick={(e) => {
@@ -563,7 +674,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
               onSplitVertical();
             }}
             title="Split Vertically (Cmd+D)"
-            className="p-1 hover:bg-slate-800 hover:text-slate-100 rounded transition-colors"
+            className="p-1 hover:bg-accent hover:text-foreground rounded-md transition-colors cursor-pointer"
           >
             <Columns className="w-3 h-3" />
           </button>
@@ -574,7 +685,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
               onSplitHorizontal();
             }}
             title="Split Horizontally (Cmd+Shift+D)"
-            className="p-1 hover:bg-slate-800 hover:text-slate-100 rounded transition-colors"
+            className="p-1 hover:bg-accent hover:text-foreground rounded-md transition-colors cursor-pointer"
           >
             <Rows className="w-3 h-3" />
           </button>
@@ -585,7 +696,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
               onClosePane();
             }}
             title="Close Pane (Cmd+W)"
-            className="p-1 hover:bg-rose-500/20 hover:text-rose-300 rounded transition-colors"
+            className="p-1 hover:bg-rose-500/20 hover:text-rose-400 rounded-md transition-colors cursor-pointer"
           >
             <X className="w-3 h-3" />
           </button>
@@ -594,7 +705,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
 
       {/* Reconnect / Auth Banner Overlay when Disconnected or Error */}
       {(leaf.status === "disconnected" || leaf.status === "error") && (
-        <div className="z-10 flex flex-wrap items-center justify-between gap-2 px-3 py-2 bg-rose-950/90 border-b border-rose-500/40 text-xs text-rose-100 backdrop-blur-sm">
+        <div className="ui-banner-slide z-10 flex flex-wrap items-center justify-between gap-2 px-3 py-2 bg-rose-950/90 border-b border-rose-500/40 text-xs text-rose-100 backdrop-blur-md">
           <div className="flex-1 min-w-[200px] truncate">
             <span className="font-semibold text-rose-300 mr-1.5">
               Connection Interrupted:
@@ -615,13 +726,13 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
                   value={retryPassword}
                   onChange={(e) => setRetryPassword(e.target.value)}
                   placeholder="Password / Passphrase (optional)"
-                  className="pl-6 pr-2 py-1 rounded bg-slate-900/90 border border-rose-400/30 text-[11px] text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-cyan-400 w-48"
+                  className="pl-6 pr-2 py-1 rounded-md bg-background/90 border border-rose-400/30 text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary w-48"
                 />
               </div>
             )}
             <button
               type="submit"
-              className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold text-[11px] transition-colors cursor-pointer"
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-primary hover:opacity-90 text-primary-foreground font-semibold text-[11px] transition-opacity cursor-pointer"
             >
               <RefreshCw className="w-3 h-3" />
               Reconnect (Enter)
@@ -635,6 +746,110 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         ref={containerRef}
         className="flex-1 w-full h-full px-1.5 py-1 overflow-hidden select-none"
       />
+
+      {/* Mobile / Touch Extra Keys Bar (iOS, iPadOS, Android & Touch Screens) */}
+      {showExtraKeys && (
+        <div
+          onMouseDown={(e) => e.preventDefault()}
+          className="flex items-center gap-1 px-2 py-1.5 bg-card/95 border-t border-border/80 overflow-x-auto no-scrollbar shrink-0 select-none"
+        >
+          <button
+            type="button"
+            onClick={() => sendVirtualKey("\x1b")}
+            className="px-2 py-1 rounded-md bg-secondary hover:bg-accent text-[11px] font-mono font-semibold text-foreground shrink-0 cursor-pointer"
+          >
+            ESC
+          </button>
+          <button
+            type="button"
+            onClick={() => sendVirtualKey("\t")}
+            className="px-2 py-1 rounded-md bg-secondary hover:bg-accent text-[11px] font-mono font-semibold text-foreground shrink-0 cursor-pointer"
+          >
+            TAB
+          </button>
+          <button
+            type="button"
+            onClick={() => setCtrlArmed((p) => !p)}
+            className={`px-2 py-1 rounded-md text-[11px] font-mono font-semibold shrink-0 cursor-pointer border ${
+              ctrlArmed
+                ? "bg-primary text-primary-foreground border-primary"
+                : "bg-secondary hover:bg-accent text-foreground border-transparent"
+            }`}
+          >
+            CTRL
+          </button>
+          <button
+            type="button"
+            onClick={() => setAltArmed((p) => !p)}
+            className={`px-2 py-1 rounded-md text-[11px] font-mono font-semibold shrink-0 cursor-pointer border ${
+              altArmed
+                ? "bg-primary text-primary-foreground border-primary"
+                : "bg-secondary hover:bg-accent text-foreground border-transparent"
+            }`}
+          >
+            ALT
+          </button>
+          <button
+            type="button"
+            onClick={() => sendVirtualKey("\x1b[D")}
+            className="px-2.5 py-1 rounded-md bg-secondary hover:bg-accent text-[11px] font-mono font-semibold text-foreground shrink-0 cursor-pointer"
+          >
+            ←
+          </button>
+          <button
+            type="button"
+            onClick={() => sendVirtualKey("\x1b[B")}
+            className="px-2.5 py-1 rounded-md bg-secondary hover:bg-accent text-[11px] font-mono font-semibold text-foreground shrink-0 cursor-pointer"
+          >
+            ↓
+          </button>
+          <button
+            type="button"
+            onClick={() => sendVirtualKey("\x1b[A")}
+            className="px-2.5 py-1 rounded-md bg-secondary hover:bg-accent text-[11px] font-mono font-semibold text-foreground shrink-0 cursor-pointer"
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            onClick={() => sendVirtualKey("\x1b[C")}
+            className="px-2.5 py-1 rounded-md bg-secondary hover:bg-accent text-[11px] font-mono font-semibold text-foreground shrink-0 cursor-pointer"
+          >
+            →
+          </button>
+          <button
+            type="button"
+            onClick={() => sendVirtualKey("\x03")}
+            className="px-2 py-1 rounded-md bg-rose-500/15 hover:bg-rose-500/25 text-[11px] font-mono font-semibold text-rose-300 shrink-0 cursor-pointer"
+          >
+            ^C
+          </button>
+          <button
+            type="button"
+            onClick={() => sendVirtualKey("\x04")}
+            className="px-2 py-1 rounded-md bg-secondary hover:bg-accent text-[11px] font-mono text-foreground shrink-0 cursor-pointer"
+          >
+            ^D
+          </button>
+          <button
+            type="button"
+            onClick={() => sendVirtualKey("\x0c")}
+            className="px-2 py-1 rounded-md bg-secondary hover:bg-accent text-[11px] font-mono text-foreground shrink-0 cursor-pointer"
+          >
+            ^L
+          </button>
+          {["/", "-", "|", "~", "_"].map((sym) => (
+            <button
+              key={sym}
+              type="button"
+              onClick={() => sendVirtualKey(sym)}
+              className="px-2.5 py-1 rounded-md bg-secondary hover:bg-accent text-[11px] font-mono text-foreground shrink-0 cursor-pointer"
+            >
+              {sym}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 };

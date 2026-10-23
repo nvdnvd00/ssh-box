@@ -1,6 +1,39 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+static APP_DATA_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn set_app_data_dir(dir: PathBuf) {
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = APP_DATA_DIR_OVERRIDE.set(dir);
+}
+
+pub fn app_home_dir() -> PathBuf {
+    if let Some(dir) = APP_DATA_DIR_OVERRIDE.get() {
+        let home = dir.join("home");
+        let _ = std::fs::create_dir_all(&home);
+        if cfg!(any(target_os = "android", target_os = "ios")) {
+            return home;
+        }
+    }
+    dirs::home_dir().unwrap_or_else(|| {
+        let fallback = std::env::temp_dir().join("ssh-box-home");
+        let _ = std::fs::create_dir_all(&fallback);
+        fallback
+    })
+}
+
+pub fn app_config_dir() -> PathBuf {
+    if let Some(dir) = APP_DATA_DIR_OVERRIDE.get() {
+        return dir.clone();
+    }
+    if let Some(cfg) = dirs::config_dir() {
+        return cfg.join("ssh-box");
+    }
+    app_home_dir().join(".config").join("ssh-box")
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -10,9 +43,70 @@ pub struct HostEntry {
     pub hostname: String,
     pub user: String,
     pub port: u16,
+    #[serde(default)]
     pub identity_file: Option<String>,
+    #[serde(default)]
     pub group: String,
     pub source: HostSource,
+    #[serde(default)]
+    pub remark: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default = "default_auth_method")]
+    pub auth_method: String,
+    #[serde(default)]
+    pub identity_id: Option<String>,
+    #[serde(default)]
+    pub ssh_key_id: Option<String>,
+    #[serde(default)]
+    pub proxy_profile_id: Option<String>,
+    #[serde(default)]
+    pub jump_host_id: Option<String>,
+    #[serde(default = "default_true")]
+    pub show_status: bool,
+    #[serde(default)]
+    pub default_sftp_path: String,
+    #[serde(default)]
+    pub selected_network_interface: Option<String>,
+    #[serde(default)]
+    pub selected_volume_device: Option<String>,
+    #[serde(default)]
+    pub created_date: u64,
+}
+
+fn default_auth_method() -> String {
+    "passwordOrKey".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for HostEntry {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            alias: String::new(),
+            hostname: String::new(),
+            user: "root".to_string(),
+            port: 22,
+            identity_file: None,
+            group: "Production".to_string(),
+            source: HostSource::Custom,
+            remark: String::new(),
+            tags: Vec::new(),
+            auth_method: default_auth_method(),
+            identity_id: None,
+            ssh_key_id: None,
+            proxy_profile_id: None,
+            jump_host_id: None,
+            show_status: true,
+            default_sftp_path: String::new(),
+            selected_network_interface: None,
+            selected_volume_device: None,
+            created_date: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -41,7 +135,11 @@ pub fn parse_ssh_config_str(input: &str) -> Vec<HostEntry> {
             let user = map
                 .get("user")
                 .cloned()
-                .unwrap_or_else(|| std::env::var("USER").unwrap_or_else(|_| "root".into()));
+                .unwrap_or_else(|| {
+                    std::env::var("USER")
+                        .or_else(|_| std::env::var("USERNAME"))
+                        .unwrap_or_else(|_| "root".into())
+                });
             let port = map
                 .get("port")
                 .and_then(|p| p.parse::<u16>().ok())
@@ -56,6 +154,7 @@ pub fn parse_ssh_config_str(input: &str) -> Vec<HostEntry> {
                 identity_file,
                 group: "~/.ssh/config".into(),
                 source: HostSource::SshConfig,
+                ..Default::default()
             });
         }
         map.clear();
@@ -125,6 +224,12 @@ pub fn upsert_custom_host_at(
     if entry.group.trim().is_empty() {
         entry.group = "Custom Hosts".into();
     }
+    if entry.created_date == 0 {
+        entry.created_date = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+    }
     let mut list = read_custom_hosts(custom_json_path);
     if let Some(existing) = list.iter_mut().find(|h| h.id == entry.id) {
         *existing = entry;
@@ -146,12 +251,9 @@ pub fn delete_custom_host_at(
 }
 
 pub fn default_paths() -> (PathBuf, PathBuf) {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let home = app_home_dir();
     let ssh_cfg = home.join(".ssh").join("config");
-    let custom_cfg = dirs::config_dir()
-        .unwrap_or_else(|| home.join(".config"))
-        .join("ssh-box")
-        .join("hosts.json");
+    let custom_cfg = app_config_dir().join("hosts.json");
     (ssh_cfg, custom_cfg)
 }
 
@@ -227,6 +329,7 @@ mod tests {
             identity_file: None,
             group: "Production".into(),
             source: HostSource::Custom,
+            ..Default::default()
         };
 
         upsert_custom_host_at(&custom_json, custom_host.clone()).unwrap();

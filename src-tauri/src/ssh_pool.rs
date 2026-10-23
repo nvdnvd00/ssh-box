@@ -1,6 +1,6 @@
 use crate::frame_batcher::{batch_stream_to_sink, ChannelReader};
 use crate::host_store::HostEntry;
-use crate::vault;
+use crate::resources::{self, PortForwardingRule};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use russh::client::{self, Handle};
@@ -13,20 +13,18 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 pub fn expand_tilde_path(raw: &str) -> PathBuf {
     if let Some(stripped) = raw.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(stripped);
-        }
+        return crate::host_store::app_home_dir().join(stripped);
     }
     PathBuf::from(raw)
 }
 
 pub fn default_known_hosts_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+    crate::host_store::app_home_dir()
         .join(".ssh")
         .join("known_hosts")
 }
@@ -128,6 +126,7 @@ pub struct MultiplexedSession {
 pub struct SshPool {
     sessions: Arc<tokio::sync::Mutex<HashMap<String, Arc<MultiplexedSession>>>>,
     pane_txs: Arc<Mutex<HashMap<String, (String, mpsc::UnboundedSender<SshPaneCommand>)>>>,
+    forward_stops: Arc<Mutex<HashMap<String, mpsc::Sender<()>>>>,
 }
 
 impl SshPool {
@@ -181,12 +180,13 @@ impl SshPool {
             }
         })?;
 
-        let secret_opt = password_override.or_else(|| vault::get_host_secret(&host.id).ok().flatten());
-        let authenticated = Self::authenticate_session(&mut handle, host, secret_opt.as_deref()).await?;
+        let store = resources::load_resources();
+        let resolved = resources::resolve_host_credentials_from(&store, host, password_override);
+        let authenticated = Self::authenticate_session(&mut handle, host, &resolved).await?;
         if !authenticated {
             return Err(format!(
-                "Authentication failed for {}@{}:{} (tried SSH Agent, IdentityFile, and Keychain/Password)",
-                host.user, host.hostname, host.port
+                "Authentication failed for {}@{}:{} (tried SSH Agent, Identity/SSHKey, IdentityFile, and Keychain/Password)",
+                resolved.user, host.hostname, host.port
             ));
         }
 
@@ -212,16 +212,37 @@ impl SshPool {
     async fn authenticate_session(
         handle: &mut Handle<SshClientHandler>,
         host: &HostEntry,
-        secret: Option<&str>,
+        resolved: &resources::ResolvedHostCredentials,
     ) -> Result<bool, String> {
-        // 1. Try SSH Agent (SSH_AUTH_SOCK)
+        let auth_user = &resolved.user;
+        let secret = resolved.secret.as_deref();
+
+        // 1. Try Managed SSH Keys (from Identity or Host sshKeyId)
+        for (key_path, key_pass) in &resolved.key_paths {
+            if !key_path.exists() {
+                continue;
+            }
+            let key_res = russh_keys::load_secret_key(key_path, key_pass.as_deref())
+                .or_else(|_| russh_keys::load_secret_key(key_path, secret));
+            if let Ok(key_pair) = key_res {
+                if let Ok(true) = handle
+                    .authenticate_publickey(auth_user, Arc::new(key_pair))
+                    .await
+                {
+                    return Ok(true);
+                }
+            }
+        }
+
+        // 2. Try SSH Agent (SSH_AUTH_SOCK on Unix)
+        #[cfg(unix)]
         if let Ok(sock) = std::env::var("SSH_AUTH_SOCK") {
             if let Ok(stream) = tokio::net::UnixStream::connect(&sock).await {
                 let mut agent = russh_keys::agent::client::AgentClient::connect(stream);
                 if let Ok(identities) = agent.request_identities().await {
                     for pubkey in identities {
                         let (returned_agent, res) =
-                            handle.authenticate_future(&host.user, pubkey, agent).await;
+                            handle.authenticate_future(auth_user, pubkey, agent).await;
                         agent = returned_agent;
                         if res.unwrap_or(false) {
                             return Ok(true);
@@ -231,12 +252,13 @@ impl SshPool {
             }
         }
 
-        // 2. Try Private Keys (~/.ssh/id_* or configured IdentityFile)
+        // 3. Try Private Keys (~/.ssh/id_* or configured IdentityFile)
         let mut candidate_paths = Vec::new();
         if let Some(ref custom_id) = host.identity_file {
             candidate_paths.push(expand_tilde_path(custom_id));
         }
-        if let Some(home) = dirs::home_dir() {
+        let home = crate::host_store::app_home_dir();
+        if home.exists() {
             let ssh_dir = home.join(".ssh");
             for name in ["id_ed25519", "id_rsa", "id_ecdsa"] {
                 let p = ssh_dir.join(name);
@@ -254,7 +276,7 @@ impl SshPool {
                 .or_else(|_| russh_keys::load_secret_key(&key_path, secret));
             if let Ok(key_pair) = key_res {
                 if let Ok(true) = handle
-                    .authenticate_publickey(&host.user, Arc::new(key_pair))
+                    .authenticate_publickey(auth_user, Arc::new(key_pair))
                     .await
                 {
                     return Ok(true);
@@ -262,10 +284,10 @@ impl SshPool {
             }
         }
 
-        // 3. Try Password
+        // 4. Try Password
         if let Some(pw) = secret {
             if !pw.is_empty() {
-                if let Ok(true) = handle.authenticate_password(&host.user, pw).await {
+                if let Ok(true) = handle.authenticate_password(auth_user, pw).await {
                     return Ok(true);
                 }
             }
@@ -309,6 +331,10 @@ impl SshPool {
             )
             .await
             .map_err(|e| format!("Failed to request PTY: {e}"))?;
+
+        let _ = channel.set_env(false, "COLORTERM", "truecolor").await;
+        let _ = channel.set_env(false, "CLICOLOR", "1").await;
+        let _ = channel.set_env(false, "LANG", "en_US.UTF-8").await;
 
         channel
             .request_shell(false)
@@ -452,12 +478,232 @@ impl SshPool {
         let mut out = Vec::new();
         while let Some(msg) = channel.wait().await {
             match msg {
-                ChannelMsg::Data { data } => out.extend_from_slice(&data),
+                ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
+                    out.extend_from_slice(&data)
+                }
                 ChannelMsg::Eof | ChannelMsg::Close => break,
                 _ => {}
             }
         }
         Ok(String::from_utf8_lossy(&out).to_string())
+    }
+
+    pub async fn exec_on_host(&self, host: &HostEntry, command: &str) -> Result<String, String> {
+        let _ = self.get_or_connect(host, None).await?;
+        self.exec_command(&host.id, command).await
+    }
+
+    pub async fn exec_bytes_on_host(
+        &self,
+        host: &HostEntry,
+        command: &str,
+        stdin_data: Option<&[u8]>,
+    ) -> Result<Vec<u8>, String> {
+        let session = self.get_or_connect(host, None).await?;
+        let mut channel = {
+            let handle = session.handle.lock().await;
+            handle
+                .channel_open_session()
+                .await
+                .map_err(|e| format!("Failed to open SSH channel: {e}"))?
+        };
+
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|e| format!("Failed to exec SSH command: {e}"))?;
+
+        if let Some(input) = stdin_data {
+            for chunk in input.chunks(32768) {
+                channel
+                    .data(chunk)
+                    .await
+                    .map_err(|e| format!("Failed to stream data to remote host: {e}"))?;
+            }
+            let _ = channel.eof().await;
+        }
+
+        let mut stdout_buf = Vec::new();
+        let mut stderr_buf = Vec::new();
+        let mut exit_code: Option<u32> = None;
+
+        while let Some(msg) = channel.wait().await {
+            match msg {
+                ChannelMsg::Data { data } => stdout_buf.extend_from_slice(&data),
+                ChannelMsg::ExtendedData { data, .. } => stderr_buf.extend_from_slice(&data),
+                ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status),
+                ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+
+        if let Some(code) = exit_code {
+            if code != 0 {
+                let err_text = String::from_utf8_lossy(&stderr_buf).trim().to_string();
+                let out_text = String::from_utf8_lossy(&stdout_buf).trim().to_string();
+                let detail = if !err_text.is_empty() {
+                    err_text
+                } else if !out_text.is_empty() {
+                    out_text
+                } else {
+                    format!("Remote command exited with status {code}")
+                };
+                return Err(detail);
+            }
+        }
+
+        Ok(stdout_buf)
+    }
+
+    pub async fn start_port_forward(
+        &self,
+        rule: &PortForwardingRule,
+        host: &HostEntry,
+    ) -> Result<(), String> {
+        self.stop_port_forward(&rule.id);
+        let session = self.get_or_connect(host, None).await?;
+        let bind_addr = format!(
+            "{}:{}",
+            if rule.local_host.trim().is_empty() {
+                "127.0.0.1"
+            } else {
+                rule.local_host.trim()
+            },
+            rule.local_port
+        );
+        let listener = tokio::net::TcpListener::bind(&bind_addr)
+            .await
+            .map_err(|e| format!("Failed to bind {bind_addr}: {e}"))?;
+
+        let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
+        self.forward_stops
+            .lock()
+            .unwrap()
+            .insert(rule.id.clone(), stop_tx);
+
+        let mode = rule.mode.clone();
+        let target_host = if rule.target_host.trim().is_empty() {
+            "127.0.0.1".to_string()
+        } else {
+            rule.target_host.trim().to_string()
+        };
+        let target_port = if rule.target_port == 0 {
+            rule.remote_port
+        } else {
+            rule.target_port
+        };
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stop_rx.recv() => break,
+                    accept_res = listener.accept() => {
+                        let Ok((mut tcp_stream, peer_addr)) = accept_res else { break };
+                        let sess = session.clone();
+                        let mode_cl = mode.clone();
+                        let thost = target_host.clone();
+                        let tport = target_port;
+                        tokio::spawn(async move {
+                            let (dest_host, dest_port) = if mode_cl == "dynamic" {
+                                // Minimal SOCKS5 handshake
+                                let mut greeting = [0u8; 2];
+                                if tcp_stream.read_exact(&mut greeting).await.is_err() || greeting[0] != 5 {
+                                    return;
+                                }
+                                let nmethods = greeting[1] as usize;
+                                let mut methods = vec![0u8; nmethods];
+                                if tcp_stream.read_exact(&mut methods).await.is_err() {
+                                    return;
+                                }
+                                let _ = tcp_stream.write_all(&[5, 0]).await;
+                                let mut req_head = [0u8; 4];
+                                if tcp_stream.read_exact(&mut req_head).await.is_err() || req_head[1] != 1 {
+                                    return;
+                                }
+                                let dhost = match req_head[3] {
+                                    1 => {
+                                        let mut ip = [0u8; 4];
+                                        if tcp_stream.read_exact(&mut ip).await.is_err() { return; }
+                                        format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
+                                    }
+                                    3 => {
+                                        let mut len = [0u8; 1];
+                                        if tcp_stream.read_exact(&mut len).await.is_err() { return; }
+                                        let mut dom = vec![0u8; len[0] as usize];
+                                        if tcp_stream.read_exact(&mut dom).await.is_err() { return; }
+                                        String::from_utf8_lossy(&dom).to_string()
+                                    }
+                                    _ => return,
+                                };
+                                let mut port_buf = [0u8; 2];
+                                if tcp_stream.read_exact(&mut port_buf).await.is_err() { return; }
+                                let dport = u16::from_be_bytes(port_buf);
+                                let _ = tcp_stream.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await;
+                                (dhost, dport)
+                            } else {
+                                (thost, tport)
+                            };
+
+                            let channel_res = {
+                                let h = sess.handle.lock().await;
+                                h.channel_open_direct_tcpip(
+                                    &dest_host,
+                                    dest_port as u32,
+                                    &peer_addr.ip().to_string(),
+                                    peer_addr.port() as u32,
+                                ).await
+                            };
+                            let Ok(mut channel) = channel_res else { return };
+                            let mut buf = vec![0u8; 16384];
+                            loop {
+                                tokio::select! {
+                                    n_res = tcp_stream.read(&mut buf) => {
+                                        match n_res {
+                                            Ok(0) | Err(_) => {
+                                                let _ = channel.eof().await;
+                                                break;
+                                            }
+                                            Ok(n) => {
+                                                if channel.data(&buf[..n]).await.is_err() {
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    msg = channel.wait() => {
+                                        match msg {
+                                            Some(ChannelMsg::Data { data }) => {
+                                                if tcp_stream.write_all(&data).await.is_err() {
+                                                    break;
+                                                }
+                                            }
+                                            Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                            let _ = channel.close().await;
+                        });
+                    }
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    pub fn stop_port_forward(&self, rule_id: &str) -> bool {
+        if let Some(tx) = self.forward_stops.lock().unwrap().remove(rule_id) {
+            let _ = tx.try_send(());
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn is_port_forward_active(&self, rule_id: &str) -> bool {
+        self.forward_stops.lock().unwrap().contains_key(rule_id)
     }
 }
 

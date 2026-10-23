@@ -16,11 +16,96 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
-pub fn expand_tilde_path(raw: &str) -> PathBuf {
+pub fn expand_tilde_path_with(raw: &str, home: &Path) -> PathBuf {
     if let Some(stripped) = raw.strip_prefix("~/") {
-        return crate::host_store::app_home_dir().join(stripped);
+        return home.join(stripped);
     }
     PathBuf::from(raw)
+}
+
+pub fn expand_tilde_path(raw: &str) -> PathBuf {
+    expand_tilde_path_with(raw, &crate::host_store::app_home_dir())
+}
+
+pub fn resolve_agent_sockets(
+    host: &HostEntry,
+    env_sock: Option<&str>,
+    home: &Path,
+) -> Vec<PathBuf> {
+    if let Some(ref ia) = host.identity_agent {
+        if ia.trim().eq_ignore_ascii_case("none") {
+            return Vec::new();
+        }
+    }
+
+    let mut sockets = Vec::new();
+    let mut push_unique = |p: PathBuf| {
+        if !p.as_os_str().is_empty() && !sockets.contains(&p) {
+            sockets.push(p);
+        }
+    };
+
+    if let Some(ref ia) = host.identity_agent {
+        let trimmed = ia.trim();
+        if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("SSH_AUTH_SOCK") {
+            push_unique(expand_tilde_path_with(trimmed, home));
+        }
+    } else if let Ok(raw_cfg) = std::fs::read_to_string(home.join(".ssh").join("config")) {
+        for line in raw_cfg.lines() {
+            let clean = line.split('#').next().unwrap_or("").trim();
+            let mut parts = clean.splitn(2, |c: char| c.is_whitespace() || c == '=');
+            if parts
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("identityagent")
+            {
+                let val = parts
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_start_matches('=')
+                    .trim()
+                    .trim_matches('"');
+                if !val.is_empty()
+                    && !val.eq_ignore_ascii_case("none")
+                    && !val.eq_ignore_ascii_case("SSH_AUTH_SOCK")
+                {
+                    push_unique(expand_tilde_path_with(val, home));
+                }
+            }
+        }
+    }
+
+    let is_apple_launchd = env_sock
+        .map(|s| s.contains("com.apple.launchd"))
+        .unwrap_or(false);
+
+    if !is_apple_launchd {
+        if let Some(s) = env_sock {
+            push_unique(expand_tilde_path_with(s.trim(), home));
+        }
+    }
+
+    for rel in [
+        "Library/Containers/com.bitwarden.desktop/Data/.bitwarden-ssh-agent.sock",
+        ".bitwarden-ssh-agent.sock",
+        "Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock",
+        ".1password/agent.sock",
+    ] {
+        let candidate = home.join(rel);
+        if candidate.exists() {
+            push_unique(candidate);
+        }
+    }
+
+    if is_apple_launchd {
+        if let Some(s) = env_sock {
+            push_unique(expand_tilde_path_with(s.trim(), home));
+        }
+    }
+
+    sockets
 }
 
 pub fn default_known_hosts_path() -> PathBuf {
@@ -234,18 +319,22 @@ impl SshPool {
             }
         }
 
-        // 2. Try SSH Agent (SSH_AUTH_SOCK on Unix)
+        // 2. Try SSH Agent (IdentityAgent, Bitwarden/1Password sockets, and SSH_AUTH_SOCK on Unix)
         #[cfg(unix)]
-        if let Ok(sock) = std::env::var("SSH_AUTH_SOCK") {
-            if let Ok(stream) = tokio::net::UnixStream::connect(&sock).await {
-                let mut agent = russh_keys::agent::client::AgentClient::connect(stream);
-                if let Ok(identities) = agent.request_identities().await {
-                    for pubkey in identities {
-                        let (returned_agent, res) =
-                            handle.authenticate_future(auth_user, pubkey, agent).await;
-                        agent = returned_agent;
-                        if res.unwrap_or(false) {
-                            return Ok(true);
+        {
+            let env_sock = std::env::var("SSH_AUTH_SOCK").ok();
+            let home = crate::host_store::app_home_dir();
+            for sock in resolve_agent_sockets(host, env_sock.as_deref(), &home) {
+                if let Ok(stream) = tokio::net::UnixStream::connect(&sock).await {
+                    let mut agent = russh_keys::agent::client::AgentClient::connect(stream);
+                    if let Ok(identities) = agent.request_identities().await {
+                        for pubkey in identities {
+                            let (returned_agent, res) =
+                                handle.authenticate_future(auth_user, pubkey, agent).await;
+                            agent = returned_agent;
+                            if res.unwrap_or(false) {
+                                return Ok(true);
+                            }
                         }
                     }
                 }
@@ -753,5 +842,43 @@ mod tests {
         let expanded = expand_tilde_path("~/.ssh/id_ed25519");
         assert!(!expanded.to_string_lossy().starts_with("~/"));
         assert!(expanded.to_string_lossy().ends_with(".ssh/id_ed25519"));
+    }
+
+    #[test]
+    fn resolves_identity_agent_and_bitwarden_sockets_alongside_launchd() {
+        let tmp_home =
+            std::env::temp_dir().join(format!("ssh-box-agent-test-{}", uuid::Uuid::new_v4()));
+        let bw_dir = tmp_home.join("Library/Containers/com.bitwarden.desktop/Data");
+        std::fs::create_dir_all(&bw_dir).unwrap();
+        let bw_sock = bw_dir.join(".bitwarden-ssh-agent.sock");
+        std::fs::write(&bw_sock, b"").unwrap();
+
+        let host = HostEntry {
+            alias: "example-vps".into(),
+            hostname: "203.0.113.10".into(),
+            user: "root".into(),
+            identity_agent: Some(
+                "~/Library/Containers/com.bitwarden.desktop/Data/.bitwarden-ssh-agent.sock".into(),
+            ),
+            ..Default::default()
+        };
+
+        let sockets = resolve_agent_sockets(
+            &host,
+            Some("/var/run/com.apple.launchd.test/Listeners"),
+            &tmp_home,
+        );
+        assert_eq!(sockets.first(), Some(&bw_sock));
+        assert!(sockets.contains(&PathBuf::from("/var/run/com.apple.launchd.test/Listeners")));
+
+        let custom_host = HostEntry::default();
+        let fallback_sockets = resolve_agent_sockets(
+            &custom_host,
+            Some("/var/run/com.apple.launchd.test/Listeners"),
+            &tmp_home,
+        );
+        assert!(fallback_sockets.contains(&bw_sock));
+
+        let _ = std::fs::remove_dir_all(&tmp_home);
     }
 }

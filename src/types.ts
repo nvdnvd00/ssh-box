@@ -12,6 +12,7 @@ export interface HostEntry {
   user: string;
   port: number;
   identityFile?: string | null;
+  identityAgent?: string | null;
   group: string;
   source: HostSource;
   remark?: string;

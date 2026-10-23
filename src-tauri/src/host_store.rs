@@ -46,6 +46,8 @@ pub struct HostEntry {
     #[serde(default)]
     pub identity_file: Option<String>,
     #[serde(default)]
+    pub identity_agent: Option<String>,
+    #[serde(default)]
     pub group: String,
     pub source: HostSource,
     #[serde(default)]
@@ -91,6 +93,7 @@ impl Default for HostEntry {
             user: "root".to_string(),
             port: 22,
             identity_file: None,
+            identity_agent: None,
             group: "Production".to_string(),
             source: HostSource::Custom,
             remark: String::new(),
@@ -120,11 +123,19 @@ pub fn parse_ssh_config_str(input: &str) -> Vec<HostEntry> {
     let mut hosts = Vec::new();
     let mut current_aliases: Vec<String> = Vec::new();
     let mut fields: BTreeMap<String, String> = BTreeMap::new();
+    let mut wildcard_defaults: BTreeMap<String, String> = BTreeMap::new();
 
     let flush = |aliases: &mut Vec<String>,
                  map: &mut BTreeMap<String, String>,
+                 defaults: &mut BTreeMap<String, String>,
                  out: &mut Vec<HostEntry>| {
         for alias in aliases.drain(..) {
+            if alias == "*" {
+                for (k, v) in map.iter() {
+                    defaults.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+                continue;
+            }
             if alias.contains('*') || alias.contains('?') {
                 continue;
             }
@@ -145,6 +156,7 @@ pub fn parse_ssh_config_str(input: &str) -> Vec<HostEntry> {
                 .and_then(|p| p.parse::<u16>().ok())
                 .unwrap_or(22);
             let identity_file = map.get("identityfile").cloned();
+            let identity_agent = map.get("identityagent").cloned();
             out.push(HostEntry {
                 id: format!("sshcfg:{alias}"),
                 alias,
@@ -152,6 +164,7 @@ pub fn parse_ssh_config_str(input: &str) -> Vec<HostEntry> {
                 user,
                 port,
                 identity_file,
+                identity_agent,
                 group: "~/.ssh/config".into(),
                 source: HostSource::SshConfig,
                 ..Default::default()
@@ -175,13 +188,33 @@ pub fn parse_ssh_config_str(input: &str) -> Vec<HostEntry> {
             .trim()
             .trim_matches('"');
         if key == "host" {
-            flush(&mut current_aliases, &mut fields, &mut hosts);
+            flush(
+                &mut current_aliases,
+                &mut fields,
+                &mut wildcard_defaults,
+                &mut hosts,
+            );
             current_aliases = val.split_whitespace().map(|s| s.to_string()).collect();
         } else if !current_aliases.is_empty() && !val.is_empty() {
             fields.entry(key).or_insert_with(|| val.to_string());
         }
     }
-    flush(&mut current_aliases, &mut fields, &mut hosts);
+    flush(
+        &mut current_aliases,
+        &mut fields,
+        &mut wildcard_defaults,
+        &mut hosts,
+    );
+
+    for host in &mut hosts {
+        if host.identity_file.is_none() {
+            host.identity_file = wildcard_defaults.get("identityfile").cloned();
+        }
+        if host.identity_agent.is_none() {
+            host.identity_agent = wildcard_defaults.get("identityagent").cloned();
+        }
+    }
+
     hosts
 }
 
@@ -305,6 +338,25 @@ mod tests {
         );
         assert_eq!(parsed[1].alias, "staging-db");
         assert_eq!(parsed[1].port, 22);
+    }
+
+    #[test]
+    fn inherits_wildcard_identity_agent_from_ssh_config() {
+        let sample = r#"
+            Host example-vps
+                HostName 203.0.113.10
+                User root
+
+            Host *
+                IdentityAgent ~/Library/Containers/com.bitwarden.desktop/Data/.bitwarden-ssh-agent.sock
+        "#;
+        let parsed = parse_ssh_config_str(sample);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].alias, "example-vps");
+        assert_eq!(
+            parsed[0].identity_agent.as_deref(),
+            Some("~/Library/Containers/com.bitwarden.desktop/Data/.bitwarden-ssh-agent.sock")
+        );
     }
 
     #[test]

@@ -224,7 +224,14 @@ pub fn parse_env_vars_pairs(raw: &str) -> Vec<(String, String)> {
     out
 }
 
-pub fn build_shell_init_line(env_vars: &str, startup_command: &str) -> Option<String> {
+pub const TMUX_AUTO_ATTACH_CMD: &str =
+    "[ -z \"$TMUX\" ] && command -v tmux >/dev/null 2>&1 && tmux new-session -A -s ssh-box";
+
+pub fn build_shell_init_line(
+    env_vars: &str,
+    startup_command: &str,
+    use_tmux: bool,
+) -> Option<String> {
     let mut parts = Vec::new();
     for (k, v) in parse_env_vars_pairs(env_vars) {
         let quoted_v = format!("'{}'", v.replace('\'', "'\\''"));
@@ -233,6 +240,9 @@ pub fn build_shell_init_line(env_vars: &str, startup_command: &str) -> Option<St
     let cmd = startup_command.trim();
     if !cmd.is_empty() {
         parts.push(cmd.to_string());
+    }
+    if use_tmux && !cmd.contains("tmux") {
+        parts.push(TMUX_AUTO_ATTACH_CMD.to_string());
     }
     if parts.is_empty() {
         None
@@ -567,6 +577,7 @@ impl SshPool {
         cols: u16,
         rows: u16,
         password_override: Option<String>,
+        use_tmux: bool,
         mut on_output: F,
     ) -> Result<String, String>
     where
@@ -612,7 +623,9 @@ impl SshPool {
             .await
             .map_err(|e| format!("Failed to request shell: {e}"))?;
 
-        if let Some(init_line) = build_shell_init_line(&host.env_vars, &host.startup_command) {
+        if let Some(init_line) =
+            build_shell_init_line(&host.env_vars, &host.startup_command, use_tmux)
+        {
             let _ = channel.data(init_line.as_bytes()).await;
         }
 
@@ -1160,12 +1173,19 @@ mod tests {
     fn builds_shell_init_line_from_env_vars_and_startup_command() {
         let env_raw = "APP_ENV=production\nexport TZ=\"Asia/Ho_Chi_Minh\"\n# comment";
         let cmd = "tmux attach -t main || tmux new -s main";
-        let init = build_shell_init_line(env_raw, cmd).unwrap();
+        let init = build_shell_init_line(env_raw, cmd, false).unwrap();
         assert_eq!(
             init,
             "export APP_ENV='production' && export TZ='Asia/Ho_Chi_Minh' && tmux attach -t main || tmux new -s main\n"
         );
-        assert!(build_shell_init_line("", "   ").is_none());
+        assert!(build_shell_init_line("", "   ", false).is_none());
+
+        // When use_tmux is enabled, appends auto-attach command unless startup_command already invokes tmux
+        let tmux_only = build_shell_init_line("", "", true).unwrap();
+        assert_eq!(tmux_only, format!("{TMUX_AUTO_ATTACH_CMD}\n"));
+
+        let with_custom_tmux = build_shell_init_line("", cmd, true).unwrap();
+        assert_eq!(with_custom_tmux, format!("{cmd}\n"));
     }
 
     #[test]

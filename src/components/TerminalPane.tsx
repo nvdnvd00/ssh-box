@@ -689,13 +689,16 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       }).catch(() => undefined);
     };
 
+    const currentSettings = loadAppSettings();
+
     if (leaf.kind === "local") {
       invoke("spawn_local_pty", {
         paneId: leaf.paneId,
         cols,
         rows,
         // Read at spawn time so changing the setting never restarts open panes
-        shell: loadAppSettings().localShell || null,
+        shell: currentSettings.localShell || null,
+        useTmux: !leaf.startupCommand && currentSettings.tmuxLocalEnabled,
         onData: channel,
       })
         .then(() => {
@@ -728,6 +731,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         cols,
         rows,
         password: leaf.passwordOverride ?? null,
+        useTmux: !leaf.startupCommand && currentSettings.tmuxSshEnabled,
         onData: channel,
       })
         .then((res) => {

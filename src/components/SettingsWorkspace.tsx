@@ -1,10 +1,12 @@
 import React, { useEffect, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Activity,
   Check,
   Globe,
   Info,
+  Keyboard,
   KeyRound,
   LayoutGrid,
   Minus,
@@ -50,6 +52,7 @@ export type SettingsTabId =
   | "terminal"
   | "tags"
   | "diagnostics"
+  | "shortcuts"
   | "about";
 
 interface SettingsWorkspaceProps {
@@ -130,6 +133,11 @@ export function getSettingsNavGroups(lang: AppLanguage): {
           icon: <Wrench className="w-4 h-4 text-orange-400" />,
         },
         {
+          id: "shortcuts",
+          label: lang === "vi" ? "Phím tắt" : "Keyboard Shortcuts",
+          icon: <Keyboard className="w-4 h-4 text-teal-400" />,
+        },
+        {
           id: "about",
           label: lang === "vi" ? "Giới thiệu" : "About",
           icon: <Info className="w-4 h-4 text-violet-400" />,
@@ -156,8 +164,12 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
   const [shellOptions, setShellOptions] = useState<
     { id: string; label: string }[]
   >([]);
+  const [appVersion, setAppVersion] = useState("");
 
   useEffect(() => {
+    getVersion()
+      .then(setAppVersion)
+      .catch(() => undefined);
     invoke<{ id: string; label: string }[]>("list_local_shells")
       .then(setShellOptions)
       .catch(() => undefined);
@@ -1498,27 +1510,9 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
               </section>
             )}
 
-            {/* ABOUT TAB */}
-            {activeTab === "about" && (
+            {/* SHORTCUTS TAB */}
+            {activeTab === "shortcuts" && (
               <section className="space-y-4">
-                <div className="rounded-2xl border border-border/80 bg-card/65 p-6 flex items-center gap-4">
-                  <div className="w-14 h-14 rounded-2xl bg-primary/15 border border-primary/30 flex items-center justify-center text-primary shadow-sm">
-                    <Activity className="w-7 h-7" />
-                  </div>
-                  <div>
-                    <h2 className="text-base font-bold text-foreground">
-                      SSH-Box
-                    </h2>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      Native macOS Server Resource Manager, Telemetry Dashboard,
-                      Docker Controller &amp; SSH Workspace
-                    </p>
-                    <div className="inline-flex items-center gap-2 mt-2 px-2.5 py-0.5 rounded-full bg-secondary text-[11px] font-mono text-muted-foreground">
-                      Version 2.0.0 · Tauri v2 + Rust
-                    </div>
-                  </div>
-                </div>
-
                 <div className="rounded-2xl border border-border/80 bg-card/65 divide-y divide-border/60 overflow-hidden">
                   <div className="px-4 py-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                     Keyboard Shortcuts
@@ -1540,6 +1534,29 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
                       </kbd>
                     </div>
                   ))}
+                </div>
+              </section>
+            )}
+
+            {/* ABOUT TAB */}
+            {activeTab === "about" && (
+              <section className="space-y-4">
+                <div className="rounded-2xl border border-border/80 bg-card/65 p-6 flex items-center gap-4">
+                  <div className="w-14 h-14 rounded-2xl bg-primary/15 border border-primary/30 flex items-center justify-center text-primary shadow-sm">
+                    <Activity className="w-7 h-7" />
+                  </div>
+                  <div>
+                    <h2 className="text-base font-bold text-foreground">
+                      SSH-Box
+                    </h2>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Native macOS Server Resource Manager, Telemetry Dashboard,
+                      Docker Controller &amp; SSH Workspace
+                    </p>
+                    <div className="inline-flex items-center gap-2 mt-2 px-2.5 py-0.5 rounded-full bg-secondary text-[11px] font-mono text-muted-foreground">
+                      Version {appVersion} · Tauri v2 + Rust
+                    </div>
+                  </div>
                 </div>
               </section>
             )}

@@ -216,6 +216,13 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
   const [selectedTagFilter, setSelectedTagFilter] = useState<string>("ALL");
   const [editingHost, setEditingHost] = useState<HostEntry | null>(null);
   const [hostSecret, setHostSecret] = useState("");
+  const [testingHost, setTestingHost] = useState(false);
+  const [hostTestResult, setHostTestResult] = useState<{
+    ok: boolean;
+    message: string;
+  } | null>(null);
+  // A result only describes the values it was run with
+  useEffect(() => setHostTestResult(null), [editingHost, hostSecret]);
   const [showGroupModal, setShowGroupModal] = useState(false);
   const [groupForm, setGroupForm] = useState<MachineGroup>({
     id: "",
@@ -454,6 +461,26 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
       setHostSecret("");
     } catch (err) {
       setErrorBanner(String(err));
+    }
+  };
+
+  const handleTestHostConnection = async () => {
+    if (!editingHost || !editingHost.hostname.trim()) return;
+    setTestingHost(true);
+    try {
+      const fingerprint = await invoke<string>("test_ssh_connection", {
+        host: {
+          ...editingHost,
+          hostname: editingHost.hostname.trim(),
+          user: editingHost.user.trim() || "root",
+        },
+        secret: hostSecret.trim() || null,
+      });
+      setHostTestResult({ ok: true, message: `Connected · ${fingerprint}` });
+    } catch (err) {
+      setHostTestResult({ ok: false, message: String(err) });
+    } finally {
+      setTestingHost(false);
     }
   };
 
@@ -3370,7 +3397,29 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                 </div>
               )}
 
-              <div className="flex justify-end gap-2.5 pt-3 border-t border-border/80">
+              <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-border/80">
+                {hostTestResult && (
+                  <span
+                    className={`mr-auto min-w-0 text-[11px] font-mono break-all ${
+                      hostTestResult.ok ? "text-emerald-400" : "text-rose-400"
+                    }`}
+                  >
+                    {hostTestResult.message}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={handleTestHostConnection}
+                  disabled={testingHost || !editingHost.hostname.trim()}
+                  className="h-10 px-4 rounded-xl bg-secondary hover:bg-accent text-foreground text-xs font-semibold cursor-pointer transition-colors inline-flex items-center gap-1.5 shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {testingHost ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Activity className="w-3.5 h-3.5" />
+                  )}
+                  Test connection
+                </button>
                 <button
                   type="button"
                   onClick={() => setEditingHost(null)}

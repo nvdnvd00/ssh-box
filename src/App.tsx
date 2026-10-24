@@ -271,6 +271,27 @@ export default function App() {
     loadResources();
   }, [loadHosts, loadResources]);
 
+  // Once per launch (the ref also absorbs StrictMode's double effect); a webview
+  // reload skips rules the backend still reports as running
+  const autoStartedRef = useRef(false);
+  useEffect(() => {
+    if (autoStartedRef.current) return;
+    autoStartedRef.current = true;
+    invoke<ResourcesStoreData>("get_resources")
+      .then(async (data) => {
+        for (const rule of data.portForwardingRules) {
+          if (!rule.autoStart || rule.status === "running") continue;
+          // A failure is saved on the rule and shown on its card
+          await invoke("toggle_port_forwarding_rule", {
+            ruleId: rule.id,
+            active: true,
+          }).catch(() => undefined);
+        }
+        loadResources();
+      })
+      .catch(() => undefined);
+  }, [loadResources]);
+
   const activeTab = useMemo(
     () => tabs.find((t) => t.id === activeTabId) ?? tabs[0] ?? null,
     [tabs, activeTabId],

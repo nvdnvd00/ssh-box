@@ -47,6 +47,8 @@ import {
   AppSettingsConfig,
   loadAppSettings,
   loadThemeConfig,
+  parseAppSettings,
+  parseThemeConfig,
   saveAppSettings,
   saveThemeConfig,
   ThemeConfig,
@@ -231,14 +233,49 @@ export default function App() {
     {},
   );
 
+  const settingsSyncedRef = useRef(false);
+
+  useEffect(() => {
+    invoke<{
+      theme?: Partial<ThemeConfig>;
+      settings?: Partial<AppSettingsConfig>;
+    } | null>("get_ui_settings")
+      .then((disk) => {
+        if (disk && (disk.theme || disk.settings)) {
+          if (disk.theme) {
+            const nextTheme = parseThemeConfig(disk.theme, disk.theme);
+            applyAppThemeToRoot(nextTheme);
+            saveThemeConfig(nextTheme);
+            setThemeConfig(nextTheme);
+          }
+          if (disk.settings) {
+            const nextSettings = parseAppSettings(disk.settings);
+            saveAppSettings(nextSettings);
+            setAppSettings(nextSettings);
+          }
+          settingsSyncedRef.current = true;
+        } else {
+          settingsSyncedRef.current = true;
+          invoke("save_ui_settings", {
+            data: { theme: loadThemeConfig(), settings: loadAppSettings() },
+          }).catch(() => undefined);
+        }
+      })
+      .catch(() => {
+        settingsSyncedRef.current = true;
+      });
+  }, []);
+
   useEffect(() => {
     applyAppThemeToRoot(themeConfig);
     saveThemeConfig(themeConfig);
-  }, [themeConfig]);
-
-  useEffect(() => {
     saveAppSettings(appSettings);
-  }, [appSettings]);
+    if (settingsSyncedRef.current) {
+      invoke("save_ui_settings", {
+        data: { theme: themeConfig, settings: appSettings },
+      }).catch(() => undefined);
+    }
+  }, [themeConfig, appSettings]);
 
   const handleUpdateTheme = useCallback(
     (updater: (prev: ThemeConfig) => ThemeConfig) => {

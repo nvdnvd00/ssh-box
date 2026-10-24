@@ -1090,6 +1090,7 @@ export default function App() {
                 themeConfig={themeConfig}
                 isVisible={workspaceView === "terminal"}
                 language={appSettings.language}
+                copyOnSelect={appSettings.copyOnSelect}
                 broadcastTargetPaneIds={broadcastTargetPaneIds}
                 onFocusPane={handleFocusPane}
                 onUpdateLeafStatus={handleUpdateLeafStatus}

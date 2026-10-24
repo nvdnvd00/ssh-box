@@ -63,6 +63,16 @@ fn list_hosts() -> Result<Vec<HostEntry>, String> {
 }
 
 #[tauri::command]
+fn get_ui_settings() -> Option<serde_json::Value> {
+    host_store::load_ui_settings_at(&host_store::default_settings_path())
+}
+
+#[tauri::command]
+fn save_ui_settings(data: serde_json::Value) -> Result<(), String> {
+    host_store::save_ui_settings_at(&host_store::default_settings_path(), &data)
+}
+
+#[tauri::command]
 fn save_host(host: HostEntry, secret: Option<String>) -> Result<Vec<HostEntry>, String> {
     let custom_id = if host.id.trim().is_empty() {
         format!("custom:{}", uuid::Uuid::new_v4())
@@ -821,6 +831,8 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             list_hosts,
+            get_ui_settings,
+            save_ui_settings,
             save_host,
             delete_host,
             get_resources,

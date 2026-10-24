@@ -355,6 +355,24 @@ pub fn delete_custom_host(host_id: &str) -> Result<Vec<HostEntry>, String> {
     Ok(load_merged_hosts(&ssh_cfg, &custom_cfg))
 }
 
+pub fn default_settings_path() -> PathBuf {
+    app_config_dir().join("settings.json")
+}
+
+pub fn load_ui_settings_at(path: &Path) -> Option<serde_json::Value> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+}
+
+pub fn save_ui_settings_at(path: &Path, data: &serde_json::Value) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(data).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,6 +509,23 @@ mod tests {
         let hosts = read_custom_hosts(&custom_json);
         assert_eq!(hosts[0].tags, vec!["prod".to_string()]);
         assert!(hosts[1].tags.is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn roundtrips_ui_settings_json_on_disk() {
+        let tmp_dir = std::env::temp_dir().join(format!("ssh-box-test-{}", uuid::Uuid::new_v4()));
+        let settings_path = tmp_dir.join("settings.json");
+
+        assert_eq!(load_ui_settings_at(&settings_path), None);
+
+        let payload = serde_json::json!({
+            "theme": { "appTheme": "midnight-dark", "accentColor": "violet" },
+            "settings": { "language": "vi", "fontSize": 14 }
+        });
+        save_ui_settings_at(&settings_path, &payload).unwrap();
+        assert_eq!(load_ui_settings_at(&settings_path), Some(payload));
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }

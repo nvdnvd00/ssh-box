@@ -378,10 +378,14 @@ impl SshPool {
             host_key_err: host_key_err.clone(),
         };
 
-        let mut handle = tokio::time::timeout(
-            Duration::from_secs(12),
-            client::connect(config, (host.hostname.as_str(), host.port), handler),
-        )
+        let mut handle = tokio::time::timeout(Duration::from_secs(12), async {
+            let socket = tokio::net::TcpStream::connect((host.hostname.as_str(), host.port))
+                .await
+                .map_err(russh::Error::from)?;
+            // Keystrokes are tiny packets; without this, Nagle holds them until the server ACKs.
+            socket.set_nodelay(true).map_err(russh::Error::from)?;
+            client::connect_stream(config, socket, handler).await
+        })
         .await
         .map_err(|_| format!("Connection timed out to {}:{}", host.hostname, host.port))?
         .map_err(|e| {

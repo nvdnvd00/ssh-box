@@ -725,7 +725,10 @@ export default function App() {
           isMacDesktop ? (isFullscreen ? "pl-[25px]" : "pl-20") : "pl-3"
         } pr-4 bg-header/95 backdrop-blur-md border-b border-border/80 flex items-center justify-between gap-3 z-30 transition-[padding] duration-200`}
       >
-        <div className="flex items-center gap-2 min-w-0 flex-1">
+        <div
+          data-tauri-drag-region
+          className="flex items-center gap-2 min-w-0 flex-1"
+        >
           <button
             type="button"
             onClick={() => setSidebarOpen((p) => !p)}
@@ -741,7 +744,10 @@ export default function App() {
 
           {/* When inside Terminal view, show active Terminal session tabs in the top bar */}
           {workspaceView === "terminal" && tabs.length > 0 && (
-            <div className="flex items-center gap-1.5 min-w-0 overflow-x-auto no-scrollbar pl-1">
+            <div
+              data-tauri-drag-region
+              className="flex items-center gap-1.5 min-w-0 overflow-x-auto no-scrollbar pl-1"
+            >
               {tabs.map((tab) => {
                 const isTabActive = tab.id === activeTab?.id;
                 const leaves = collectLeaves(tab.root);
@@ -790,7 +796,10 @@ export default function App() {
         </div>
 
         {/* Right Window Action Controls */}
-        <div className="flex items-center gap-2 shrink-0">
+        <div
+          data-tauri-drag-region
+          className="flex items-center gap-2 shrink-0"
+        >
           <button
             type="button"
             onClick={() => {

@@ -506,7 +506,7 @@ pub async fn chmod_entry(
     }
 
     let host = find_host_by_id(host_id)?;
-    let cmd = format!("chmod {} -- {}", clean_mode, shell_quote(path));
+    let cmd = format!("chmod -- {} {}", clean_mode, shell_quote(path));
     pool.exec_bytes_on_host(&host, &cmd, None).await.map(|_| ())
 }
 
@@ -850,7 +850,7 @@ where
                     "fast_sync".to_string(),
                     "Fast Sync (zstream 64KB chunks)".to_string(),
                     format!(
-                        "gzip -d > {dst} && chmod {:o} -- {dst}",
+                        "gzip -d > {dst} && chmod -- {:o} {dst}",
                         mode_bits,
                         dst = shell_quote(&remote_dest)
                     ),
@@ -860,7 +860,7 @@ where
                     "fast_sync".to_string(),
                     "Fast Sync (direct 64KB stream)".to_string(),
                     format!(
-                        "cat > {dst} && chmod {:o} -- {dst}",
+                        "cat > {dst} && chmod -- {:o} {dst}",
                         mode_bits,
                         dst = shell_quote(&remote_dest)
                     ),
@@ -870,7 +870,7 @@ where
                     "chunk_stream".to_string(),
                     "Chunk Stream (64KB)".to_string(),
                     format!(
-                        "cat > {dst} && chmod {:o} -- {dst}",
+                        "cat > {dst} && chmod -- {:o} {dst}",
                         mode_bits,
                         dst = shell_quote(&remote_dest)
                     ),

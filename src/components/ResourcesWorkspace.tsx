@@ -1980,6 +1980,12 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                               SOCKS5 {rule.localHost}:{rule.localPort} →{" "}
                               {machine?.alias ?? "SSH"}
                             </span>
+                          ) : rule.mode === "remote" ? (
+                            <span>
+                              {machine?.alias ?? "SSH"} {rule.remoteHost}:
+                              {rule.remotePort} → {rule.targetHost}:
+                              {rule.targetPort}
+                            </span>
                           ) : (
                             <span>
                               {rule.localHost}:{rule.localPort} →{" "}
@@ -4124,29 +4130,49 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                 />
               </div>
               <div className="grid grid-cols-2 gap-3.5">
+                {/* -R binds on the SSH server, -L/-D bind on this machine */}
                 <div>
-                  <label className="ui-label">Local Bind Host</label>
+                  <label className="ui-label">
+                    {editingPfRule.mode === "remote"
+                      ? "Remote Bind Host"
+                      : "Local Bind Host"}
+                  </label>
                   <input
                     type="text"
-                    value={editingPfRule.localHost}
+                    value={
+                      editingPfRule.mode === "remote"
+                        ? editingPfRule.remoteHost
+                        : editingPfRule.localHost
+                    }
                     onChange={(e) =>
                       setEditingPfRule({
                         ...editingPfRule,
-                        localHost: e.target.value,
+                        [editingPfRule.mode === "remote"
+                          ? "remoteHost"
+                          : "localHost"]: e.target.value,
                       })
                     }
                     className="ui-input"
                   />
                 </div>
                 <div>
-                  <label className="ui-label">Local Port</label>
+                  <label className="ui-label">
+                    {editingPfRule.mode === "remote" ? "Remote Port" : "Local Port"}
+                  </label>
                   <input
                     type="number"
-                    value={editingPfRule.localPort}
+                    value={
+                      editingPfRule.mode === "remote"
+                        ? editingPfRule.remotePort
+                        : editingPfRule.localPort
+                    }
                     onChange={(e) =>
                       setEditingPfRule({
                         ...editingPfRule,
-                        localPort: Number.parseInt(e.target.value, 10) || 8080,
+                        [editingPfRule.mode === "remote"
+                          ? "remotePort"
+                          : "localPort"]:
+                          Number.parseInt(e.target.value, 10) || 8080,
                       })
                     }
                     className="ui-input"

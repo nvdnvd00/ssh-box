@@ -4,7 +4,7 @@ use crate::resources::{self, PortForwardingRule};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use russh::client::{self, Handle};
-use russh::{ChannelMsg, Disconnect};
+use russh::{Channel, ChannelMsg, Disconnect};
 use russh_keys::key::PublicKey;
 use russh_keys::PublicKeyBase64;
 use serde::{Deserialize, Serialize};
@@ -292,10 +292,34 @@ pub fn verify_tofu_host_key(
     Ok(fingerprint)
 }
 
+// ssh -R: the server listens on remote_host:remote_port and every connection it accepts is
+// dialed from this machine to target_host:target_port; local_host/local_port belong to -L/-D
+fn remote_forward_spec(rule: &PortForwardingRule) -> Result<(String, u32, String, u16), String> {
+    if rule.remote_port == 0 || rule.target_port == 0 {
+        // Port 0 would make the server pick a random port that no incoming channel maps back to
+        return Err("Remote forwarding needs a remote port and a target port".to_string());
+    }
+    let or_loopback = |h: &str| {
+        if h.trim().is_empty() {
+            "127.0.0.1".to_string()
+        } else {
+            h.trim().to_string()
+        }
+    };
+    Ok((
+        or_loopback(&rule.remote_host),
+        rule.remote_port as u32,
+        or_loopback(&rule.target_host),
+        rule.target_port,
+    ))
+}
+
 pub struct SshClientHandler {
     host_port_id: String,
     fingerprint_out: Arc<Mutex<Option<String>>>,
     host_key_err: Arc<Mutex<Option<String>>>,
+    // Server-side port of each -R forward on this session -> local target to dial
+    remote_forwards: Arc<Mutex<HashMap<u32, (String, u16)>>>,
 }
 
 #[async_trait]
@@ -320,6 +344,43 @@ impl client::Handler for SshClientHandler {
             }
         }
     }
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        mut channel: Channel<client::Msg>,
+        _connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let target = self
+            .remote_forwards
+            .lock()
+            .unwrap()
+            .get(&connected_port)
+            .cloned();
+        // Off the session loop: a slow connect here would stall every channel on this host
+        tokio::spawn(async move {
+            let tcp = match target {
+                Some((host, port)) => tokio::net::TcpStream::connect((host.as_str(), port))
+                    .await
+                    .ok(),
+                None => None,
+            };
+            let Some(mut tcp) = tcp else {
+                let _ = channel.close().await;
+                return;
+            };
+            let writer = channel.make_writer();
+            let mut io = tokio::io::join(channel.make_reader(), writer);
+            let _ = tokio::io::copy_bidirectional(&mut tcp, &mut io).await;
+            drop(io);
+            // Dropping a russh channel sends no CLOSE, so a reset target would hang the remote client
+            let _ = channel.close().await;
+        });
+        Ok(())
+    }
 }
 
 enum SshPaneCommand {
@@ -332,6 +393,7 @@ pub struct MultiplexedSession {
     pub host_id: String,
     pub fingerprint: String,
     pub handle: tokio::sync::Mutex<Handle<SshClientHandler>>,
+    remote_forwards: Arc<Mutex<HashMap<u32, (String, u16)>>>,
 }
 
 #[derive(Default, Clone)]
@@ -358,11 +420,12 @@ impl SshPool {
             }
         }
 
-        let (handle, fp) = Self::connect_new(host, password_override).await?;
+        let (handle, fp, remote_forwards) = Self::connect_new(host, password_override).await?;
         let session = Arc::new(MultiplexedSession {
             host_id: host.id.clone(),
             fingerprint: fp,
             handle: tokio::sync::Mutex::new(handle),
+            remote_forwards,
         });
 
         self.sessions
@@ -378,7 +441,7 @@ impl SshPool {
         host: &HostEntry,
         password_override: Option<String>,
     ) -> Result<String, String> {
-        let (handle, fp) = Self::connect_new(host, password_override).await?;
+        let (handle, fp, _) = Self::connect_new(host, password_override).await?;
         let _ = handle
             .disconnect(Disconnect::ByApplication, "Connection test", "en")
             .await;
@@ -388,7 +451,14 @@ impl SshPool {
     async fn connect_new(
         host: &HostEntry,
         password_override: Option<String>,
-    ) -> Result<(Handle<SshClientHandler>, String), String> {
+    ) -> Result<
+        (
+            Handle<SshClientHandler>,
+            String,
+            Arc<Mutex<HashMap<u32, (String, u16)>>>,
+        ),
+        String,
+    > {
         let config = Arc::new(client::Config {
             keepalive_interval: Some(Duration::from_secs(15)),
             keepalive_max: 3,
@@ -403,10 +473,12 @@ impl SshPool {
 
         let fingerprint_out = Arc::new(Mutex::new(None));
         let host_key_err = Arc::new(Mutex::new(None));
+        let remote_forwards = Arc::new(Mutex::new(HashMap::new()));
         let handler = SshClientHandler {
             host_port_id,
             fingerprint_out: fingerprint_out.clone(),
             host_key_err: host_key_err.clone(),
+            remote_forwards: remote_forwards.clone(),
         };
 
         let mut handle = tokio::time::timeout(Duration::from_secs(12), async {
@@ -443,7 +515,7 @@ impl SshPool {
             .clone()
             .unwrap_or_else(|| "SHA256:verified".to_string());
 
-        Ok((handle, fp))
+        Ok((handle, fp, remote_forwards))
     }
 
     async fn authenticate_session(
@@ -882,6 +954,10 @@ impl SshPool {
         rule: &PortForwardingRule,
         host: &HostEntry,
     ) -> Result<(), String> {
+        if rule.mode == "remote" {
+            return self.start_remote_forward(rule, host).await;
+        }
+
         self.stop_port_forward(&rule.id);
         let session = self.get_or_connect(host, None).await?;
         let bind_addr = format!(
@@ -1015,6 +1091,50 @@ impl SshPool {
         Ok(())
     }
 
+    // The server owns the listener; SshClientHandler pipes each forwarded-tcpip channel it opens.
+    // ponytail: restarting a still-running rule on the same port races the old cancel against
+    // the new request; the UI only starts stopped rules, await the old stop task if that changes
+    async fn start_remote_forward(
+        &self,
+        rule: &PortForwardingRule,
+        host: &HostEntry,
+    ) -> Result<(), String> {
+        let (bind_host, port, target_host, target_port) = remote_forward_spec(rule)?;
+        self.stop_port_forward(&rule.id);
+        let session = self.get_or_connect(host, None).await?;
+        // Mapped before asking so a connection that beats the server's reply still finds its target
+        session
+            .remote_forwards
+            .lock()
+            .unwrap()
+            .insert(port, (target_host, target_port));
+        let res = session
+            .handle
+            .lock()
+            .await
+            .tcpip_forward(bind_host.clone(), port)
+            .await;
+        if let Err(e) = res {
+            session.remote_forwards.lock().unwrap().remove(&port);
+            return Err(format!(
+                "Server refused to listen on {bind_host}:{port}: {e}"
+            ));
+        }
+
+        let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
+        self.forward_stops
+            .lock()
+            .unwrap()
+            .insert(rule.id.clone(), stop_tx);
+        tokio::spawn(async move {
+            stop_rx.recv().await;
+            session.remote_forwards.lock().unwrap().remove(&port);
+            let h = session.handle.lock().await;
+            let _ = h.cancel_tcpip_forward(bind_host, port).await;
+        });
+        Ok(())
+    }
+
     pub fn stop_port_forward(&self, rule_id: &str) -> bool {
         if let Some(tx) = self.forward_stops.lock().unwrap().remove(rule_id) {
             let _ = tx.try_send(());
@@ -1068,6 +1188,31 @@ mod tests {
         assert!(err.contains("IDENTIFICATION HAS CHANGED"));
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn remote_rule_listens_on_remote_fields_and_dials_target() {
+        // Remote rules used to run as -L on local_host:local_port; those fields must stay unused here
+        let rule = |remote_port: u16, remote_host: &str| -> PortForwardingRule {
+            serde_json::from_value(serde_json::json!({
+                "id": "r1", "name": "share dev server", "mode": "remote", "machineId": "m1",
+                "localHost": "10.9.9.9", "localPort": 1111,
+                "remoteHost": remote_host, "remotePort": remote_port,
+                "targetHost": "", "targetPort": 3000,
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            remote_forward_spec(&rule(8080, "0.0.0.0")),
+            Ok(("0.0.0.0".into(), 8080, "127.0.0.1".into(), 3000))
+        );
+        // Blank bind host stays on the server's loopback, like `ssh -R 8080:...`
+        assert_eq!(
+            remote_forward_spec(&rule(8080, " ")).map(|s| s.0),
+            Ok("127.0.0.1".into())
+        );
+        // Rules saved without remotePort load as 0: refuse instead of silently dropping traffic
+        assert!(remote_forward_spec(&rule(0, "127.0.0.1")).is_err());
     }
 
     #[test]

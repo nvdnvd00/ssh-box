@@ -393,6 +393,13 @@ pub async fn list_dir(
         requested
     };
 
+    let script = remote_list_script(effective_path);
+    let out_bytes = pool.exec_bytes_on_host(&host, &script, None).await?;
+    let raw = String::from_utf8_lossy(&out_bytes);
+    Ok(parse_remote_stat_listing(&raw, effective_path))
+}
+
+fn remote_list_script(effective_path: &str) -> String {
     let cd_expr = if effective_path == "~" {
         "cd ~".to_string()
     } else if let Some(rest) = effective_path.strip_prefix("~/") {
@@ -401,11 +408,12 @@ pub async fn list_dir(
         format!("cd -- {}", shell_quote(effective_path))
     };
 
-    let script = format!(
-        "LC_ALL=C sh -c '\
-        {cd_expr} || exit 1; \
+    // Quote the whole inner script so quoted paths inside it can't break out.
+    // The marker goes through "%s": bash/dash printf reject a format starting with "-".
+    let inner = format!(
+        "{cd_expr} || exit 1; \
         pwd; \
-        printf \"---SSHBOX_ENTRIES---\\n\"; \
+        printf \"%s\\n\" ---SSHBOX_ENTRIES---; \
         set --; \
         for f in * .*; do \
           [ \"$f\" = \".\" ] || [ \"$f\" = \"..\" ] && continue; \
@@ -418,12 +426,9 @@ pub async fn list_dir(
           else \
             stat -f \"%Sp\t%Lp\t%z\t%m\t%N\" -- \"$@\"; \
           fi; \
-        fi'"
+        fi"
     );
-
-    let out_bytes = pool.exec_bytes_on_host(&host, &script, None).await?;
-    let raw = String::from_utf8_lossy(&out_bytes);
-    Ok(parse_remote_stat_listing(&raw, effective_path))
+    format!("LC_ALL=C sh -c {}", shell_quote(&inner))
 }
 
 pub async fn mkdir(pool: &SshPool, host_id: &str, path: &str) -> Result<(), String> {
@@ -1397,6 +1402,31 @@ lrwxr-xr-x\t777\t12\t1700000300\tcurrent\n\
 
         assert_eq!(res.entries[3].name, "index.ts");
         assert_eq!(res.entries[3].size, 1420);
+    }
+
+    // Runs the real remote listing script through `sh`, like the remote login
+    // shell would. If the marker line goes missing, the parser takes the last
+    // stat line as cwd and every later mkdir/upload targets a garbage path.
+    #[cfg(unix)]
+    #[test]
+    fn remote_list_script_runs_under_posix_sh() {
+        // Space in the name: the path must survive being quoted inside `sh -c`.
+        let tmp = std::env::temp_dir().join(format!("ssh-box list {}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(tmp.join(".ssh")).unwrap();
+        fs::write(tmp.join("a.txt"), b"x").unwrap();
+        let dir = tmp.to_string_lossy().to_string();
+
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(remote_list_script(&dir))
+            .output()
+            .unwrap();
+        let _ = fs::remove_dir_all(&tmp);
+        let res = parse_remote_stat_listing(&String::from_utf8_lossy(&out.stdout), &dir);
+
+        assert_eq!(res.cwd, dir, "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        let names: Vec<&str> = res.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, [".ssh", "a.txt"]);
     }
 
     #[test]

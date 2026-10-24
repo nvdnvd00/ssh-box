@@ -60,6 +60,7 @@ export interface AppSettingsConfig {
   dashboardRefreshSecs: number;
   temperatureUnit: "C" | "F";
   autoOpenMonitorOnSsh: boolean;
+  copyOnSelect: boolean;
 }
 
 export interface ThemeConfig extends AppThemeConfig, TerminalThemeConfig {}
@@ -498,6 +499,7 @@ export const DEFAULT_APP_SETTINGS: AppSettingsConfig = {
   dashboardRefreshSecs: 2,
   temperatureUnit: "C",
   autoOpenMonitorOnSsh: false,
+  copyOnSelect: false,
 };
 
 export const DEFAULT_THEME_CONFIG: ThemeConfig = {
@@ -634,6 +636,10 @@ export function loadAppSettings(): AppSettingsConfig {
         typeof parsed.autoOpenMonitorOnSsh === "boolean"
           ? parsed.autoOpenMonitorOnSsh
           : DEFAULT_APP_SETTINGS.autoOpenMonitorOnSsh,
+      copyOnSelect:
+        typeof parsed.copyOnSelect === "boolean"
+          ? parsed.copyOnSelect
+          : DEFAULT_APP_SETTINGS.copyOnSelect,
     };
   } catch {
     return DEFAULT_APP_SETTINGS;

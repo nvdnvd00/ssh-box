@@ -297,6 +297,21 @@ pub fn delete_custom_host_at(
     Ok(list)
 }
 
+pub fn remove_tag_from_hosts_at(custom_json_path: &Path, tag_name: &str) -> Result<(), String> {
+    let mut list = read_custom_hosts(custom_json_path);
+    let mut changed = false;
+    for host in &mut list {
+        let before = host.tags.len();
+        host.tags.retain(|t| t != tag_name);
+        changed |= host.tags.len() != before;
+    }
+    // Skip the write when nothing matched, so an unreadable hosts.json is never overwritten.
+    if changed {
+        write_custom_hosts(custom_json_path, &list)?;
+    }
+    Ok(())
+}
+
 pub fn default_paths() -> (PathBuf, PathBuf) {
     let home = app_home_dir();
     let ssh_cfg = home.join(".ssh").join("config");
@@ -313,6 +328,11 @@ pub fn upsert_custom_host(entry: HostEntry) -> Result<Vec<HostEntry>, String> {
     let (ssh_cfg, custom_cfg) = default_paths();
     upsert_custom_host_at(&custom_cfg, entry)?;
     Ok(load_merged_hosts(&ssh_cfg, &custom_cfg))
+}
+
+pub fn remove_tag_from_hosts(tag_name: &str) -> Result<(), String> {
+    let (_, custom_cfg) = default_paths();
+    remove_tag_from_hosts_at(&custom_cfg, tag_name)
 }
 
 pub fn delete_custom_host(host_id: &str) -> Result<Vec<HostEntry>, String> {
@@ -408,6 +428,30 @@ mod tests {
         let after_delete = load_merged_hosts(&ssh_cfg, &custom_json);
         assert_eq!(after_delete.len(), 1);
         assert_eq!(after_delete[0].alias, "edge-node");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn deleting_a_tag_strips_it_from_machines() {
+        // Machines store tags by name; once the tag is deleted in Settings it
+        // has no checkbox in the machine form, so a leftover could never be removed.
+        let tmp_dir = std::env::temp_dir().join(format!("ssh-box-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let custom_json = tmp_dir.join("hosts.json");
+        let host = |id: &str, tags: &[&str]| HostEntry {
+            id: id.into(),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            ..Default::default()
+        };
+        upsert_custom_host_at(&custom_json, host("custom:a", &["111", "prod"])).unwrap();
+        upsert_custom_host_at(&custom_json, host("sshcfg:example-vps", &["111"])).unwrap();
+
+        remove_tag_from_hosts_at(&custom_json, "111").unwrap();
+
+        let hosts = read_custom_hosts(&custom_json);
+        assert_eq!(hosts[0].tags, vec!["prod".to_string()]);
+        assert!(hosts[1].tags.is_empty());
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }

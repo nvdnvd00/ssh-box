@@ -266,6 +266,15 @@ export default function App() {
       .catch(() => undefined);
   }, []);
 
+  // Deleting a tag also strips it from machines, so refresh them alongside.
+  const handleUpdateResources = useCallback(
+    (data: ResourcesStoreData) => {
+      setResources(data);
+      loadHosts();
+    },
+    [loadHosts],
+  );
+
   useEffect(() => {
     loadHosts();
     loadResources();
@@ -1219,7 +1228,7 @@ export default function App() {
                     loadHosts();
                     loadResources();
                   }}
-                  onUpdateResources={setResources}
+                  onUpdateResources={handleUpdateResources}
                   onSaveHost={handleSaveHost}
                   onDeleteHost={handleDeleteHost}
                   onConnectHost={handleConnectHostTab}
@@ -1244,7 +1253,7 @@ export default function App() {
               activeTab={settingsSection}
               onChangeTheme={handleUpdateTheme}
               onChangeAppSettings={handleUpdateAppSettings}
-              onUpdateResources={setResources}
+              onUpdateResources={handleUpdateResources}
             />
           )}
         </main>

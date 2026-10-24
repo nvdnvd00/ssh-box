@@ -123,7 +123,16 @@ async fn delete_machine_tag(
     state: State<'_, AppState>,
     tag_id: String,
 ) -> Result<ResourcesStoreData, String> {
-    let store = resources::delete_tag_at(&resources::default_resources_path(), &tag_id)?;
+    let path = resources::default_resources_path();
+    // Machines reference tags by name, so drop it from them too.
+    if let Some(tag) = resources::load_resources_at(&path)
+        .tags
+        .into_iter()
+        .find(|t| t.id == tag_id)
+    {
+        host_store::remove_tag_from_hosts(&tag.name)?;
+    }
+    let store = resources::delete_tag_at(&path, &tag_id)?;
     Ok(enrich_resources(store, &state.ssh_pool))
 }
 

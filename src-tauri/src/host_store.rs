@@ -239,7 +239,21 @@ pub fn load_merged_hosts(ssh_config_path: &Path, custom_json_path: &Path) -> Vec
     }
     if let Ok(raw) = std::fs::read_to_string(custom_json_path) {
         if let Ok(custom) = serde_json::from_str::<Vec<HostEntry>>(&raw) {
-            result.extend(custom);
+            for host in custom {
+                // An edited ~/.ssh/config host is saved under its sshcfg: id and
+                // replaces the parsed one.
+                // ponytail: whole-entry override, so later HostName/User/Port edits
+                // in ~/.ssh/config are shadowed; overlay only app fields if that bites.
+                match result.iter_mut().find(|h| h.id == host.id) {
+                    Some(existing) => {
+                        *existing = HostEntry {
+                            source: HostSource::SshConfig,
+                            ..host
+                        }
+                    }
+                    None => result.push(host),
+                }
+            }
         }
     }
     result
@@ -297,6 +311,21 @@ pub fn delete_custom_host_at(
     Ok(list)
 }
 
+pub fn remove_tag_from_hosts_at(custom_json_path: &Path, tag_name: &str) -> Result<(), String> {
+    let mut list = read_custom_hosts(custom_json_path);
+    let mut changed = false;
+    for host in &mut list {
+        let before = host.tags.len();
+        host.tags.retain(|t| t != tag_name);
+        changed |= host.tags.len() != before;
+    }
+    // Skip the write when nothing matched, so an unreadable hosts.json is never overwritten.
+    if changed {
+        write_custom_hosts(custom_json_path, &list)?;
+    }
+    Ok(())
+}
+
 pub fn default_paths() -> (PathBuf, PathBuf) {
     let home = app_home_dir();
     let ssh_cfg = home.join(".ssh").join("config");
@@ -313,6 +342,11 @@ pub fn upsert_custom_host(entry: HostEntry) -> Result<Vec<HostEntry>, String> {
     let (ssh_cfg, custom_cfg) = default_paths();
     upsert_custom_host_at(&custom_cfg, entry)?;
     Ok(load_merged_hosts(&ssh_cfg, &custom_cfg))
+}
+
+pub fn remove_tag_from_hosts(tag_name: &str) -> Result<(), String> {
+    let (_, custom_cfg) = default_paths();
+    remove_tag_from_hosts_at(&custom_cfg, tag_name)
 }
 
 pub fn delete_custom_host(host_id: &str) -> Result<Vec<HostEntry>, String> {
@@ -408,6 +442,55 @@ mod tests {
         let after_delete = load_merged_hosts(&ssh_cfg, &custom_json);
         assert_eq!(after_delete.len(), 1);
         assert_eq!(after_delete[0].alias, "edge-node");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn editing_ssh_config_host_overrides_it_instead_of_duplicating() {
+        // Tagging a ~/.ssh/config host saves it to hosts.json under the same
+        // id; the list must still show one machine, carrying the edits.
+        let tmp_dir = std::env::temp_dir().join(format!("ssh-box-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let ssh_cfg = tmp_dir.join("config");
+        let custom_json = tmp_dir.join("hosts.json");
+        std::fs::write(&ssh_cfg, "Host example-vps\n  HostName 203.0.113.10\n  User root\n").unwrap();
+
+        let mut edited = parse_ssh_config_str(&std::fs::read_to_string(&ssh_cfg).unwrap())
+            .remove(0);
+        edited.tags = vec!["111".into()];
+        upsert_custom_host_at(&custom_json, edited).unwrap();
+
+        let merged = load_merged_hosts(&ssh_cfg, &custom_json);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id, "sshcfg:example-vps");
+        assert_eq!(merged[0].tags, vec!["111".to_string()]);
+        // Still an ssh-config machine: no delete button, not exported.
+        assert_eq!(merged[0].source, HostSource::SshConfig);
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn deleting_a_tag_strips_it_from_machines() {
+        // Machines store tags by name; once the tag is deleted in Settings it
+        // has no checkbox in the machine form, so a leftover could never be removed.
+        let tmp_dir = std::env::temp_dir().join(format!("ssh-box-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let custom_json = tmp_dir.join("hosts.json");
+        let host = |id: &str, tags: &[&str]| HostEntry {
+            id: id.into(),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            ..Default::default()
+        };
+        upsert_custom_host_at(&custom_json, host("custom:a", &["111", "prod"])).unwrap();
+        upsert_custom_host_at(&custom_json, host("sshcfg:example-vps", &["111"])).unwrap();
+
+        remove_tag_from_hosts_at(&custom_json, "111").unwrap();
+
+        let hosts = read_custom_hosts(&custom_json);
+        assert_eq!(hosts[0].tags, vec!["prod".to_string()]);
+        assert!(hosts[1].tags.is_empty());
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }

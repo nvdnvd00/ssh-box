@@ -381,6 +381,37 @@ impl SshPool {
             }
         }
 
+        let (handle, fp) = Self::connect_new(host, password_override).await?;
+        let session = Arc::new(MultiplexedSession {
+            host_id: host.id.clone(),
+            fingerprint: fp,
+            handle: tokio::sync::Mutex::new(handle),
+        });
+
+        self.sessions
+            .lock()
+            .await
+            .insert(host.id.clone(), session.clone());
+        Ok(session)
+    }
+
+    // Connects and authenticates without touching the pool (the form's host may be unsaved).
+    pub async fn test_connection(
+        &self,
+        host: &HostEntry,
+        password_override: Option<String>,
+    ) -> Result<String, String> {
+        let (handle, fp) = Self::connect_new(host, password_override).await?;
+        let _ = handle
+            .disconnect(Disconnect::ByApplication, "Connection test", "en")
+            .await;
+        Ok(fp)
+    }
+
+    async fn connect_new(
+        host: &HostEntry,
+        password_override: Option<String>,
+    ) -> Result<(Handle<SshClientHandler>, String), String> {
         let config = Arc::new(client::Config {
             keepalive_interval: Some(Duration::from_secs(15)),
             keepalive_max: 3,
@@ -435,17 +466,7 @@ impl SshPool {
             .clone()
             .unwrap_or_else(|| "SHA256:verified".to_string());
 
-        let session = Arc::new(MultiplexedSession {
-            host_id: host.id.clone(),
-            fingerprint: fp,
-            handle: tokio::sync::Mutex::new(handle),
-        });
-
-        self.sessions
-            .lock()
-            .await
-            .insert(host.id.clone(), session.clone());
-        Ok(session)
+        Ok((handle, fp))
     }
 
     async fn authenticate_session(

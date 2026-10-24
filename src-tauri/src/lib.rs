@@ -527,6 +527,18 @@ async fn connect_ssh_pane(
 }
 
 #[tauri::command]
+async fn test_ssh_connection(
+    state: State<'_, AppState>,
+    host: HostEntry,
+    secret: Option<String>,
+) -> Result<String, String> {
+    let password = secret
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    state.ssh_pool.test_connection(&host, password).await
+}
+
+#[tauri::command]
 fn write_pane_input(
     state: State<'_, AppState>,
     pane_id: String,
@@ -818,6 +830,7 @@ pub fn run() {
             spawn_local_pty,
             list_local_shells,
             connect_ssh_pane,
+            test_ssh_connection,
             write_pane_input,
             resize_pane,
             close_pane,

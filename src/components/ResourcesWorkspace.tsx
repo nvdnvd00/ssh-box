@@ -5,6 +5,7 @@ import {
   ArrowUpDown,
   Box,
   Check,
+  ChevronDown,
   Code2,
   Container,
   Copy,
@@ -29,6 +30,7 @@ import {
   Search,
   Server,
   Shield,
+  SlidersHorizontal,
   Square,
   Tag,
   Terminal,
@@ -214,6 +216,31 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
   // Machine filters & modals
   const [selectedGroupFilter, setSelectedGroupFilter] = useState<string>("ALL");
   const [selectedTagFilter, setSelectedTagFilter] = useState<string>("ALL");
+  const [showMachineManageMenu, setShowMachineManageMenu] = useState(false);
+  const machineManageMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!showMachineManageMenu) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (
+        machineManageMenuRef.current &&
+        !machineManageMenuRef.current.contains(e.target as Node)
+      ) {
+        setShowMachineManageMenu(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setShowMachineManageMenu(false);
+      }
+    };
+    window.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [showMachineManageMenu]);
   const [editingHost, setEditingHost] = useState<HostEntry | null>(null);
   const [hostSecret, setHostSecret] = useState("");
   const [testingHost, setTestingHost] = useState(false);
@@ -1098,30 +1125,6 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
             {/* Context-specific primary buttons */}
             {activeSubTab === "machines" && (
               <>
-                <button
-                  type="button"
-                  onClick={() => machineFileInputRef.current?.click()}
-                  title="Import machines from a JSON file"
-                  className="h-[38px] inline-flex items-center gap-1.5 px-3 rounded-[10px] bg-secondary hover:bg-accent border border-border text-xs font-medium text-foreground cursor-pointer transition-colors"
-                >
-                  <Upload className="w-3.5 h-3.5 text-primary" />
-                  Import
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    openMachineTransfer(
-                      "export",
-                      // ~/.ssh/config hosts already live in a portable file.
-                      hosts.filter((h) => h.source === "custom"),
-                    )
-                  }
-                  title="Export machines to a JSON file"
-                  className="h-[38px] inline-flex items-center gap-1.5 px-3 rounded-[10px] bg-secondary hover:bg-accent border border-border text-xs font-medium text-foreground cursor-pointer transition-colors"
-                >
-                  <Download className="w-3.5 h-3.5 text-primary" />
-                  Export
-                </button>
                 <input
                   ref={machineFileInputRef}
                   type="file"
@@ -1129,22 +1132,79 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                   className="hidden"
                   onChange={handlePickMachineFile}
                 />
-                <button
-                  type="button"
-                  onClick={() => setShowGroupModal(true)}
-                  className="h-[38px] inline-flex items-center gap-1.5 px-3 rounded-[10px] bg-secondary hover:bg-accent border border-border text-xs font-medium text-foreground cursor-pointer transition-colors"
-                >
-                  <FolderGit2 className="w-3.5 h-3.5 text-primary" />
-                  Groups
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowTagModal(true)}
-                  className="h-[38px] inline-flex items-center gap-1.5 px-3 rounded-[10px] bg-secondary hover:bg-accent border border-border text-xs font-medium text-foreground cursor-pointer transition-colors"
-                >
-                  <Tag className="w-3.5 h-3.5 text-primary" />
-                  Tags
-                </button>
+                <div ref={machineManageMenuRef} className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setShowMachineManageMenu((p) => !p)}
+                    className={`h-[38px] inline-flex items-center gap-1.5 px-3 rounded-[10px] bg-secondary hover:bg-accent border text-xs font-medium text-foreground cursor-pointer transition-colors ${
+                      showMachineManageMenu
+                        ? "border-primary text-primary"
+                        : "border-border"
+                    }`}
+                  >
+                    <SlidersHorizontal className="w-3.5 h-3.5 text-primary" />
+                    <span>Manage</span>
+                    <ChevronDown
+                      className={`w-3.5 h-3.5 text-muted-foreground transition-transform duration-150 ${
+                        showMachineManageMenu ? "rotate-180 text-primary" : ""
+                      }`}
+                    />
+                  </button>
+
+                  {showMachineManageMenu && (
+                    <div className="ui-popover-panel absolute right-0 top-full mt-1.5 z-50 w-48 rounded-xl bg-popover border border-border shadow-2xl p-1 space-y-0.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowMachineManageMenu(false);
+                          setShowGroupModal(true);
+                        }}
+                        className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs font-medium text-foreground hover:bg-accent cursor-pointer transition-colors"
+                      >
+                        <FolderGit2 className="w-3.5 h-3.5 text-primary" />
+                        <span>Manage Groups</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowMachineManageMenu(false);
+                          setShowTagModal(true);
+                        }}
+                        className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs font-medium text-foreground hover:bg-accent cursor-pointer transition-colors"
+                      >
+                        <Tag className="w-3.5 h-3.5 text-primary" />
+                        <span>Manage Tags</span>
+                      </button>
+                      <div className="my-1 border-t border-border/60" />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowMachineManageMenu(false);
+                          machineFileInputRef.current?.click();
+                        }}
+                        className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs font-medium text-foreground hover:bg-accent cursor-pointer transition-colors"
+                      >
+                        <Upload className="w-3.5 h-3.5 text-primary" />
+                        <span>Import JSON</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowMachineManageMenu(false);
+                          openMachineTransfer(
+                            "export",
+                            hosts.filter((h) => h.source === "custom"),
+                          );
+                        }}
+                        className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs font-medium text-foreground hover:bg-accent cursor-pointer transition-colors"
+                      >
+                        <Download className="w-3.5 h-3.5 text-primary" />
+                        <span>Export JSON</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+
                 <button
                   type="button"
                   onClick={() => {
@@ -1373,61 +1433,54 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
           {/* 1. MACHINES TAB */}
           {activeSubTab === "machines" && (
             <div className="space-y-4">
-              {/* Group & Tag Filter Bar */}
-              <div className="flex flex-wrap items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => setSelectedGroupFilter("ALL")}
-                  className={`px-3 py-1.5 rounded-full text-xs font-medium cursor-pointer border transition-colors ${
-                    selectedGroupFilter === "ALL"
-                      ? "bg-primary/15 text-primary border-primary/40"
-                      : "bg-secondary/60 text-muted-foreground border-border hover:text-foreground"
-                  }`}
-                >
-                  All Groups ({hosts.length})
-                </button>
-                {allGroupNames.map((gName) => (
-                  <button
-                    key={gName}
-                    type="button"
-                    onClick={() => setSelectedGroupFilter(gName)}
-                    className={`px-3 py-1.5 rounded-full text-xs font-medium cursor-pointer border inline-flex items-center gap-1.5 transition-colors ${
-                      selectedGroupFilter === gName
-                        ? "bg-primary/15 text-primary border-primary/40"
-                        : "bg-secondary/60 text-muted-foreground border-border hover:text-foreground"
-                    }`}
-                  >
-                    <FolderGit2 className="w-3.5 h-3.5" />
-                    {gName}
-                  </button>
-                ))}
+              {/* Compact Group & Tag Filter Bar */}
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="w-48">
+                  <SelectField
+                    size="sm"
+                    value={selectedGroupFilter}
+                    onChange={setSelectedGroupFilter}
+                    options={[
+                      { value: "ALL", label: `All Groups (${hosts.length})` },
+                      ...allGroupNames.map((gName) => ({
+                        value: gName,
+                        label: gName,
+                      })),
+                    ]}
+                  />
+                </div>
 
                 {resources.tags.length > 0 && (
-                  <span className="mx-1 text-border">|</span>
+                  <div className="w-44">
+                    <SelectField
+                      size="sm"
+                      value={selectedTagFilter}
+                      onChange={setSelectedTagFilter}
+                      options={[
+                        { value: "ALL", label: "All Tags" },
+                        ...resources.tags.map((t) => ({
+                          value: t.name,
+                          label: t.name,
+                        })),
+                      ]}
+                    />
+                  </div>
                 )}
-                {resources.tags.map((t) => {
-                  const active = selectedTagFilter === t.name;
-                  return (
-                    <button
-                      key={t.id}
-                      type="button"
-                      onClick={() =>
-                        setSelectedTagFilter(active ? "ALL" : t.name)
-                      }
-                      className={`px-2.5 py-1 rounded-full text-xs font-medium cursor-pointer border inline-flex items-center gap-1.5 transition-colors ${
-                        active
-                          ? "bg-secondary text-foreground border-primary"
-                          : "bg-card text-muted-foreground border-border hover:text-foreground"
-                      }`}
-                    >
-                      <span
-                        className="w-2 h-2 rounded-full"
-                        style={{ backgroundColor: t.color }}
-                      />
-                      {t.name}
-                    </button>
-                  );
-                })}
+
+                {(selectedGroupFilter !== "ALL" ||
+                  selectedTagFilter !== "ALL") && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedGroupFilter("ALL");
+                      setSelectedTagFilter("ALL");
+                    }}
+                    className="h-7 px-2.5 rounded-lg bg-secondary/80 hover:bg-accent text-muted-foreground hover:text-foreground border border-border text-xs inline-flex items-center gap-1 cursor-pointer transition-colors"
+                  >
+                    <X className="w-3 h-3" />
+                    <span>Reset</span>
+                  </button>
+                )}
               </div>
 
               <div className={gridClass}>
@@ -1441,6 +1494,137 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                   const proxy = resources.proxyProfiles.find(
                     (p) => p.id === h.proxyProfileId,
                   );
+
+                  if (displayStyle === "list") {
+                    return (
+                      <div
+                        key={h.id}
+                        className="px-4 py-2.5 rounded-2xl bg-card border border-border hover:border-primary/40 transition-all flex flex-wrap items-center justify-between gap-3 shadow-2xs"
+                      >
+                        <div className="flex items-center gap-3 min-w-[200px]">
+                          <div className="p-2 rounded-xl bg-primary/12 text-primary shrink-0">
+                            <Server className="w-4 h-4" />
+                          </div>
+                          <div className="min-w-0">
+                            <div className="text-[13px] font-semibold text-foreground truncate">
+                              {h.alias}
+                            </div>
+                            <div className="text-xs text-muted-foreground font-mono truncate">
+                              {identity ? identity.userName : h.user}@
+                              {h.hostname}:{h.port}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-1.5 flex-1 min-w-0">
+                          <span className="px-2.5 py-0.5 rounded-full bg-secondary text-[11px] text-muted-foreground font-medium shrink-0">
+                            {h.group || "Default"}
+                          </span>
+                          {identity && (
+                            <span className="px-2 py-0.5 rounded-md bg-violet-500/15 text-violet-300 text-[11px] font-medium inline-flex items-center gap-1">
+                              <UserCheck className="w-3 h-3" />
+                              {identity.name}
+                            </span>
+                          )}
+                          {sshKey && (
+                            <span className="px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 text-[11px] font-medium inline-flex items-center gap-1">
+                              <KeyRound className="w-3 h-3" />
+                              {sshKey.name}
+                            </span>
+                          )}
+                          {proxy && (
+                            <span className="px-2 py-0.5 rounded-md bg-sky-500/15 text-sky-300 text-[11px] font-medium inline-flex items-center gap-1">
+                              <Globe className="w-3 h-3" />
+                              {proxy.name}
+                            </span>
+                          )}
+                          {(h.tags ?? []).map((tagName) => {
+                            const tagObj = resources.tags.find(
+                              (t) => t.name === tagName,
+                            );
+                            return (
+                              <span
+                                key={tagName}
+                                className="px-2 py-0.5 rounded-full bg-secondary text-[11px] inline-flex items-center gap-1.5"
+                              >
+                                <span
+                                  className="w-1.5 h-1.5 rounded-full"
+                                  style={{
+                                    backgroundColor:
+                                      tagObj?.color ?? TAG_PALETTE[0],
+                                  }}
+                                />
+                                {tagName}
+                              </span>
+                            );
+                          })}
+                          {h.remark && (
+                            <span className="text-xs text-muted-foreground truncate max-w-[200px]">
+                              • {h.remark}
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => onConnectHost(h)}
+                            className="h-8 inline-flex items-center gap-1.5 px-2.5 rounded-xl bg-primary text-primary-foreground text-xs font-semibold whitespace-nowrap shrink-0 hover:opacity-95 cursor-pointer transition-all shadow-2xs active:scale-97"
+                          >
+                            <Terminal className="w-3.5 h-3.5 shrink-0" />
+                            <span>Terminal</span>
+                          </button>
+                          {onInspectMachine && (
+                            <button
+                              type="button"
+                              onClick={() => onInspectMachine(h.id)}
+                              className="h-8 w-8 inline-flex items-center justify-center rounded-xl bg-secondary hover:bg-accent text-foreground border border-border/80 cursor-pointer transition-all"
+                              title="Open Full Machine Monitor"
+                            >
+                              <Activity className="w-3.5 h-3.5 text-emerald-400" />
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSftpTargetHostId(h.id);
+                              setActiveSubTab("sftp");
+                            }}
+                            className="h-8 w-8 inline-flex items-center justify-center rounded-xl bg-secondary hover:bg-accent text-foreground border border-border/80 cursor-pointer transition-all"
+                            title="Open SFTP File Manager"
+                          >
+                            <HardDrive className="w-3.5 h-3.5 text-amber-400" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingHost({
+                                ...h,
+                                authMethod: h.authMethod ?? "passwordOrKey",
+                                tags: h.tags ?? [],
+                              });
+                              setHostSecret("");
+                            }}
+                            className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground hover:text-foreground cursor-pointer transition-colors"
+                            title="Edit Machine"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                          </button>
+                          {h.source === "custom" && (
+                            <button
+                              type="button"
+                              onClick={() => onDeleteHost(h.id)}
+                              className="p-1.5 rounded-lg hover:bg-rose-500/20 text-muted-foreground hover:text-rose-400 cursor-pointer transition-colors"
+                              title="Delete Machine"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  }
+
                   return (
                     <div
                       key={h.id}
@@ -1529,11 +1713,10 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                             <button
                               type="button"
                               onClick={() => onInspectMachine(h.id)}
-                              className="h-8 inline-flex items-center gap-1.5 px-2.5 rounded-xl bg-secondary hover:bg-accent text-foreground border border-border/80 text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer transition-all"
+                              className="h-8 w-8 inline-flex items-center justify-center rounded-xl bg-secondary hover:bg-accent text-foreground border border-border/80 cursor-pointer transition-all"
                               title="Open Full Machine Monitor"
                             >
-                              <Activity className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                              <span>Monitor</span>
+                              <Activity className="w-3.5 h-3.5 text-emerald-400" />
                             </button>
                           )}
                           <button
@@ -1542,11 +1725,10 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                               setSftpTargetHostId(h.id);
                               setActiveSubTab("sftp");
                             }}
-                            className="h-8 inline-flex items-center gap-1.5 px-2.5 rounded-xl bg-secondary hover:bg-accent text-foreground border border-border/80 text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer transition-all"
+                            className="h-8 w-8 inline-flex items-center justify-center rounded-xl bg-secondary hover:bg-accent text-foreground border border-border/80 cursor-pointer transition-all"
                             title="Open SFTP File Manager"
                           >
-                            <HardDrive className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                            <span>SFTP</span>
+                            <HardDrive className="w-3.5 h-3.5 text-amber-400" />
                           </button>
                         </div>
                         <div className="flex items-center gap-1 shrink-0">

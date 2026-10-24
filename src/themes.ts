@@ -514,6 +514,54 @@ export const DEFAULT_THEME_CONFIG: ThemeConfig = {
   ...DEFAULT_TERMINAL_THEME,
 };
 
+export function parseThemeConfig(
+  parsedApp: Partial<AppThemeConfig> = {},
+  parsedTerm: Partial<TerminalThemeConfig> = {},
+): ThemeConfig {
+  return {
+    appTheme: APP_THEMES.some((t) => t.id === parsedApp.appTheme)
+      ? (parsedApp.appTheme as AppThemeId)
+      : DEFAULT_APP_THEME.appTheme,
+    accentColor: ACCENT_COLORS.some((a) => a.id === parsedApp.accentColor)
+      ? (parsedApp.accentColor as AccentColorId)
+      : DEFAULT_APP_THEME.accentColor,
+    terminalPreset: TERMINAL_PRESETS.some(
+      (p) => p.id === parsedTerm.terminalPreset,
+    )
+      ? (parsedTerm.terminalPreset as TerminalPresetId)
+      : DEFAULT_TERMINAL_THEME.terminalPreset,
+    fontFamily: TERMINAL_FONT_FAMILIES.some(
+      (f) => f.id === parsedTerm.fontFamily,
+    )
+      ? (parsedTerm.fontFamily as TerminalFontFamilyId)
+      : DEFAULT_TERMINAL_THEME.fontFamily,
+    fontSize:
+      typeof parsedTerm.fontSize === "number" &&
+      parsedTerm.fontSize >= 10 &&
+      parsedTerm.fontSize <= 22
+        ? parsedTerm.fontSize
+        : DEFAULT_TERMINAL_THEME.fontSize,
+    lineHeight:
+      typeof parsedTerm.lineHeight === "number" &&
+      parsedTerm.lineHeight >= 1.0 &&
+      parsedTerm.lineHeight <= 2.0
+        ? parsedTerm.lineHeight
+        : DEFAULT_TERMINAL_THEME.lineHeight,
+    letterSpacing:
+      typeof parsedTerm.letterSpacing === "number" &&
+      parsedTerm.letterSpacing >= -2 &&
+      parsedTerm.letterSpacing <= 6
+        ? parsedTerm.letterSpacing
+        : DEFAULT_TERMINAL_THEME.letterSpacing,
+    cursorStyle:
+      parsedTerm.cursorStyle === "block" ||
+      parsedTerm.cursorStyle === "bar" ||
+      parsedTerm.cursorStyle === "underline"
+        ? parsedTerm.cursorStyle
+        : DEFAULT_TERMINAL_THEME.cursorStyle,
+  };
+}
+
 export function loadThemeConfig(): ThemeConfig {
   try {
     const rawApp = localStorage.getItem(APP_THEME_STORAGE_KEY);
@@ -525,48 +573,7 @@ export function loadThemeConfig(): ThemeConfig {
       ? (JSON.parse(rawTerm) as Partial<TerminalThemeConfig>)
       : {};
 
-    return {
-      appTheme: APP_THEMES.some((t) => t.id === parsedApp.appTheme)
-        ? (parsedApp.appTheme as AppThemeId)
-        : DEFAULT_APP_THEME.appTheme,
-      accentColor: ACCENT_COLORS.some((a) => a.id === parsedApp.accentColor)
-        ? (parsedApp.accentColor as AccentColorId)
-        : DEFAULT_APP_THEME.accentColor,
-      terminalPreset: TERMINAL_PRESETS.some(
-        (p) => p.id === parsedTerm.terminalPreset,
-      )
-        ? (parsedTerm.terminalPreset as TerminalPresetId)
-        : DEFAULT_TERMINAL_THEME.terminalPreset,
-      fontFamily: TERMINAL_FONT_FAMILIES.some(
-        (f) => f.id === parsedTerm.fontFamily,
-      )
-        ? (parsedTerm.fontFamily as TerminalFontFamilyId)
-        : DEFAULT_TERMINAL_THEME.fontFamily,
-      fontSize:
-        typeof parsedTerm.fontSize === "number" &&
-        parsedTerm.fontSize >= 10 &&
-        parsedTerm.fontSize <= 22
-          ? parsedTerm.fontSize
-          : DEFAULT_TERMINAL_THEME.fontSize,
-      lineHeight:
-        typeof parsedTerm.lineHeight === "number" &&
-        parsedTerm.lineHeight >= 1.0 &&
-        parsedTerm.lineHeight <= 2.0
-          ? parsedTerm.lineHeight
-          : DEFAULT_TERMINAL_THEME.lineHeight,
-      letterSpacing:
-        typeof parsedTerm.letterSpacing === "number" &&
-        parsedTerm.letterSpacing >= -2 &&
-        parsedTerm.letterSpacing <= 6
-          ? parsedTerm.letterSpacing
-          : DEFAULT_TERMINAL_THEME.letterSpacing,
-      cursorStyle:
-        parsedTerm.cursorStyle === "block" ||
-        parsedTerm.cursorStyle === "bar" ||
-        parsedTerm.cursorStyle === "underline"
-          ? parsedTerm.cursorStyle
-          : DEFAULT_TERMINAL_THEME.cursorStyle,
-    };
+    return parseThemeConfig(parsedApp, parsedTerm);
   } catch {
     return DEFAULT_THEME_CONFIG;
   }
@@ -593,73 +600,78 @@ export function saveThemeConfig(config: ThemeConfig): void {
   }
 }
 
+export function parseAppSettings(
+  parsed: Partial<AppSettingsConfig> = {},
+): AppSettingsConfig {
+  return {
+    language:
+      parsed.language === "en" || parsed.language === "vi"
+        ? parsed.language
+        : DEFAULT_APP_SETTINGS.language,
+    fastSyncEnabled:
+      typeof parsed.fastSyncEnabled === "boolean"
+        ? parsed.fastSyncEnabled
+        : DEFAULT_APP_SETTINGS.fastSyncEnabled,
+    connectionTimeoutSecs:
+      typeof parsed.connectionTimeoutSecs === "number" &&
+      parsed.connectionTimeoutSecs >= 3 &&
+      parsed.connectionTimeoutSecs <= 120
+        ? parsed.connectionTimeoutSecs
+        : DEFAULT_APP_SETTINGS.connectionTimeoutSecs,
+    snippetTimeoutSecs:
+      typeof parsed.snippetTimeoutSecs === "number" &&
+      parsed.snippetTimeoutSecs >= 10 &&
+      parsed.snippetTimeoutSecs <= 3600
+        ? parsed.snippetTimeoutSecs
+        : DEFAULT_APP_SETTINGS.snippetTimeoutSecs,
+    keepAliveEnabled:
+      typeof parsed.keepAliveEnabled === "boolean"
+        ? parsed.keepAliveEnabled
+        : DEFAULT_APP_SETTINGS.keepAliveEnabled,
+    keepAliveIntervalSecs:
+      typeof parsed.keepAliveIntervalSecs === "number" &&
+      parsed.keepAliveIntervalSecs >= 5 &&
+      parsed.keepAliveIntervalSecs <= 600
+        ? parsed.keepAliveIntervalSecs
+        : DEFAULT_APP_SETTINGS.keepAliveIntervalSecs,
+    dashboardRefreshSecs:
+      typeof parsed.dashboardRefreshSecs === "number" &&
+      parsed.dashboardRefreshSecs >= 1 &&
+      parsed.dashboardRefreshSecs <= 30
+        ? parsed.dashboardRefreshSecs
+        : DEFAULT_APP_SETTINGS.dashboardRefreshSecs,
+    temperatureUnit:
+      parsed.temperatureUnit === "F" || parsed.temperatureUnit === "C"
+        ? parsed.temperatureUnit
+        : DEFAULT_APP_SETTINGS.temperatureUnit,
+    autoOpenMonitorOnSsh:
+      typeof parsed.autoOpenMonitorOnSsh === "boolean"
+        ? parsed.autoOpenMonitorOnSsh
+        : DEFAULT_APP_SETTINGS.autoOpenMonitorOnSsh,
+    copyOnSelect:
+      typeof parsed.copyOnSelect === "boolean"
+        ? parsed.copyOnSelect
+        : DEFAULT_APP_SETTINGS.copyOnSelect,
+    localShell:
+      typeof parsed.localShell === "string"
+        ? parsed.localShell
+        : DEFAULT_APP_SETTINGS.localShell,
+    tmuxSshEnabled:
+      typeof parsed.tmuxSshEnabled === "boolean"
+        ? parsed.tmuxSshEnabled
+        : DEFAULT_APP_SETTINGS.tmuxSshEnabled,
+    tmuxLocalEnabled:
+      typeof parsed.tmuxLocalEnabled === "boolean"
+        ? parsed.tmuxLocalEnabled
+        : DEFAULT_APP_SETTINGS.tmuxLocalEnabled,
+  };
+}
+
 export function loadAppSettings(): AppSettingsConfig {
   try {
     const raw = localStorage.getItem(APP_SETTINGS_STORAGE_KEY);
     if (!raw) return DEFAULT_APP_SETTINGS;
-    const parsed = JSON.parse(raw) as Partial<AppSettingsConfig>;
-    return {
-      language:
-        parsed.language === "en" || parsed.language === "vi"
-          ? parsed.language
-          : DEFAULT_APP_SETTINGS.language,
-      fastSyncEnabled:
-        typeof parsed.fastSyncEnabled === "boolean"
-          ? parsed.fastSyncEnabled
-          : DEFAULT_APP_SETTINGS.fastSyncEnabled,
-      connectionTimeoutSecs:
-        typeof parsed.connectionTimeoutSecs === "number" &&
-        parsed.connectionTimeoutSecs >= 3 &&
-        parsed.connectionTimeoutSecs <= 120
-          ? parsed.connectionTimeoutSecs
-          : DEFAULT_APP_SETTINGS.connectionTimeoutSecs,
-      snippetTimeoutSecs:
-        typeof parsed.snippetTimeoutSecs === "number" &&
-        parsed.snippetTimeoutSecs >= 10 &&
-        parsed.snippetTimeoutSecs <= 3600
-          ? parsed.snippetTimeoutSecs
-          : DEFAULT_APP_SETTINGS.snippetTimeoutSecs,
-      keepAliveEnabled:
-        typeof parsed.keepAliveEnabled === "boolean"
-          ? parsed.keepAliveEnabled
-          : DEFAULT_APP_SETTINGS.keepAliveEnabled,
-      keepAliveIntervalSecs:
-        typeof parsed.keepAliveIntervalSecs === "number" &&
-        parsed.keepAliveIntervalSecs >= 5 &&
-        parsed.keepAliveIntervalSecs <= 600
-          ? parsed.keepAliveIntervalSecs
-          : DEFAULT_APP_SETTINGS.keepAliveIntervalSecs,
-      dashboardRefreshSecs:
-        typeof parsed.dashboardRefreshSecs === "number" &&
-        parsed.dashboardRefreshSecs >= 1 &&
-        parsed.dashboardRefreshSecs <= 30
-          ? parsed.dashboardRefreshSecs
-          : DEFAULT_APP_SETTINGS.dashboardRefreshSecs,
-      temperatureUnit:
-        parsed.temperatureUnit === "F" || parsed.temperatureUnit === "C"
-          ? parsed.temperatureUnit
-          : DEFAULT_APP_SETTINGS.temperatureUnit,
-      autoOpenMonitorOnSsh:
-        typeof parsed.autoOpenMonitorOnSsh === "boolean"
-          ? parsed.autoOpenMonitorOnSsh
-          : DEFAULT_APP_SETTINGS.autoOpenMonitorOnSsh,
-      copyOnSelect:
-        typeof parsed.copyOnSelect === "boolean"
-          ? parsed.copyOnSelect
-          : DEFAULT_APP_SETTINGS.copyOnSelect,
-      localShell:
-        typeof parsed.localShell === "string"
-          ? parsed.localShell
-          : DEFAULT_APP_SETTINGS.localShell,
-      tmuxSshEnabled:
-        typeof parsed.tmuxSshEnabled === "boolean"
-          ? parsed.tmuxSshEnabled
-          : DEFAULT_APP_SETTINGS.tmuxSshEnabled,
-      tmuxLocalEnabled:
-        typeof parsed.tmuxLocalEnabled === "boolean"
-          ? parsed.tmuxLocalEnabled
-          : DEFAULT_APP_SETTINGS.tmuxLocalEnabled,
-    };
+    return parseAppSettings(JSON.parse(raw) as Partial<AppSettingsConfig>);
   } catch {
     return DEFAULT_APP_SETTINGS;
   }

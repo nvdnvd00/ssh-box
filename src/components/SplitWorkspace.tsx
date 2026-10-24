@@ -1,7 +1,101 @@
-import React, { useRef } from "react";
+import React, { useMemo, useRef } from "react";
 import { LeafPaneNode, PaneNode, PaneStatus } from "../types";
 import { AppLanguage, ThemeConfig } from "../themes";
 import { TerminalPane } from "./TerminalPane";
+
+interface PaneRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+interface PositionedLeaf extends PaneRect {
+  leaf: LeafPaneNode;
+}
+
+interface PositionedDivider {
+  id: string;
+  direction: "horizontal" | "vertical";
+  x: number;
+  y: number;
+  length: number;
+  parentStart: number;
+  parentSize: number;
+}
+
+function computeSplitLayout(
+  node: PaneNode,
+  rect: PaneRect = { x: 0, y: 0, w: 1, h: 1 },
+): { leaves: PositionedLeaf[]; dividers: PositionedDivider[] } {
+  if (node.type === "leaf") {
+    return { leaves: [{ leaf: node, ...rect }], dividers: [] };
+  }
+
+  if (node.direction === "vertical") {
+    const firstW = rect.w * node.ratio;
+    const splitX = rect.x + firstW;
+    const first = computeSplitLayout(node.first, {
+      x: rect.x,
+      y: rect.y,
+      w: firstW,
+      h: rect.h,
+    });
+    const second = computeSplitLayout(node.second, {
+      x: splitX,
+      y: rect.y,
+      w: rect.w - firstW,
+      h: rect.h,
+    });
+    return {
+      leaves: [...first.leaves, ...second.leaves],
+      dividers: [
+        ...first.dividers,
+        {
+          id: node.id,
+          direction: "vertical",
+          x: splitX,
+          y: rect.y,
+          length: rect.h,
+          parentStart: rect.x,
+          parentSize: rect.w,
+        },
+        ...second.dividers,
+      ],
+    };
+  }
+
+  const firstH = rect.h * node.ratio;
+  const splitY = rect.y + firstH;
+  const first = computeSplitLayout(node.first, {
+    x: rect.x,
+    y: rect.y,
+    w: rect.w,
+    h: firstH,
+  });
+  const second = computeSplitLayout(node.second, {
+    x: rect.x,
+    y: splitY,
+    w: rect.w,
+    h: rect.h - firstH,
+  });
+  return {
+    leaves: [...first.leaves, ...second.leaves],
+    dividers: [
+      ...first.dividers,
+      {
+        id: node.id,
+        direction: "horizontal",
+        x: rect.x,
+        y: splitY,
+        length: rect.w,
+        parentStart: rect.y,
+        parentSize: rect.h,
+      },
+      ...second.dividers,
+    ],
+  };
+}
 
 interface SplitWorkspaceProps {
   node: PaneNode;
@@ -49,45 +143,34 @@ export const SplitWorkspace: React.FC<SplitWorkspaceProps> = ({
   onResizeSplit,
 }) => {
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
+  const { leaves, dividers } = useMemo(() => {
+    const layout = computeSplitLayout(node);
+    layout.leaves.sort((a, b) => a.leaf.paneId.localeCompare(b.leaf.paneId));
+    return layout;
+  }, [node]);
 
-  if (node.type === "leaf") {
-    return (
-      <TerminalPane
-        leaf={node}
-        isActive={node.paneId === activePaneId}
-        showFocusBorder={totalPanes > 1}
-        themeConfig={themeConfig}
-        isVisible={isVisible}
-        language={language}
-        copyOnSelect={copyOnSelect}
-        broadcastTargetPaneIds={broadcastTargetPaneIds}
-        onFocus={() => onFocusPane(node.paneId)}
-        onUpdateStatus={(status, extra) =>
-          onUpdateLeafStatus(node.paneId, status, extra)
-        }
-        onTriggerReconnect={(pw) => onTriggerReconnect(node.paneId, pw)}
-        onSplitVertical={() => onSplitPane(node.paneId, "vertical", node)}
-        onSplitHorizontal={() => onSplitPane(node.paneId, "horizontal", node)}
-        onClosePane={() => onClosePane(node.paneId)}
-      />
-    );
-  }
-
-  const isVerticalSplit = node.direction === "vertical";
-
-  const handleMouseDownDivider = (e: React.MouseEvent) => {
+  const handleMouseDownDivider = (
+    e: React.MouseEvent,
+    divider: PositionedDivider,
+  ) => {
     e.preventDefault();
     const container = splitContainerRef.current;
-    if (!container) return;
+    if (!container || divider.parentSize <= 0) return;
     const rect = container.getBoundingClientRect();
 
     const onMouseMove = (moveEvent: MouseEvent) => {
-      if (isVerticalSplit) {
-        const nextRatio = (moveEvent.clientX - rect.left) / rect.width;
-        onResizeSplit(node.id, nextRatio);
+      if (divider.direction === "vertical") {
+        const relX = (moveEvent.clientX - rect.left) / rect.width;
+        onResizeSplit(
+          divider.id,
+          (relX - divider.parentStart) / divider.parentSize,
+        );
       } else {
-        const nextRatio = (moveEvent.clientY - rect.top) / rect.height;
-        onResizeSplit(node.id, nextRatio);
+        const relY = (moveEvent.clientY - rect.top) / rect.height;
+        onResizeSplit(
+          divider.id,
+          (relY - divider.parentStart) / divider.parentSize,
+        );
       }
     };
 
@@ -100,79 +183,76 @@ export const SplitWorkspace: React.FC<SplitWorkspaceProps> = ({
     window.addEventListener("mouseup", onMouseUp);
   };
 
-  const firstPct = `${(node.ratio * 100).toFixed(2)}%`;
-  const secondPct = `${((1 - node.ratio) * 100).toFixed(2)}%`;
-
   return (
     <div
       ref={splitContainerRef}
-      className={`flex h-full w-full overflow-hidden ${
-        isVerticalSplit ? "flex-row" : "flex-col"
-      }`}
+      className="relative h-full w-full overflow-hidden"
     >
-      <div
-        style={{
-          flexBasis: firstPct,
-        }}
-        className="min-w-0 min-h-0 overflow-hidden"
-      >
-        <SplitWorkspace
-          node={node.first}
-          activePaneId={activePaneId}
-          totalPanes={totalPanes}
-          themeConfig={themeConfig}
-          isVisible={isVisible}
-          language={language}
-          copyOnSelect={copyOnSelect}
-          broadcastTargetPaneIds={broadcastTargetPaneIds}
-          onFocusPane={onFocusPane}
-          onUpdateLeafStatus={onUpdateLeafStatus}
-          onTriggerReconnect={onTriggerReconnect}
-          onSplitPane={onSplitPane}
-          onClosePane={onClosePane}
-          onResizeSplit={onResizeSplit}
-        />
-      </div>
+      {leaves.map(({ leaf, x, y, w, h }) => (
+        <div
+          key={leaf.paneId}
+          style={{
+            left: `${(x * 100).toFixed(4)}%`,
+            top: `${(y * 100).toFixed(4)}%`,
+            width: `${(w * 100).toFixed(4)}%`,
+            height: `${(h * 100).toFixed(4)}%`,
+          }}
+          className="absolute min-w-0 min-h-0 overflow-hidden"
+        >
+          <TerminalPane
+            leaf={leaf}
+            isActive={leaf.paneId === activePaneId}
+            showFocusBorder={totalPanes > 1}
+            themeConfig={themeConfig}
+            isVisible={isVisible}
+            language={language}
+            copyOnSelect={copyOnSelect}
+            broadcastTargetPaneIds={broadcastTargetPaneIds}
+            onFocus={() => onFocusPane(leaf.paneId)}
+            onUpdateStatus={(status, extra) =>
+              onUpdateLeafStatus(leaf.paneId, status, extra)
+            }
+            onTriggerReconnect={(pw) => onTriggerReconnect(leaf.paneId, pw)}
+            onSplitVertical={() => onSplitPane(leaf.paneId, "vertical", leaf)}
+            onSplitHorizontal={() =>
+              onSplitPane(leaf.paneId, "horizontal", leaf)
+            }
+            onClosePane={() => onClosePane(leaf.paneId)}
+          />
+        </div>
+      ))}
 
-      {/* shadcn-style ResizableHandle with animated grip indicator */}
-      <div
-        onMouseDown={handleMouseDownDivider}
-        className={`group relative shrink-0 bg-border hover:bg-primary/70 active:bg-primary transition-colors duration-150 z-10 flex items-center justify-center ${
-          isVerticalSplit
-            ? "w-1 cursor-col-resize"
-            : "h-1 cursor-row-resize"
-        }`}
-      >
-        <span
-          className={`rounded-full bg-muted-foreground/40 group-hover:bg-primary group-hover:scale-125 transition-all duration-150 pointer-events-none ${
-            isVerticalSplit ? "w-0.5 h-5" : "h-0.5 w-5"
-          }`}
-        />
-      </div>
-
-      <div
-        style={{
-          flexBasis: secondPct,
-        }}
-        className="min-w-0 min-h-0 overflow-hidden"
-      >
-        <SplitWorkspace
-          node={node.second}
-          activePaneId={activePaneId}
-          totalPanes={totalPanes}
-          themeConfig={themeConfig}
-          isVisible={isVisible}
-          language={language}
-          copyOnSelect={copyOnSelect}
-          broadcastTargetPaneIds={broadcastTargetPaneIds}
-          onFocusPane={onFocusPane}
-          onUpdateLeafStatus={onUpdateLeafStatus}
-          onTriggerReconnect={onTriggerReconnect}
-          onSplitPane={onSplitPane}
-          onClosePane={onClosePane}
-          onResizeSplit={onResizeSplit}
-        />
-      </div>
+      {dividers.map((div) => {
+        const isVertical = div.direction === "vertical";
+        return (
+          <div
+            key={div.id}
+            onMouseDown={(e) => handleMouseDownDivider(e, div)}
+            style={
+              isVertical
+                ? {
+                    left: `calc(${(div.x * 100).toFixed(4)}% - 2px)`,
+                    top: `${(div.y * 100).toFixed(4)}%`,
+                    height: `${(div.length * 100).toFixed(4)}%`,
+                  }
+                : {
+                    left: `${(div.x * 100).toFixed(4)}%`,
+                    top: `calc(${(div.y * 100).toFixed(4)}% - 2px)`,
+                    width: `${(div.length * 100).toFixed(4)}%`,
+                  }
+            }
+            className={`absolute group shrink-0 bg-border hover:bg-primary/70 active:bg-primary transition-colors duration-150 z-10 flex items-center justify-center ${
+              isVertical ? "w-1 cursor-col-resize" : "h-1 cursor-row-resize"
+            }`}
+          >
+            <span
+              className={`rounded-full bg-muted-foreground/40 group-hover:bg-primary group-hover:scale-125 transition-all duration-150 pointer-events-none ${
+                isVertical ? "w-0.5 h-5" : "h-0.5 w-5"
+              }`}
+            />
+          </div>
+        );
+      })}
     </div>
   );
 };

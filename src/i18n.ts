@@ -91,6 +91,11 @@ export interface AppI18nStrings {
   settingsBackupTitle: string;
   settingsBackupExport: string;
   settingsBackupImport: string;
+
+  // App Update
+  updateBtn: string;
+  updateInstalling: string;
+  updateConfirm: string;
 }
 
 const VI_STRINGS: AppI18nStrings = {
@@ -183,6 +188,11 @@ const VI_STRINGS: AppI18nStrings = {
   settingsBackupTitle: "Sao lưu & Khôi phục dữ liệu (Vault Backup)",
   settingsBackupExport: "Xuất bản sao lưu (.json)",
   settingsBackupImport: "Khôi phục từ bản sao lưu",
+
+  updateBtn: "Cập nhật",
+  updateInstalling: "Đang cập nhật...",
+  updateConfirm:
+    "Tải bản mới và khởi động lại app? Các phiên SSH đang mở sẽ bị ngắt.",
 };
 
 const EN_STRINGS: AppI18nStrings = {
@@ -275,6 +285,11 @@ const EN_STRINGS: AppI18nStrings = {
   settingsBackupTitle: "Vault Configuration Backup & Restore",
   settingsBackupExport: "Export Vault Backup (.json)",
   settingsBackupImport: "Import Vault Backup",
+
+  updateBtn: "Update",
+  updateInstalling: "Updating...",
+  updateConfirm:
+    "Download the new version and restart the app? Open SSH sessions will be closed.",
 };
 
 export function getI18n(lang?: AppLanguage): AppI18nStrings {

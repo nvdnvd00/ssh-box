@@ -224,10 +224,6 @@ pub fn load_resources() -> ResourcesStoreData {
     load_resources_at(&default_resources_path())
 }
 
-pub fn save_resources(data: &ResourcesStoreData) -> Result<(), String> {
-    save_resources_at(&default_resources_path(), data)
-}
-
 pub fn upsert_group_at(path: &Path, mut group: MachineGroup) -> Result<ResourcesStoreData, String> {
     let mut store = load_resources_at(path);
     if group.id.trim().is_empty() {

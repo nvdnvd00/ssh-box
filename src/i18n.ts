@@ -88,9 +88,6 @@ export interface AppI18nStrings {
   settingsLanguageDesc: string;
   settingsFastSyncLabel: string;
   settingsFastSyncDesc: string;
-  settingsBackupTitle: string;
-  settingsBackupExport: string;
-  settingsBackupImport: string;
   settingsClipboardTitle: string;
   settingsCopyOnSelectLabel: string;
   settingsCopyOnSelectDesc: string;
@@ -191,9 +188,6 @@ const VI_STRINGS: AppI18nStrings = {
   settingsFastSyncLabel: "Tự động bật Fast Sync khi truyền tệp",
   settingsFastSyncDesc:
     "Sử dụng rsync delta hoặc luồng nén tốc độ cao kèm gắn nhãn FAST SYNC trên SFTP",
-  settingsBackupTitle: "Sao lưu & Khôi phục dữ liệu (Vault Backup)",
-  settingsBackupExport: "Xuất bản sao lưu (.json)",
-  settingsBackupImport: "Khôi phục từ bản sao lưu",
   settingsClipboardTitle: "Clipboard",
   settingsCopyOnSelectLabel: "Tự động copy khi bôi đen",
   settingsCopyOnSelectDesc: "Đoạn văn bản được bôi đen trong terminal sẽ tự động được copy vào clipboard",
@@ -294,9 +288,6 @@ const EN_STRINGS: AppI18nStrings = {
   settingsFastSyncLabel: "Auto-enable Fast Sync on File Transfers",
   settingsFastSyncDesc:
     "Automatically use rsync delta or compressed streaming with FAST SYNC badge",
-  settingsBackupTitle: "Vault Configuration Backup & Restore",
-  settingsBackupExport: "Export Vault Backup (.json)",
-  settingsBackupImport: "Import Vault Backup",
   settingsClipboardTitle: "Clipboard",
   settingsCopyOnSelectLabel: "Copy on Select",
   settingsCopyOnSelectDesc: "Automatically copy highlighted terminal text to the clipboard",

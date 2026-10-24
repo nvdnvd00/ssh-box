@@ -1,9 +1,8 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Activity,
   Check,
-  Download,
   Globe,
   Info,
   KeyRound,
@@ -18,7 +17,6 @@ import {
   Tag,
   Terminal as TerminalIcon,
   Trash2,
-  Upload,
   Wifi,
   Wrench,
   Zap,
@@ -64,7 +62,6 @@ interface SettingsWorkspaceProps {
     updater: (prev: AppSettingsConfig) => AppSettingsConfig,
   ) => void;
   onUpdateResources: (next: ResourcesStoreData) => void;
-  onRefreshHosts?: () => void;
 }
 
 const TAG_COLORS = [
@@ -150,15 +147,12 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
   onChangeTheme,
   onChangeAppSettings,
   onUpdateResources,
-  onRefreshHosts,
 }) => {
   const lang: AppLanguage = appSettings.language ?? "vi";
   const i18n = getI18n(lang);
   const [confirmReset, setConfirmReset] = useState(false);
   const [newTagName, setNewTagName] = useState("");
   const [newTagColor, setNewTagColor] = useState(TAG_COLORS[0]);
-  const [vaultStatusMsg, setVaultStatusMsg] = useState<string | null>(null);
-  const vaultFileInputRef = useRef<HTMLInputElement | null>(null);
   const [shellOptions, setShellOptions] = useState<
     { id: string; label: string }[]
   >([]);
@@ -172,52 +166,6 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
   const activePreset =
     TERMINAL_PRESETS.find((p) => p.id === themeConfig.terminalPreset) ??
     TERMINAL_PRESETS[0];
-
-  const handleExportVaultBackup = async () => {
-    try {
-      const jsonContent = await invoke<string>("export_vault_backup");
-      const blob = new Blob([jsonContent], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `ssh-box-vault-backup-${new Date().toISOString().slice(0, 10)}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-      setVaultStatusMsg(
-        lang === "vi"
-          ? "Đã xuất bản sao lưu Vault (.json) thành công!"
-          : "Vault backup (.json) exported successfully!",
-      );
-      setTimeout(() => setVaultStatusMsg(null), 4500);
-    } catch (e) {
-      setVaultStatusMsg(String(e));
-    }
-  };
-
-  const handleImportVaultBackup = async (
-    e: React.ChangeEvent<HTMLInputElement>,
-  ) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
-    try {
-      const text = await file.text();
-      const updatedResources = await invoke<ResourcesStoreData>(
-        "import_vault_backup",
-        { jsonPayload: text },
-      );
-      onUpdateResources(updatedResources);
-      onRefreshHosts?.();
-      setVaultStatusMsg(
-        lang === "vi"
-          ? "Đã khôi phục cấu hình Vault từ file JSON thành công!"
-          : "Vault configuration restored from JSON successfully!",
-      );
-      setTimeout(() => setVaultStatusMsg(null), 4500);
-    } catch (err) {
-      setVaultStatusMsg(String(err));
-    }
-  };
 
   const handleAddTag = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -569,47 +517,6 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
                       Enforced
                     </span>
                   </div>
-                </div>
-
-                <h2 className="text-[13px] font-semibold text-foreground px-1 pt-2">
-                  {i18n.settingsBackupTitle}
-                </h2>
-                <div className="rounded-2xl border border-border/80 bg-card/65 p-4 space-y-3">
-                  <div className="text-xs text-muted-foreground">
-                    {lang === "vi"
-                      ? "Xuất hoặc khôi phục toàn bộ cấu hình Máy chủ, Định danh, Khóa SSH, Proxy, Chuyển tiếp cổng và Snippets dưới dạng file JSON (mật khẩu và khóa bí mật vẫn được bảo vệ riêng trong macOS Keychain)."
-                      : "Export or restore all Hosts, Identities, SSH Keys, Proxy Profiles, Port Forwarding rules, and Snippets as a JSON file (passwords and private keys remain protected inside macOS Keychain)."}
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2.5">
-                    <button
-                      type="button"
-                      onClick={handleExportVaultBackup}
-                      className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold bg-primary text-primary-foreground hover:opacity-90 transition-all cursor-pointer"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      {i18n.settingsBackupExport}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => vaultFileInputRef.current?.click()}
-                      className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold bg-secondary text-foreground border border-border hover:bg-accent/70 transition-all cursor-pointer"
-                    >
-                      <Upload className="w-3.5 h-3.5" />
-                      {i18n.settingsBackupImport}
-                    </button>
-                    <input
-                      ref={vaultFileInputRef}
-                      type="file"
-                      accept=".json,application/json"
-                      className="hidden"
-                      onChange={handleImportVaultBackup}
-                    />
-                  </div>
-                  {vaultStatusMsg && (
-                    <div className="text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/25 rounded-xl px-3 py-2">
-                      {vaultStatusMsg}
-                    </div>
-                  )}
                 </div>
               </section>
             )}

@@ -688,9 +688,6 @@ export default function App() {
   ]);
 
   const currentTerminalMetrics = metricsMap[activeTerminalHostId] ?? null;
-  const totalPanesInActiveTab = activeTab
-    ? collectLeaves(activeTab.root).length
-    : 1;
 
   const navItems: {
     id: TabResources;
@@ -1081,7 +1078,7 @@ export default function App() {
 
         {/* Main Content Viewport */}
         <main className="flex-1 min-w-0 min-h-0 bg-background overflow-hidden relative">
-          {/* Terminal View (kept mounted when tabs exist so xterm sessions stay alive) */}
+          {/* Terminal View: every tab stays mounted (inactive ones hidden) so switching tabs never tears down xterm or the PTY/SSH session */}
           <div
             className={
               workspaceView === "terminal" && activeTab
@@ -1089,24 +1086,31 @@ export default function App() {
                 : "hidden"
             }
           >
-            {activeTab && (
-              <SplitWorkspace
-                node={activeTab.root}
-                activePaneId={activeTab.activePaneId}
-                totalPanes={totalPanesInActiveTab}
-                themeConfig={themeConfig}
-                isVisible={workspaceView === "terminal"}
-                language={appSettings.language}
-                copyOnSelect={appSettings.copyOnSelect}
-                broadcastTargetPaneIds={broadcastTargetPaneIds}
-                onFocusPane={handleFocusPane}
-                onUpdateLeafStatus={handleUpdateLeafStatus}
-                onTriggerReconnect={handleTriggerReconnect}
-                onSplitPane={handleSplitPane}
-                onClosePane={handleClosePane}
-                onResizeSplit={handleResizeSplit}
-              />
-            )}
+            {tabs.map((tab) => (
+              <div
+                key={tab.id}
+                className={tab.id === activeTab?.id ? "h-full w-full" : "hidden"}
+              >
+                <SplitWorkspace
+                  node={tab.root}
+                  activePaneId={tab.activePaneId}
+                  totalPanes={collectLeaves(tab.root).length}
+                  themeConfig={themeConfig}
+                  isVisible={
+                    workspaceView === "terminal" && tab.id === activeTab?.id
+                  }
+                  language={appSettings.language}
+                  copyOnSelect={appSettings.copyOnSelect}
+                  broadcastTargetPaneIds={broadcastTargetPaneIds}
+                  onFocusPane={handleFocusPane}
+                  onUpdateLeafStatus={handleUpdateLeafStatus}
+                  onTriggerReconnect={handleTriggerReconnect}
+                  onSplitPane={handleSplitPane}
+                  onClosePane={handleClosePane}
+                  onResizeSplit={handleResizeSplit}
+                />
+              </div>
+            ))}
           </div>
 
           {/* Dashboard & Full-Screen Machine Monitor Detail View */}

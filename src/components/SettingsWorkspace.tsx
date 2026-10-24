@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Activity,
@@ -159,6 +159,15 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
   const [newTagColor, setNewTagColor] = useState(TAG_COLORS[0]);
   const [vaultStatusMsg, setVaultStatusMsg] = useState<string | null>(null);
   const vaultFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [shellOptions, setShellOptions] = useState<
+    { id: string; label: string }[]
+  >([]);
+
+  useEffect(() => {
+    invoke<{ id: string; label: string }[]>("list_local_shells")
+      .then(setShellOptions)
+      .catch(() => undefined);
+  }, []);
 
   const activePreset =
     TERMINAL_PRESETS.find((p) => p.id === themeConfig.terminalPreset) ??
@@ -1352,6 +1361,44 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
                     </div>
                   </div>
                 </section>
+                {/* Local Shell (empty list on mobile, where only the embedded shell exists) */}
+                {shellOptions.length > 0 && (
+                  <section className="space-y-2">
+                    <h2 className="text-[13px] font-semibold text-foreground px-1">
+                      Shell
+                    </h2>
+                    <div className="rounded-2xl border border-border/80 bg-card/65 divide-y divide-border/60">
+                      <div className="flex items-center justify-between px-4 py-3.5">
+                        <div>
+                          <div className="text-[13px] font-medium text-foreground">
+                            {i18n.settingsLocalShellLabel}
+                          </div>
+                          <div className="text-[11px] text-muted-foreground">
+                            {i18n.settingsLocalShellDesc}
+                          </div>
+                        </div>
+                        <div className="w-56">
+                          <SelectField
+                            value={appSettings.localShell}
+                            onChange={(v) =>
+                              onChangeAppSettings((prev) => ({
+                                ...prev,
+                                localShell: v,
+                              }))
+                            }
+                            options={[
+                              { value: "", label: i18n.settingsLocalShellAuto },
+                              ...shellOptions.map((s) => ({
+                                value: s.id,
+                                label: s.label,
+                              })),
+                            ]}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+                )}
               </>
             )}
 

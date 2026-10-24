@@ -162,13 +162,19 @@ export default function App() {
       window.alert(String(err));
     }
   };
-  const isMacDesktop = useMemo(() => {
-    if (typeof navigator === "undefined") return false;
+  const { isMacDesktop, isMobileApp } = useMemo(() => {
+    if (typeof navigator === "undefined") {
+      return { isMacDesktop: false, isMobileApp: false };
+    }
     const ua = navigator.userAgent || "";
     const isIos =
       /iPhone|iPad|iPod/i.test(ua) ||
       (/Mac/i.test(navigator.platform) && (navigator.maxTouchPoints ?? 0) > 1);
-    return /Mac/i.test(navigator.platform) && !isIos;
+    return {
+      isMacDesktop: /Mac/i.test(navigator.platform) && !isIos,
+      // iOS/Android builds have no real PTY (only the embedded shell), so local tabs are disabled there
+      isMobileApp: isIos || /Android/i.test(ua),
+    };
   }, []);
 
   useEffect(() => {
@@ -369,6 +375,7 @@ export default function App() {
     setActiveTabId(newTab.id);
     setWorkspaceView("terminal");
   }, []);
+  const openLocalTab = isMobileApp ? undefined : handleOpenLocalTab;
 
   const handleConnectHostTab = useCallback(
     (host: HostEntry, passwordOverride?: string) => {
@@ -656,7 +663,7 @@ export default function App() {
         }
       } else if (key === "t") {
         e.preventDefault();
-        handleOpenLocalTab();
+        openLocalTab?.();
       } else if (key === "i") {
         e.preventDefault();
         if (workspaceView === "terminal") {
@@ -677,7 +684,7 @@ export default function App() {
     workspaceView,
     handleSplitPane,
     handleClosePane,
-    handleOpenLocalTab,
+    openLocalTab,
   ]);
 
   const currentTerminalMetrics = metricsMap[activeTerminalHostId] ?? null;
@@ -1112,7 +1119,7 @@ export default function App() {
               appSettings={appSettings}
               onSelectHost={(hostId) => setInspectedHostId(hostId)}
               onConnectHostTerminal={handleConnectHostTab}
-              onOpenLocalTerminal={handleOpenLocalTab}
+              onOpenLocalTerminal={openLocalTab}
               onOpenAddMachine={() => {
                 setResourceSubTab("machines");
                 setWorkspaceView("resources");
@@ -1173,7 +1180,7 @@ export default function App() {
                     setInspectedHostId(hostId);
                     setWorkspaceView("dashboard");
                   }}
-                  onOpenLocalTerminal={handleOpenLocalTab}
+                  onOpenLocalTerminal={openLocalTab}
                   onRunSnippetInActivePane={handleRunSnippetInActivePane}
                 />
               </div>
@@ -1429,10 +1436,11 @@ export default function App() {
 
             <div className="max-h-96 overflow-y-auto p-3 space-y-4">
               {/* Quick actions section */}
-              {(!commandPaletteQuery.trim() ||
-                t.newLocalShell
-                  .toLowerCase()
-                  .includes(commandPaletteQuery.trim().toLowerCase())) && (
+              {openLocalTab &&
+                (!commandPaletteQuery.trim() ||
+                  t.newLocalShell
+                    .toLowerCase()
+                    .includes(commandPaletteQuery.trim().toLowerCase())) && (
                 <div>
                   <div className="px-2 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                     {t.cmdPaletteSectionQuickActions}
@@ -1441,7 +1449,7 @@ export default function App() {
                     type="button"
                     onClick={() => {
                       setCommandPaletteOpen(false);
-                      handleOpenLocalTab();
+                      openLocalTab();
                     }}
                     className="w-full flex items-center justify-between px-3 py-2 rounded-xl hover:bg-accent/70 transition-colors cursor-pointer"
                   >

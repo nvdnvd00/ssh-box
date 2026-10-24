@@ -35,7 +35,8 @@ interface DashboardWorkspaceProps {
   appSettings: AppSettingsConfig;
   onSelectHost: (hostId: string | null) => void;
   onConnectHostTerminal: (host: HostEntry) => void;
-  onOpenLocalTerminal: () => void;
+  /** Omitted on mobile, where local terminals are disabled */
+  onOpenLocalTerminal?: () => void;
   onOpenAddMachine: () => void;
   onOpenDockerManager: (hostId: string) => void;
   onOpenSftpManager?: (hostId: string) => void;
@@ -504,20 +505,22 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
           </button>
 
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                if (selectedHostId === "local") {
-                  onOpenLocalTerminal();
-                } else if (hostObj) {
-                  onConnectHostTerminal(hostObj);
-                }
-              }}
-              className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-semibold shadow-xs hover:opacity-95 transition-all cursor-pointer active:scale-97"
-            >
-              <TerminalIcon className="w-3.5 h-3.5" />
-              <span>Open SSH Terminal</span>
-            </button>
+            {(selectedHostId !== "local" || onOpenLocalTerminal) && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectedHostId === "local") {
+                    onOpenLocalTerminal?.();
+                  } else if (hostObj) {
+                    onConnectHostTerminal(hostObj);
+                  }
+                }}
+                className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-semibold shadow-xs hover:opacity-95 transition-all cursor-pointer active:scale-97"
+              >
+                <TerminalIcon className="w-3.5 h-3.5" />
+                <span>Open SSH Terminal</span>
+              </button>
+            )}
 
             {onOpenSftpManager && (
               <button
@@ -1264,17 +1267,19 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onOpenLocalTerminal();
-                }}
-                title="Open Local Terminal"
-                className="p-2 rounded-xl bg-secondary/90 hover:bg-primary hover:text-primary-foreground text-muted-foreground transition-colors cursor-pointer"
-              >
-                <TerminalIcon className="w-4 h-4" />
-              </button>
+              {onOpenLocalTerminal && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenLocalTerminal();
+                  }}
+                  title="Open Local Terminal"
+                  className="p-2 rounded-xl bg-secondary/90 hover:bg-primary hover:text-primary-foreground text-muted-foreground transition-colors cursor-pointer"
+                >
+                  <TerminalIcon className="w-4 h-4" />
+                </button>
+              )}
             </div>
 
             <div className="space-y-1.5 text-xs border-t border-border/60 pt-3">

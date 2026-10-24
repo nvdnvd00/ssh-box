@@ -221,6 +221,49 @@ fn build_native_shell_path(inherited_path: Option<&str>, home: &Path) -> String 
     entries.join(sep)
 }
 
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+fn find_executable_in_path(bin: &str, path_env: &str) -> Option<PathBuf> {
+    std::env::split_paths(path_env)
+        .map(|dir| dir.join(bin))
+        .find(|p| p.is_file())
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+fn resolve_local_command(
+    shell_override: Option<&str>,
+    use_tmux: bool,
+    path_env: Option<&str>,
+) -> (String, Vec<String>, String) {
+    let (shell, mut args) = resolve_platform_shell(shell_override);
+    if !use_tmux {
+        return (shell.clone(), args, shell);
+    }
+    if shell == "wsl.exe" {
+        args.extend([
+            "--".to_string(),
+            "sh".to_string(),
+            "-lc".to_string(),
+            "[ -z \"$TMUX\" ] && command -v tmux >/dev/null 2>&1 && exec tmux new-session -A -s ssh-box; exec \"${SHELL:-/bin/bash}\" -l".to_string(),
+        ]);
+        return (shell.clone(), args, shell);
+    }
+    if !cfg!(target_os = "windows") && std::env::var_os("TMUX").is_none() {
+        if let Some(tmux_bin) = path_env.and_then(|p| find_executable_in_path("tmux", p)) {
+            return (
+                tmux_bin.to_string_lossy().to_string(),
+                vec![
+                    "new-session".to_string(),
+                    "-A".to_string(),
+                    "-s".to_string(),
+                    "ssh-box".to_string(),
+                ],
+                shell,
+            );
+        }
+    }
+    (shell.clone(), args, shell)
+}
+
 impl LocalPtyManager {
     pub fn spawn_pane<F>(
         &self,
@@ -228,6 +271,7 @@ impl LocalPtyManager {
         cols: u16,
         rows: u16,
         shell_override: Option<&str>,
+        use_tmux: bool,
         on_output: F,
     ) -> Result<(), String>
     where
@@ -240,8 +284,8 @@ impl LocalPtyManager {
         #[cfg(not(any(target_os = "ios", target_os = "android")))]
         {
             // A stale setting (uninstalled pwsh, deleted shell) falls back to the auto shell first
-            match Self::try_spawn_native(cols, rows, shell_override)
-                .or_else(|_| Self::try_spawn_native(cols, rows, None))
+            match Self::try_spawn_native(cols, rows, shell_override, use_tmux)
+                .or_else(|_| Self::try_spawn_native(cols, rows, None, false))
             {
                 Ok((master, writer, child, mut reader)) => {
                     let (tx_bytes, rx_bytes) = mpsc::channel::<Vec<u8>>(64);
@@ -298,6 +342,7 @@ impl LocalPtyManager {
         cols: u16,
         rows: u16,
         shell_override: Option<&str>,
+        use_tmux: bool,
     ) -> Result<
         (
             Box<dyn MasterPty + Send>,
@@ -317,12 +362,20 @@ impl LocalPtyManager {
             })
             .map_err(|e| e.to_string())?;
 
-        let (shell, args) = resolve_platform_shell(shell_override);
-        let mut cmd = CommandBuilder::new(&shell);
+        let home = crate::host_store::app_home_dir();
+        let inherited_path = std::env::var("PATH").ok();
+        let full_path = if !cfg!(target_os = "windows") && !cfg!(target_os = "android") {
+            Some(build_native_shell_path(inherited_path.as_deref(), &home))
+        } else {
+            inherited_path
+        };
+
+        let (program, args, shell) =
+            resolve_local_command(shell_override, use_tmux, full_path.as_deref());
+        let mut cmd = CommandBuilder::new(&program);
         for arg in args {
             cmd.arg(arg);
         }
-        let home = crate::host_store::app_home_dir();
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "SSH-Box");
@@ -336,9 +389,9 @@ impl LocalPtyManager {
                 "/system/bin:/system/xbin:/sbin:/vendor/bin:/data/local/tmp",
             );
         } else if !cfg!(target_os = "windows") {
-            let inherited_path = std::env::var("PATH").ok();
-            let full_path = build_native_shell_path(inherited_path.as_deref(), &home);
-            cmd.env("PATH", full_path);
+            if let Some(ref p) = full_path {
+                cmd.env("PATH", p);
+            }
         }
         if home.exists() {
             cmd.env("HOME", home.to_string_lossy().to_string());
@@ -1342,6 +1395,38 @@ mod tests {
         let (exe, args) = resolve_platform_shell(Some("wsl:Ubuntu-22.04"));
         assert_eq!(exe, "wsl.exe");
         assert_eq!(args, vec!["-d", "Ubuntu-22.04", "--cd", "~"]);
+
+        let (tmux_exe, tmux_args, _) =
+            resolve_local_command(Some("wsl:Ubuntu-22.04"), true, None);
+        assert_eq!(tmux_exe, "wsl.exe");
+        assert!(tmux_args.iter().any(|a| a.contains("tmux new-session -A -s ssh-box")));
+    }
+
+    #[cfg(not(any(target_os = "ios", target_os = "android", target_os = "windows")))]
+    #[test]
+    fn local_command_uses_tmux_when_found_in_path_and_falls_back_when_missing() {
+        let tmp_dir =
+            std::env::temp_dir().join(format!("ssh-box-tmux-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&tmp_dir).unwrap();
+        let fake_tmux = tmp_dir.join("tmux");
+        fs::write(&fake_tmux, b"#!/bin/sh\n").unwrap();
+
+        let (prog_missing, args_missing, shell_missing) =
+            resolve_local_command(Some("/bin/zsh"), true, Some("/nonexistent-ssh-box-path"));
+        assert_eq!(prog_missing, "/bin/zsh");
+        assert_eq!(args_missing, vec!["-l"]);
+        assert_eq!(shell_missing, "/bin/zsh");
+
+        if std::env::var_os("TMUX").is_none() {
+            let path_str = tmp_dir.to_string_lossy().to_string();
+            let (prog_found, args_found, shell_found) =
+                resolve_local_command(Some("/bin/zsh"), true, Some(&path_str));
+            assert_eq!(prog_found, fake_tmux.to_string_lossy().to_string());
+            assert_eq!(args_found, vec!["new-session", "-A", "-s", "ssh-box"]);
+            assert_eq!(shell_found, "/bin/zsh");
+        }
+
+        let _ = fs::remove_dir_all(&tmp_dir);
     }
 
     #[tokio::test]
@@ -1350,7 +1435,7 @@ mod tests {
         let pane_id = "test-local-1".to_string();
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
-        mgr.spawn_pane(pane_id.clone(), 80, 24, None, move |chunk| {
+        mgr.spawn_pane(pane_id.clone(), 80, 24, None, false, move |chunk| {
             tx.send(chunk).is_ok()
         })
         .expect("should spawn local PTY or embedded shell");
@@ -1400,6 +1485,7 @@ mod tests {
             80,
             24,
             Some("embedded"),
+            false,
             move |chunk| tx.send(chunk).is_ok(),
         )
         .expect("should spawn embedded mobile shell");

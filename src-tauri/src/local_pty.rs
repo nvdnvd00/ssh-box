@@ -1,4 +1,5 @@
 use crate::frame_batcher::{batch_stream_to_sink, ChannelReader};
+use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Write;
@@ -56,7 +57,24 @@ pub struct LocalPtyManager {
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 fn resolve_platform_shell(shell_override: Option<&str>) -> (String, Vec<String>) {
     if let Some(s) = shell_override {
-        return (s.to_string(), Vec::new());
+        if let Some(distro) = s.strip_prefix("wsl:") {
+            // --cd ~ opens in the Linux home instead of /mnt/c/Users/<user>
+            return (
+                "wsl.exe".to_string(),
+                vec!["-d".into(), distro.into(), "--cd".into(), "~".into()],
+            );
+        }
+        let args = if !cfg!(target_os = "windows") {
+            vec!["-l".to_string()]
+        } else if matches!(
+            Path::new(s).file_stem().and_then(|f| f.to_str()),
+            Some("powershell" | "pwsh")
+        ) {
+            vec!["-NoLogo".to_string()]
+        } else {
+            Vec::new()
+        };
+        return (s.to_string(), args);
     }
     if cfg!(target_os = "windows") {
         if let Ok(comspec) = std::env::var("COMSPEC") {
@@ -89,6 +107,74 @@ fn resolve_platform_shell(shell_override: Option<&str>) -> (String, Vec<String>)
         }
     }
     ("/bin/sh".to_string(), vec!["-l".to_string()])
+}
+
+#[derive(Serialize)]
+pub struct LocalShellOption {
+    pub id: String,
+    pub label: String,
+}
+
+/// Shells offered in Settings; `id` is passed back to spawn_pane as shell_override.
+#[allow(unused_mut)]
+pub async fn list_local_shells() -> Vec<LocalShellOption> {
+    let mut out = Vec::new();
+    #[cfg(target_os = "windows")]
+    {
+        let opt = |id: String, label: String| LocalShellOption { id, label };
+        out.push(opt("powershell.exe".into(), "Windows PowerShell".into()));
+        if let Some(pwsh) = std::env::var_os("PATH").and_then(|p| {
+            std::env::split_paths(&p)
+                .map(|d| d.join("pwsh.exe"))
+                .find(|f| f.exists())
+        }) {
+            out.push(opt(pwsh.to_string_lossy().into(), "PowerShell 7".into()));
+        }
+        out.push(opt("cmd.exe".into(), "Command Prompt".into()));
+        if let Ok(o) = tokio::process::Command::new("wsl.exe")
+            .args(["-l", "-q"])
+            // CREATE_NO_WINDOW: GUI-subsystem app otherwise pops a console per spawn
+            .creation_flags(0x0800_0000)
+            .output()
+            .await
+        {
+            if o.status.success() {
+                for d in parse_wsl_list(&o.stdout) {
+                    out.push(opt(format!("wsl:{d}"), format!("WSL: {d}")));
+                }
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "ios", target_os = "android")))]
+    {
+        for line in fs::read_to_string("/etc/shells").unwrap_or_default().lines() {
+            let p = line.trim();
+            if p.starts_with('/') && Path::new(p).exists() {
+                out.push(LocalShellOption { id: p.into(), label: p.into() });
+            }
+        }
+    }
+    out
+}
+
+/// `wsl.exe -l -q` prints UTF-16LE (UTF-8 only when WSL_UTF8=1 is set).
+/// docker-desktop distros are Docker's internal VMs without a usable shell.
+#[cfg(any(target_os = "windows", test))]
+fn parse_wsl_list(raw: &[u8]) -> Vec<String> {
+    let text = if raw.contains(&0) {
+        let units: Vec<u16> = raw
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(raw).into_owned()
+    };
+    text.lines()
+        .map(|l| l.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}'))
+        .filter(|l| !l.is_empty() && !l.starts_with("docker-desktop"))
+        .map(String::from)
+        .collect()
 }
 
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
@@ -153,7 +239,10 @@ impl LocalPtyManager {
 
         #[cfg(not(any(target_os = "ios", target_os = "android")))]
         {
-            match Self::try_spawn_native(cols, rows, shell_override) {
+            // A stale setting (uninstalled pwsh, deleted shell) falls back to the auto shell first
+            match Self::try_spawn_native(cols, rows, shell_override)
+                .or_else(|_| Self::try_spawn_native(cols, rows, None))
+            {
                 Ok((master, writer, child, mut reader)) => {
                     let (tx_bytes, rx_bytes) = mpsc::channel::<Vec<u8>>(64);
                     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
@@ -1235,6 +1324,25 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tokio::sync::mpsc;
+
+    #[test]
+    fn wsl_distro_list_decodes_utf16_and_hides_docker_vms() {
+        // Default wsl.exe output is UTF-16LE; read as UTF-8 it becomes "U\0b\0u\0..." garbage.
+        let utf16: Vec<u8> = "Ubuntu-22.04\r\ndocker-desktop\r\ndocker-desktop-data\r\n"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        assert_eq!(parse_wsl_list(&utf16), vec!["Ubuntu-22.04"]);
+        assert_eq!(parse_wsl_list(b"Debian\n"), vec!["Debian"]);
+    }
+
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    #[test]
+    fn wsl_setting_opens_chosen_distro_in_linux_home() {
+        let (exe, args) = resolve_platform_shell(Some("wsl:Ubuntu-22.04"));
+        assert_eq!(exe, "wsl.exe");
+        assert_eq!(args, vec!["-d", "Ubuntu-22.04", "--cd", "~"]);
+    }
 
     #[tokio::test]
     async fn spawns_local_shell_reads_batched_output_resizes_and_closes() {

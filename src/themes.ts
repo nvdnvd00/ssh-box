@@ -61,6 +61,8 @@ export interface AppSettingsConfig {
   temperatureUnit: "C" | "F";
   autoOpenMonitorOnSsh: boolean;
   copyOnSelect: boolean;
+  /** Shell id from `list_local_shells`; "" = platform default */
+  localShell: string;
 }
 
 export interface ThemeConfig extends AppThemeConfig, TerminalThemeConfig {}
@@ -500,6 +502,7 @@ export const DEFAULT_APP_SETTINGS: AppSettingsConfig = {
   temperatureUnit: "C",
   autoOpenMonitorOnSsh: false,
   copyOnSelect: false,
+  localShell: "",
 };
 
 export const DEFAULT_THEME_CONFIG: ThemeConfig = {
@@ -640,6 +643,10 @@ export function loadAppSettings(): AppSettingsConfig {
         typeof parsed.copyOnSelect === "boolean"
           ? parsed.copyOnSelect
           : DEFAULT_APP_SETTINGS.copyOnSelect,
+      localShell:
+        typeof parsed.localShell === "string"
+          ? parsed.localShell
+          : DEFAULT_APP_SETTINGS.localShell,
     };
   } catch {
     return DEFAULT_APP_SETTINGS;

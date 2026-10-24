@@ -94,6 +94,9 @@ export interface AppI18nStrings {
   settingsClipboardTitle: string;
   settingsCopyOnSelectLabel: string;
   settingsCopyOnSelectDesc: string;
+  settingsLocalShellLabel: string;
+  settingsLocalShellDesc: string;
+  settingsLocalShellAuto: string;
 
   // App Update
   updateBtn: string;
@@ -194,6 +197,9 @@ const VI_STRINGS: AppI18nStrings = {
   settingsClipboardTitle: "Clipboard",
   settingsCopyOnSelectLabel: "Tự động copy khi bôi đen",
   settingsCopyOnSelectDesc: "Đoạn văn bản được bôi đen trong terminal sẽ tự động được copy vào clipboard",
+  settingsLocalShellLabel: "Shell cho terminal local",
+  settingsLocalShellDesc: "Áp dụng cho tab local mở sau khi đổi",
+  settingsLocalShellAuto: "Mặc định hệ thống",
 
   updateBtn: "Cập nhật",
   updateInstalling: "Đang cập nhật...",
@@ -294,6 +300,9 @@ const EN_STRINGS: AppI18nStrings = {
   settingsClipboardTitle: "Clipboard",
   settingsCopyOnSelectLabel: "Copy on Select",
   settingsCopyOnSelectDesc: "Automatically copy highlighted terminal text to the clipboard",
+  settingsLocalShellLabel: "Local Terminal Shell",
+  settingsLocalShellDesc: "Applies to local tabs opened after the change",
+  settingsLocalShellAuto: "System default",
 
   updateBtn: "Update",
   updateInstalling: "Updating...",

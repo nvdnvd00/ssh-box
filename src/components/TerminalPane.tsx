@@ -21,6 +21,7 @@ import {
 import { LeafPaneNode, PaneStatus } from "../types";
 import {
   AppLanguage,
+  loadAppSettings,
   resolveTerminalFontCss,
   resolveXtermTheme,
   ThemeConfig,
@@ -657,6 +658,8 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         paneId: leaf.paneId,
         cols,
         rows,
+        // Read at spawn time so changing the setting never restarts open panes
+        shell: loadAppSettings().localShell || null,
         onData: channel,
       })
         .then(() => {

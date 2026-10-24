@@ -94,6 +94,11 @@ export interface AppI18nStrings {
   settingsLocalShellLabel: string;
   settingsLocalShellDesc: string;
   settingsLocalShellAuto: string;
+  settingsTmuxTitle: string;
+  settingsTmuxSshLabel: string;
+  settingsTmuxSshDesc: string;
+  settingsTmuxLocalLabel: string;
+  settingsTmuxLocalDesc: string;
 
   // App Update
   updateBtn: string;
@@ -194,6 +199,13 @@ const VI_STRINGS: AppI18nStrings = {
   settingsLocalShellLabel: "Shell cho terminal local",
   settingsLocalShellDesc: "Áp dụng cho tab local mở sau khi đổi",
   settingsLocalShellAuto: "Mặc định hệ thống",
+  settingsTmuxTitle: "Tmux",
+  settingsTmuxSshLabel: "Tự động dùng tmux cho SSH",
+  settingsTmuxSshDesc:
+    "Tự gắn vào session 'ssh-box' trên máy chủ từ xa (bỏ qua nếu chưa cài tmux)",
+  settingsTmuxLocalLabel: "Tự động dùng tmux cho Local Terminal",
+  settingsTmuxLocalDesc:
+    "Tự gắn vào session 'ssh-box' trên máy cục bộ (bỏ qua nếu chưa cài tmux)",
 
   updateBtn: "Cập nhật",
   updateInstalling: "Đang cập nhật...",
@@ -294,6 +306,13 @@ const EN_STRINGS: AppI18nStrings = {
   settingsLocalShellLabel: "Local Terminal Shell",
   settingsLocalShellDesc: "Applies to local tabs opened after the change",
   settingsLocalShellAuto: "System default",
+  settingsTmuxTitle: "Tmux",
+  settingsTmuxSshLabel: "Auto-attach tmux on SSH",
+  settingsTmuxSshDesc:
+    "Attach or create 'ssh-box' session on remote hosts (falls back if tmux is missing)",
+  settingsTmuxLocalLabel: "Auto-attach tmux on Local Terminal",
+  settingsTmuxLocalDesc:
+    "Attach or create 'ssh-box' session in local shells (falls back if tmux is missing)",
 
   updateBtn: "Update",
   updateInstalling: "Updating...",

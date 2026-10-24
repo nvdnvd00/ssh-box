@@ -63,6 +63,8 @@ export interface AppSettingsConfig {
   copyOnSelect: boolean;
   /** Shell id from `list_local_shells`; "" = platform default */
   localShell: string;
+  tmuxSshEnabled: boolean;
+  tmuxLocalEnabled: boolean;
 }
 
 export interface ThemeConfig extends AppThemeConfig, TerminalThemeConfig {}
@@ -503,6 +505,8 @@ export const DEFAULT_APP_SETTINGS: AppSettingsConfig = {
   autoOpenMonitorOnSsh: false,
   copyOnSelect: false,
   localShell: "",
+  tmuxSshEnabled: false,
+  tmuxLocalEnabled: false,
 };
 
 export const DEFAULT_THEME_CONFIG: ThemeConfig = {
@@ -647,6 +651,14 @@ export function loadAppSettings(): AppSettingsConfig {
         typeof parsed.localShell === "string"
           ? parsed.localShell
           : DEFAULT_APP_SETTINGS.localShell,
+      tmuxSshEnabled:
+        typeof parsed.tmuxSshEnabled === "boolean"
+          ? parsed.tmuxSshEnabled
+          : DEFAULT_APP_SETTINGS.tmuxSshEnabled,
+      tmuxLocalEnabled:
+        typeof parsed.tmuxLocalEnabled === "boolean"
+          ? parsed.tmuxLocalEnabled
+          : DEFAULT_APP_SETTINGS.tmuxLocalEnabled,
     };
   } catch {
     return DEFAULT_APP_SETTINGS;

@@ -493,13 +493,17 @@ async fn spawn_local_pty(
     cols: u16,
     rows: u16,
     shell: Option<String>,
+    use_tmux: Option<bool>,
     on_data: Channel<Vec<u8>>,
 ) -> Result<(), String> {
-    state
-        .local_pty
-        .spawn_pane(pane_id, cols, rows, shell.as_deref(), move |chunk| {
-            on_data.send(chunk).is_ok()
-        })
+    state.local_pty.spawn_pane(
+        pane_id,
+        cols,
+        rows,
+        shell.as_deref(),
+        use_tmux.unwrap_or(false),
+        move |chunk| on_data.send(chunk).is_ok(),
+    )
 }
 
 #[tauri::command]
@@ -515,15 +519,34 @@ async fn connect_ssh_pane(
     cols: u16,
     rows: u16,
     password: Option<String>,
+    use_tmux: Option<bool>,
     on_data: Channel<Vec<u8>>,
 ) -> Result<OpenSshPaneResponse, String> {
     let fingerprint = state
         .ssh_pool
-        .open_pty_pane(pane_id, &host, cols, rows, password, move |chunk| {
-            on_data.send(chunk).is_ok()
-        })
+        .open_pty_pane(
+            pane_id,
+            &host,
+            cols,
+            rows,
+            password,
+            use_tmux.unwrap_or(false),
+            move |chunk| on_data.send(chunk).is_ok(),
+        )
         .await?;
     Ok(OpenSshPaneResponse { fingerprint })
+}
+
+#[tauri::command]
+async fn test_ssh_connection(
+    state: State<'_, AppState>,
+    host: HostEntry,
+    secret: Option<String>,
+) -> Result<String, String> {
+    let password = secret
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    state.ssh_pool.test_connection(&host, password).await
 }
 
 #[tauri::command]
@@ -818,6 +841,7 @@ pub fn run() {
             spawn_local_pty,
             list_local_shells,
             connect_ssh_pane,
+            test_ssh_connection,
             write_pane_input,
             resize_pane,
             close_pane,

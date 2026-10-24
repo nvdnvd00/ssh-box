@@ -271,6 +271,27 @@ export default function App() {
     loadResources();
   }, [loadHosts, loadResources]);
 
+  // Once per launch (the ref also absorbs StrictMode's double effect); a webview
+  // reload skips rules the backend still reports as running
+  const autoStartedRef = useRef(false);
+  useEffect(() => {
+    if (autoStartedRef.current) return;
+    autoStartedRef.current = true;
+    invoke<ResourcesStoreData>("get_resources")
+      .then(async (data) => {
+        for (const rule of data.portForwardingRules) {
+          if (!rule.autoStart || rule.status === "running") continue;
+          // A failure is saved on the rule and shown on its card
+          await invoke("toggle_port_forwarding_rule", {
+            ruleId: rule.id,
+            active: true,
+          }).catch(() => undefined);
+        }
+        loadResources();
+      })
+      .catch(() => undefined);
+  }, [loadResources]);
+
   const activeTab = useMemo(
     () => tabs.find((t) => t.id === activeTabId) ?? tabs[0] ?? null,
     [tabs, activeTabId],
@@ -394,6 +415,28 @@ export default function App() {
       setWorkspaceView("terminal");
     },
     [appSettings.autoOpenMonitorOnSsh],
+  );
+
+  const handleOpenCommandTab = useCallback(
+    (hostId: string, title: string, startupCommand: string) => {
+      const host = hosts.find((h) => h.id === hostId);
+      const base =
+        hostId === "local"
+          ? createLocalLeaf(title)
+          : host && createSshLeaf(host);
+      if (!base) return;
+      const leaf = { ...base, title, startupCommand };
+      const newTab: WorkspaceTab = {
+        id: `tab-${leaf.paneId}`,
+        title,
+        root: leaf,
+        activePaneId: leaf.paneId,
+      };
+      setTabs((prev) => [...prev, newTab]);
+      setActiveTabId(newTab.id);
+      setWorkspaceView("terminal");
+    },
+    [hosts],
   );
 
   const handleSplitPane = useCallback(
@@ -1185,6 +1228,7 @@ export default function App() {
                     setWorkspaceView("dashboard");
                   }}
                   onOpenLocalTerminal={openLocalTab}
+                  onOpenCommandTab={handleOpenCommandTab}
                   onRunSnippetInActivePane={handleRunSnippetInActivePane}
                 />
               </div>

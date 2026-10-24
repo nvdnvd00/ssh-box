@@ -77,6 +77,11 @@ interface ResourcesWorkspaceProps {
   onConnectHost: (host: HostEntry) => void;
   onInspectMachine?: (hostId: string) => void;
   onOpenLocalTerminal?: () => void;
+  onOpenCommandTab?: (
+    hostId: string,
+    title: string,
+    startupCommand: string,
+  ) => void;
   onRunSnippetInActivePane?: (code: string, snippetName?: string) => void;
 }
 
@@ -133,6 +138,7 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
   onConnectHost,
   onInspectMachine,
   onOpenLocalTerminal,
+  onOpenCommandTab,
   onRunSnippetInActivePane,
 }) => {
   const t = getI18n(appSettings?.language);
@@ -210,6 +216,13 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
   const [selectedTagFilter, setSelectedTagFilter] = useState<string>("ALL");
   const [editingHost, setEditingHost] = useState<HostEntry | null>(null);
   const [hostSecret, setHostSecret] = useState("");
+  const [testingHost, setTestingHost] = useState(false);
+  const [hostTestResult, setHostTestResult] = useState<{
+    ok: boolean;
+    message: string;
+  } | null>(null);
+  // A result only describes the values it was run with
+  useEffect(() => setHostTestResult(null), [editingHost, hostSecret]);
   const [showGroupModal, setShowGroupModal] = useState(false);
   const [groupForm, setGroupForm] = useState<MachineGroup>({
     id: "",
@@ -448,6 +461,26 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
       setHostSecret("");
     } catch (err) {
       setErrorBanner(String(err));
+    }
+  };
+
+  const handleTestHostConnection = async () => {
+    if (!editingHost || !editingHost.hostname.trim()) return;
+    setTestingHost(true);
+    try {
+      const fingerprint = await invoke<string>("test_ssh_connection", {
+        host: {
+          ...editingHost,
+          hostname: editingHost.hostname.trim(),
+          user: editingHost.user.trim() || "root",
+        },
+        secret: hostSecret.trim() || null,
+      });
+      setHostTestResult({ ok: true, message: `Connected · ${fingerprint}` });
+    } catch (err) {
+      setHostTestResult({ ok: false, message: String(err) });
+    } finally {
+      setTestingHost(false);
     }
   };
 
@@ -725,6 +758,30 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
     } finally {
       setTogglingPfId(null);
     }
+  };
+
+  // Sequential so each card shows its own spinner and errors stay per rule
+  const handleToggleAllPfRules = async (active: boolean) => {
+    setErrorBanner(null);
+    const errors: string[] = [];
+    for (const rule of resources.portForwardingRules) {
+      if ((rule.status === "running") === active) continue;
+      setTogglingPfId(rule.id);
+      try {
+        await invoke("toggle_port_forwarding_rule", {
+          ruleId: rule.id,
+          active,
+        });
+      } catch (err) {
+        errors.push(`${rule.name}: ${err}`);
+      }
+    }
+    setTogglingPfId(null);
+    const refreshed = await invoke<ResourcesStoreData>("get_resources").catch(
+      () => null,
+    );
+    if (refreshed) onUpdateResources(refreshed);
+    if (errors.length > 0) setErrorBanner(errors.join(" · "));
   };
 
   const handleDeletePfRule = async (ruleId: string) => {
@@ -1188,6 +1245,30 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                 New Proxy
               </button>
             )}
+
+            {activeSubTab === "portForwarding" &&
+              resources.portForwardingRules.length > 0 && (
+                <>
+                  <button
+                    type="button"
+                    disabled={togglingPfId !== null}
+                    onClick={() => handleToggleAllPfRules(true)}
+                    className="h-[38px] inline-flex items-center gap-1.5 px-3 rounded-[10px] border bg-secondary hover:bg-accent border-border text-foreground text-xs font-medium cursor-pointer disabled:opacity-50"
+                  >
+                    <Play className="w-3.5 h-3.5" />
+                    Start All
+                  </button>
+                  <button
+                    type="button"
+                    disabled={togglingPfId !== null}
+                    onClick={() => handleToggleAllPfRules(false)}
+                    className="h-[38px] inline-flex items-center gap-1.5 px-3 rounded-[10px] border bg-secondary hover:bg-accent border-border text-foreground text-xs font-medium cursor-pointer disabled:opacity-50"
+                  >
+                    <Square className="w-3.5 h-3.5" />
+                    Stop All
+                  </button>
+                </>
+              )}
 
             {activeSubTab === "portForwarding" && (
               <button
@@ -1947,6 +2028,12 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                               SOCKS5 {rule.localHost}:{rule.localPort} →{" "}
                               {machine?.alias ?? "SSH"}
                             </span>
+                          ) : rule.mode === "remote" ? (
+                            <span>
+                              {machine?.alias ?? "SSH"} {rule.remoteHost}:
+                              {rule.remotePort} → {rule.targetHost}:
+                              {rule.targetPort}
+                            </span>
                           ) : (
                             <span>
                               {rule.localHost}:{rule.localPort} →{" "}
@@ -2685,6 +2772,28 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                                     >
                                       Logs
                                     </button>
+                                    {/* Local shells are hidden on mobile, so is this */}
+                                    {running &&
+                                      onOpenCommandTab &&
+                                      (dockerHostId !== "local" ||
+                                        onOpenLocalTerminal) && (
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            onOpenCommandTab(
+                                              dockerHostId,
+                                              c.name,
+                                              // c.id is the hex --no-trunc ID, safe unquoted
+                                              `docker exec -it ${c.id} sh -c "command -v bash >/dev/null && exec bash || exec sh"`,
+                                            )
+                                          }
+                                          title="Open Shell in Container"
+                                          className="px-2.5 py-1.5 rounded-xl bg-secondary hover:bg-accent text-foreground text-xs font-medium cursor-pointer inline-flex items-center gap-1"
+                                        >
+                                          <Terminal className="w-3.5 h-3.5" />
+                                          Shell
+                                        </button>
+                                      )}
                                   </div>
                                   <button
                                     type="button"
@@ -3342,7 +3451,29 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                 </div>
               )}
 
-              <div className="flex justify-end gap-2.5 pt-3 border-t border-border/80">
+              <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-border/80">
+                {hostTestResult && (
+                  <span
+                    className={`mr-auto min-w-0 text-[11px] font-mono break-all ${
+                      hostTestResult.ok ? "text-emerald-400" : "text-rose-400"
+                    }`}
+                  >
+                    {hostTestResult.message}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={handleTestHostConnection}
+                  disabled={testingHost || !editingHost.hostname.trim()}
+                  className="h-10 px-4 rounded-xl bg-secondary hover:bg-accent text-foreground text-xs font-semibold cursor-pointer transition-colors inline-flex items-center gap-1.5 shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {testingHost ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Activity className="w-3.5 h-3.5" />
+                  )}
+                  Test connection
+                </button>
                 <button
                   type="button"
                   onClick={() => setEditingHost(null)}
@@ -4047,29 +4178,49 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                 />
               </div>
               <div className="grid grid-cols-2 gap-3.5">
+                {/* -R binds on the SSH server, -L/-D bind on this machine */}
                 <div>
-                  <label className="ui-label">Local Bind Host</label>
+                  <label className="ui-label">
+                    {editingPfRule.mode === "remote"
+                      ? "Remote Bind Host"
+                      : "Local Bind Host"}
+                  </label>
                   <input
                     type="text"
-                    value={editingPfRule.localHost}
+                    value={
+                      editingPfRule.mode === "remote"
+                        ? editingPfRule.remoteHost
+                        : editingPfRule.localHost
+                    }
                     onChange={(e) =>
                       setEditingPfRule({
                         ...editingPfRule,
-                        localHost: e.target.value,
+                        [editingPfRule.mode === "remote"
+                          ? "remoteHost"
+                          : "localHost"]: e.target.value,
                       })
                     }
                     className="ui-input"
                   />
                 </div>
                 <div>
-                  <label className="ui-label">Local Port</label>
+                  <label className="ui-label">
+                    {editingPfRule.mode === "remote" ? "Remote Port" : "Local Port"}
+                  </label>
                   <input
                     type="number"
-                    value={editingPfRule.localPort}
+                    value={
+                      editingPfRule.mode === "remote"
+                        ? editingPfRule.remotePort
+                        : editingPfRule.localPort
+                    }
                     onChange={(e) =>
                       setEditingPfRule({
                         ...editingPfRule,
-                        localPort: Number.parseInt(e.target.value, 10) || 8080,
+                        [editingPfRule.mode === "remote"
+                          ? "remotePort"
+                          : "localPort"]:
+                          Number.parseInt(e.target.value, 10) || 8080,
                       })
                     }
                     className="ui-input"
@@ -4108,6 +4259,19 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                   </div>
                 </div>
               )}
+              <label className="flex items-center gap-2.5 cursor-pointer font-medium">
+                <input
+                  type="checkbox"
+                  checked={editingPfRule.autoStart}
+                  onChange={(e) =>
+                    setEditingPfRule({
+                      ...editingPfRule,
+                      autoStart: e.target.checked,
+                    })
+                  }
+                />
+                <span>Start automatically when the app opens</span>
+              </label>
               <div className="flex justify-end gap-2.5 pt-3 border-t border-border">
                 <button
                   type="button"

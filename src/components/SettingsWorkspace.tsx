@@ -58,7 +58,7 @@ interface SettingsWorkspaceProps {
   themeConfig: ThemeConfig;
   appSettings: AppSettingsConfig;
   resources: ResourcesStoreData;
-  initialSection?: SettingsTabId;
+  activeTab: SettingsTabId;
   onChangeTheme: (updater: (prev: ThemeConfig) => ThemeConfig) => void;
   onChangeAppSettings: (
     updater: (prev: AppSettingsConfig) => AppSettingsConfig,
@@ -78,11 +78,75 @@ const TAG_COLORS = [
   "#2dd4bf",
 ];
 
+export function getSettingsNavGroups(lang: AppLanguage): {
+  title: string;
+  items: { id: SettingsTabId; label: string; icon: React.ReactNode }[];
+}[] {
+  const i18n = getI18n(lang);
+  return [
+    {
+      title: lang === "vi" ? "Ứng dụng" : "App",
+      items: [
+        {
+          id: "general",
+          label: lang === "vi" ? "Tổng quan" : "General",
+          icon: <Sliders className="w-4 h-4 text-sky-400" />,
+        },
+        {
+          id: "security",
+          label: lang === "vi" ? "Bảo mật & Sao lưu" : "Security & Privacy",
+          icon: <ShieldCheck className="w-4 h-4 text-emerald-400" />,
+        },
+      ],
+    },
+    {
+      title: lang === "vi" ? "Tính năng" : "Features",
+      items: [
+        {
+          id: "connections",
+          label: lang === "vi" ? "Kết nối" : "Connections",
+          icon: <Wifi className="w-4 h-4 text-cyan-400" />,
+        },
+        {
+          id: "dashboard",
+          label: i18n.navDashboard,
+          icon: <LayoutGrid className="w-4 h-4 text-indigo-400" />,
+        },
+        {
+          id: "terminal",
+          label: i18n.navTerminal,
+          icon: <TerminalIcon className="w-4 h-4 text-amber-400" />,
+        },
+        {
+          id: "tags",
+          label: lang === "vi" ? "Nhãn máy chủ (Tags)" : "Machine Tags",
+          icon: <Tag className="w-4 h-4 text-pink-400" />,
+        },
+      ],
+    },
+    {
+      title: lang === "vi" ? "Trợ giúp" : "Help",
+      items: [
+        {
+          id: "diagnostics",
+          label: lang === "vi" ? "Chẩn đoán" : "Diagnostics",
+          icon: <Wrench className="w-4 h-4 text-orange-400" />,
+        },
+        {
+          id: "about",
+          label: lang === "vi" ? "Giới thiệu" : "About",
+          icon: <Info className="w-4 h-4 text-violet-400" />,
+        },
+      ],
+    },
+  ];
+}
+
 export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
   themeConfig,
   appSettings,
   resources,
-  initialSection = "terminal",
+  activeTab,
   onChangeTheme,
   onChangeAppSettings,
   onUpdateResources,
@@ -90,7 +154,7 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
 }) => {
   const lang: AppLanguage = appSettings.language ?? "vi";
   const i18n = getI18n(lang);
-  const [activeTab, setActiveTab] = useState<SettingsTabId>(initialSection);
+  const [confirmReset, setConfirmReset] = useState(false);
   const [newTagName, setNewTagName] = useState("");
   const [newTagColor, setNewTagColor] = useState(TAG_COLORS[0]);
   const [vaultStatusMsg, setVaultStatusMsg] = useState<string | null>(null);
@@ -176,120 +240,13 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
     }
   };
 
-  const navGroups: {
-    title: string;
-    items: { id: SettingsTabId; label: string; icon: React.ReactNode }[];
-  }[] = [
-    {
-      title: lang === "vi" ? "Ứng dụng" : "App",
-      items: [
-        {
-          id: "general",
-          label: lang === "vi" ? "Tổng quan" : "General",
-          icon: <Sliders className="w-4 h-4 text-sky-400" />,
-        },
-        {
-          id: "security",
-          label: lang === "vi" ? "Bảo mật & Sao lưu" : "Security & Privacy",
-          icon: <ShieldCheck className="w-4 h-4 text-emerald-400" />,
-        },
-      ],
-    },
-    {
-      title: lang === "vi" ? "Tính năng" : "Features",
-      items: [
-        {
-          id: "connections",
-          label: lang === "vi" ? "Kết nối" : "Connections",
-          icon: <Wifi className="w-4 h-4 text-cyan-400" />,
-        },
-        {
-          id: "dashboard",
-          label: i18n.navDashboard,
-          icon: <LayoutGrid className="w-4 h-4 text-indigo-400" />,
-        },
-        {
-          id: "terminal",
-          label: i18n.navTerminal,
-          icon: <TerminalIcon className="w-4 h-4 text-amber-400" />,
-        },
-        {
-          id: "tags",
-          label: lang === "vi" ? "Nhãn máy chủ (Tags)" : "Machine Tags",
-          icon: <Tag className="w-4 h-4 text-pink-400" />,
-        },
-      ],
-    },
-    {
-      title: lang === "vi" ? "Trợ giúp" : "Help",
-      items: [
-        {
-          id: "diagnostics",
-          label: lang === "vi" ? "Chẩn đoán" : "Diagnostics",
-          icon: <Wrench className="w-4 h-4 text-orange-400" />,
-        },
-        {
-          id: "about",
-          label: lang === "vi" ? "Giới thiệu" : "About",
-          icon: <Info className="w-4 h-4 text-violet-400" />,
-        },
-      ],
-    },
-  ];
-
   const currentTabTitle =
-    navGroups.flatMap((g) => g.items).find((i) => i.id === activeTab)?.label ??
-    "Settings";
+    getSettingsNavGroups(lang)
+      .flatMap((g) => g.items)
+      .find((i) => i.id === activeTab)?.label ?? "Settings";
 
   return (
     <div className="flex h-full w-full bg-background text-foreground overflow-hidden select-none">
-      {/* Settings Inner Sidebar */}
-      <aside className="w-60 shrink-0 bg-sidebar/75 border-r border-border/80 flex flex-col justify-between py-4 px-3 overflow-y-auto">
-        <div className="space-y-5">
-          {navGroups.map((group) => (
-            <div key={group.title} className="space-y-1">
-              <div className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/75">
-                {group.title}
-              </div>
-              {group.items.map((item) => {
-                const isActive = activeTab === item.id;
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => setActiveTab(item.id)}
-                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-[13px] font-medium transition-all duration-200 cursor-pointer ${
-                      isActive
-                        ? "bg-primary/15 text-foreground border border-primary/35 shadow-xs translate-x-0.5"
-                        : "text-muted-foreground hover:bg-accent/60 hover:text-foreground border border-transparent"
-                    }`}
-                  >
-                    <span className="p-1 rounded-lg bg-card/90 border border-border/60 shadow-2xs">
-                      {item.icon}
-                    </span>
-                    <span>{item.label}</span>
-                  </button>
-                );
-              })}
-            </div>
-          ))}
-        </div>
-
-        <div className="pt-4 border-t border-border/60 px-2">
-          <button
-            type="button"
-            onClick={() => {
-              onChangeTheme(() => DEFAULT_THEME_CONFIG);
-              onChangeAppSettings(() => DEFAULT_APP_SETTINGS);
-            }}
-            className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-accent/70 border border-border/60 transition-all cursor-pointer"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            Reset All Settings
-          </button>
-        </div>
-      </aside>
-
       {/* Settings Content Surface */}
       <div className="flex-1 min-w-0 flex flex-col h-full overflow-hidden">
         <div className="h-14 shrink-0 px-8 border-b border-border/70 flex items-center justify-between bg-header/40 backdrop-blur-md">
@@ -507,6 +464,46 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
                         })}
                       </div>
                     </div>
+                  </div>
+                </section>
+                <section className="space-y-2.5">
+                  <div className="rounded-2xl border border-border/80 bg-card/65 flex items-center justify-between gap-3 px-4 py-3.5">
+                    <div className="text-xs text-muted-foreground">
+                      {lang === "vi"
+                        ? "Đưa theme và mọi cài đặt về mặc định"
+                        : "Restore theme and all settings to defaults"}
+                    </div>
+                    {confirmReset ? (
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => setConfirmReset(false)}
+                          className="px-3 py-1.5 rounded-xl text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-accent/70 border border-border/60 transition-all cursor-pointer"
+                        >
+                          {lang === "vi" ? "Huỷ" : "Cancel"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onChangeTheme(() => DEFAULT_THEME_CONFIG);
+                            onChangeAppSettings(() => DEFAULT_APP_SETTINGS);
+                            setConfirmReset(false);
+                          }}
+                          className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-rose-500/15 text-rose-400 border border-rose-500/40 hover:bg-rose-500/25 transition-all cursor-pointer"
+                        >
+                          {lang === "vi" ? "Xác nhận đặt lại" : "Confirm reset"}
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmReset(true)}
+                        className="shrink-0 inline-flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-accent/70 border border-border/60 transition-all cursor-pointer"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        {lang === "vi" ? "Đặt lại tất cả" : "Reset all settings"}
+                      </button>
+                    )}
                   </div>
                 </section>
               </>

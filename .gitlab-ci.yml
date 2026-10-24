@@ -15,10 +15,9 @@ build-windows-installer:
     - if: $CI_COMMIT_BRANCH == "main"
   cache:
     key: ssh-box-win64-cache
-    when: always
     paths:
       - .xwin-cache/
-      - node_modules/
+      - .npm/
   script:
     - apt-get update && apt-get install -y --no-install-recommends curl ca-certificates xz-utils llvm clang lld nsis pkg-config libssl-dev
     - mkdir -p /usr/share/nsis/Include/Win && curl -fsSL https://raw.githubusercontent.com/kichik/nsis/master/Include/Win/RestartManager.nsh -o /usr/share/nsis/Include/Win/RestartManager.nsh
@@ -28,14 +27,12 @@ build-windows-installer:
     - cargo-xwin --version
     - rustup target add x86_64-pc-windows-msvc
     - cargo-xwin xwin cache windows-msvc-sysroot --cache-dir "$CI_PROJECT_DIR/.xwin-cache"
-    - npm ci
+    - npm ci --cache "$CI_PROJECT_DIR/.npm" --prefer-offline
     - XWIN_CROSS_COMPILER=clang XWIN_CACHE_DIR="$CI_PROJECT_DIR/.xwin-cache" npx tauri build --verbose --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis
     - mkdir -p artifacts/windows
     - cp -v src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe artifacts/windows/
-    - cp -v src-tauri/target/x86_64-pc-windows-msvc/release/ssh-box.exe artifacts/windows/
     - ls -lh artifacts/windows/
   artifacts:
     name: "ssh-box-windows-installer-$CI_COMMIT_SHORT_SHA"
     paths:
       - artifacts/windows/
-    expire_in: 30 days

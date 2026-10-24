@@ -1,28 +1,23 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Activity,
+  ArrowLeft,
   Code2,
-  Columns,
   Container,
-  Globe,
   HardDrive,
+  Home,
   KeyRound,
-  Languages,
-  Laptop,
   LayoutDashboard,
   PanelLeft,
   Play,
   Plus,
   Radio,
-  Rows,
   Search,
   Server,
   Settings,
-  ShieldCheck,
   Terminal as TerminalIcon,
-  UserCheck,
   Waypoints,
   X,
 } from "lucide-react";
@@ -62,10 +57,19 @@ import { SplitWorkspace } from "./components/SplitWorkspace";
 import { TelemetryDrawer } from "./components/TelemetryDrawer";
 import { ResourcesWorkspace } from "./components/ResourcesWorkspace";
 import { DashboardWorkspace } from "./components/DashboardWorkspace";
-import { SettingsTabId, SettingsWorkspace } from "./components/SettingsWorkspace";
-import { ThemePopover } from "./components/ThemePopover";
-
+import {
+  getSettingsNavGroups,
+  SettingsTabId,
+  SettingsWorkspace,
+} from "./components/SettingsWorkspace";
 type WorkspaceViewMode = "dashboard" | "resources" | "terminal" | "settings";
+
+const KEYCHAIN_TABS: TabResources[] = [
+  "identities",
+  "keys",
+  "knownHosts",
+  "connectionProxyProfiles",
+];
 
 const EMPTY_RESOURCES: ResourcesStoreData = {
   groups: [],
@@ -96,10 +100,19 @@ export default function App() {
   // Resource & Dashboard are the core default experience; Terminal is opened on-demand
   const [workspaceView, setWorkspaceView] =
     useState<WorkspaceViewMode>("dashboard");
+  // Remembers which Home screen to return to when leaving a terminal tab
+  const lastHomeViewRef = useRef<WorkspaceViewMode>("dashboard");
+  // ...and which screen the Settings "Back" button returns to
+  const beforeSettingsViewRef = useRef<WorkspaceViewMode>("dashboard");
+  useEffect(() => {
+    if (workspaceView === "terminal") return;
+    lastHomeViewRef.current = workspaceView;
+    if (workspaceView !== "settings") beforeSettingsViewRef.current = workspaceView;
+  }, [workspaceView]);
   const [resourceSubTab, setResourceSubTab] =
     useState<TabResources>("machines");
   const [settingsSection, setSettingsSection] =
-    useState<SettingsTabId>("terminal");
+    useState<SettingsTabId>("general");
   const [inspectedHostId, setInspectedHostId] = useState<string | null>(null);
   const [openCreateMachineSignal, setOpenCreateMachineSignal] = useState(0);
 
@@ -111,7 +124,6 @@ export default function App() {
   );
   const [telemetryDrawerOpen, setTelemetryDrawerOpen] = useState(false);
   const [snippetsDrawerOpen, setSnippetsDrawerOpen] = useState(false);
-  const [themePopoverOpen, setThemePopoverOpen] = useState(false);
   const [snippetDrawerSearch, setSnippetDrawerSearch] = useState("");
   const [broadcastMode, setBroadcastMode] = useState<"off" | "tab" | "all">(
     "off",
@@ -393,7 +405,7 @@ export default function App() {
           if (remainingTabs.length === 0) {
             setActiveTabId("");
             setTelemetryDrawerOpen(false);
-            setWorkspaceView("dashboard");
+            setWorkspaceView(lastHomeViewRef.current);
             return [];
           }
           setActiveTabId(remainingTabs[remainingTabs.length - 1].id);
@@ -436,7 +448,7 @@ export default function App() {
           setActiveTabId("");
           setTelemetryDrawerOpen(false);
           if (workspaceView === "terminal") {
-            setWorkspaceView("dashboard");
+            setWorkspaceView(lastHomeViewRef.current);
           }
           return [];
         }
@@ -629,7 +641,7 @@ export default function App() {
       } else if (key === ",") {
         e.preventDefault();
         setWorkspaceView((prev) =>
-          prev === "settings" ? "dashboard" : "settings",
+          prev === "settings" ? beforeSettingsViewRef.current : "settings",
         );
       }
     };
@@ -649,8 +661,9 @@ export default function App() {
     ? collectLeaves(activeTab.root).length
     : 1;
 
-  const resourceItems: {
+  const navItems: {
     id: TabResources;
+    tabs?: TabResources[];
     label: string;
     count?: number;
     icon: React.ReactNode;
@@ -663,39 +676,10 @@ export default function App() {
     },
     {
       id: "identities",
-      label: t.navIdentities,
-      count: resources.identities.length,
-      icon: <UserCheck className="w-4 h-4 text-violet-400" />,
-    },
-    {
-      id: "keys",
-      label: t.navSshKeys,
-      count: resources.sshKeys.length,
+      tabs: KEYCHAIN_TABS,
+      label: t.navKeychain,
+      count: resources.identities.length + resources.sshKeys.length,
       icon: <KeyRound className="w-4 h-4 text-amber-400" />,
-    },
-    {
-      id: "knownHosts",
-      label: t.navKnownHosts,
-      icon: <ShieldCheck className="w-4 h-4 text-teal-400" />,
-    },
-    {
-      id: "connectionProxyProfiles",
-      label: t.navProxyProfiles,
-      count: resources.proxyProfiles.length,
-      icon: <Globe className="w-4 h-4 text-sky-400" />,
-    },
-  ];
-
-  const toolboxItems: {
-    id: TabResources;
-    label: string;
-    count?: number;
-    icon: React.ReactNode;
-  }[] = [
-    {
-      id: "sftp",
-      label: t.navSftp,
-      icon: <HardDrive className="w-4 h-4 text-amber-400" />,
     },
     {
       id: "snippets",
@@ -704,21 +688,40 @@ export default function App() {
       icon: <Code2 className="w-4 h-4 text-pink-400" />,
     },
     {
-      id: "docker",
-      label: t.navDocker,
-      icon: <Container className="w-4 h-4 text-cyan-400" />,
-    },
-    {
       id: "portForwarding",
       label: t.navPortForwarding,
       count: resources.portForwardingRules.length,
       icon: <Waypoints className="w-4 h-4 text-indigo-400" />,
     },
+    {
+      id: "sftp",
+      label: t.navSftp,
+      icon: <HardDrive className="w-4 h-4 text-amber-400" />,
+    },
+    {
+      id: "docker",
+      label: t.navDocker,
+      icon: <Container className="w-4 h-4 text-cyan-400" />,
+    },
   ];
+
+  const keychainItems: { id: TabResources; label: string }[] = [
+    { id: "identities", label: t.navIdentities },
+    { id: "keys", label: t.navSshKeys },
+    { id: "knownHosts", label: t.navKnownHosts },
+    { id: "connectionProxyProfiles", label: t.navProxyProfiles },
+  ];
+
+  const toolBtnClass = (active: boolean) =>
+    `inline-flex items-center p-2 rounded-xl border transition-all cursor-pointer ${
+      active
+        ? "bg-primary/15 text-primary border-primary/40"
+        : "bg-secondary/70 text-muted-foreground hover:bg-accent hover:text-foreground border-border/70"
+    }`;
 
   return (
     <div className="flex flex-col h-screen w-screen bg-background text-foreground overflow-hidden select-none transition-colors duration-200">
-      {/* Top Titlebar (Adapts to macOS Overlay, Windows, iPadOS & Mobile) */}
+      {/* Top Tab Bar (Termius-style: pinned Home tab + terminal session tabs) */}
       <header
         data-tauri-drag-region
         className={`h-11 shrink-0 ${
@@ -727,33 +730,44 @@ export default function App() {
       >
         <div
           data-tauri-drag-region
-          className="flex items-center gap-2 min-w-0 flex-1"
+          className="flex items-center gap-1.5 min-w-0 flex-1"
         >
+          {workspaceView !== "terminal" && (
+            <button
+              type="button"
+              onClick={() => setSidebarOpen((p) => !p)}
+              title="Toggle Navigation Sidebar"
+              className="md:hidden p-2 rounded-xl text-muted-foreground hover:bg-accent hover:text-foreground transition-all cursor-pointer"
+            >
+              <PanelLeft className="w-4 h-4" />
+            </button>
+          )}
+
           <button
             type="button"
-            onClick={() => setSidebarOpen((p) => !p)}
-            title="Toggle Navigation Sidebar"
-            className={`p-2 rounded-xl transition-all duration-150 cursor-pointer ${
-              sidebarOpen
-                ? "bg-secondary text-primary border border-border/80 shadow-2xs"
-                : "text-muted-foreground hover:bg-accent hover:text-foreground border border-transparent"
+            onClick={() => setWorkspaceView(lastHomeViewRef.current)}
+            className={`flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-medium cursor-pointer transition-all duration-150 shrink-0 ${
+              workspaceView !== "terminal"
+                ? "bg-secondary text-foreground border border-primary/40 shadow-xs"
+                : "bg-card/50 text-muted-foreground hover:bg-accent/70 hover:text-foreground border border-transparent"
             }`}
           >
-            <PanelLeft className="w-4 h-4" />
+            <Home className="w-3.5 h-3.5 text-primary" />
+            <span>{t.navHome}</span>
           </button>
 
-          {/* When inside Terminal view, show active Terminal session tabs in the top bar */}
-          {workspaceView === "terminal" && tabs.length > 0 && (
+          {tabs.length > 0 && (
             <div
               data-tauri-drag-region
-              className="flex items-center gap-1.5 min-w-0 overflow-x-auto no-scrollbar pl-1"
+              className="flex items-center gap-1.5 min-w-0 overflow-x-auto no-scrollbar"
             >
               {tabs.map((tab) => {
-                const isTabActive = tab.id === activeTab?.id;
+                const isTabActive =
+                  workspaceView === "terminal" && tab.id === activeTab?.id;
                 const leaves = collectLeaves(tab.root);
                 const primaryLeaf =
                   findLeafById(tab.root, tab.activePaneId) ?? leaves[0];
-                const isSsh = primaryLeaf?.kind === "ssh";
+                const status = primaryLeaf?.status ?? "connecting";
 
                 return (
                   <div
@@ -762,17 +776,21 @@ export default function App() {
                       setActiveTabId(tab.id);
                       setWorkspaceView("terminal");
                     }}
-                    className={`group relative flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-medium cursor-pointer transition-all duration-150 max-w-[230px] ${
+                    className={`group relative flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-medium cursor-pointer transition-all duration-150 max-w-[230px] shrink-0 ${
                       isTabActive
                         ? "bg-secondary text-foreground border border-primary/40 shadow-xs"
                         : "bg-card/50 text-muted-foreground hover:bg-accent/70 hover:text-foreground border border-transparent"
                     }`}
                   >
-                    {isSsh ? (
-                      <Server className="w-3.5 h-3.5 text-primary shrink-0" />
-                    ) : (
-                      <TerminalIcon className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                    )}
+                    <span
+                      className={`w-2 h-2 rounded-full shrink-0 ${
+                        status === "connected"
+                          ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.75)]"
+                          : status === "connecting"
+                            ? "bg-amber-400 animate-pulse"
+                            : "bg-rose-500"
+                      }`}
+                    />
                     <span className="truncate">
                       {primaryLeaf?.title ?? tab.title}
                     </span>
@@ -793,13 +811,7 @@ export default function App() {
               })}
             </div>
           )}
-        </div>
 
-        {/* Right Window Action Controls */}
-        <div
-          data-tauri-drag-region
-          className="flex items-center gap-2 shrink-0"
-        >
           <button
             type="button"
             onClick={() => {
@@ -807,38 +819,17 @@ export default function App() {
               setCommandPaletteOpen(true);
             }}
             title={t.quickConnectBtn}
-            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-secondary/70 hover:bg-accent text-xs font-medium text-muted-foreground hover:text-foreground border border-border/70 transition-all cursor-pointer"
+            className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors cursor-pointer shrink-0"
           >
-            <Search className="w-3.5 h-3.5 text-primary" />
-            <span className="hidden lg:inline">{t.quickConnectBtn}</span>
-            <kbd className="px-1.5 py-0.5 rounded-md bg-background/80 border border-border text-[10px] font-mono text-muted-foreground">
-              ⌘K
-            </kbd>
+            <Plus className="w-4 h-4" />
           </button>
+        </div>
 
-          <ThemePopover
-            config={themeConfig}
-            isOpen={themePopoverOpen}
-            onToggle={() => setThemePopoverOpen((p) => !p)}
-            onClose={() => setThemePopoverOpen(false)}
-            onChange={handleUpdateTheme}
-          />
-
-          <button
-            type="button"
-            onClick={() =>
-              handleUpdateAppSettings((prev) => ({
-                ...prev,
-                language: prev.language === "vi" ? "en" : "vi",
-              }))
-            }
-            title={t.settingsLanguageDesc}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-secondary/70 hover:bg-accent text-xs font-semibold text-foreground border border-border/70 transition-all cursor-pointer"
-          >
-            <Languages className="w-3.5 h-3.5 text-emerald-400" />
-            <span className="uppercase">{appSettings.language}</span>
-          </button>
-
+        {/* Right: terminal tools (only inside a terminal tab) + quick search */}
+        <div
+          data-tauri-drag-region
+          className="flex items-center gap-1.5 shrink-0"
+        >
           {workspaceView === "terminal" && activeLeaf && (
             <>
               <button
@@ -849,7 +840,7 @@ export default function App() {
                   )
                 }
                 title={t.termBroadcastActive}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                className={`inline-flex items-center gap-1.5 p-2 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
                   broadcastMode !== "off"
                     ? "bg-amber-500/15 text-amber-400 border-amber-500/40"
                     : "bg-secondary/70 text-muted-foreground hover:bg-accent hover:text-foreground border-border/70"
@@ -860,52 +851,18 @@ export default function App() {
                     broadcastMode !== "off" ? "animate-pulse" : ""
                   }`}
                 />
-                <span className="hidden md:inline">
-                  {t.termBroadcastLabel}
-                  {broadcastMode === "tab"
-                    ? " (Tab)"
-                    : broadcastMode === "all"
-                      ? " (All)"
-                      : ""}
-                </span>
+                {broadcastMode !== "off" && (
+                  <span>{broadcastMode === "tab" ? "Tab" : "All"}</span>
+                )}
               </button>
 
               <button
                 type="button"
                 onClick={() => setSnippetsDrawerOpen((p) => !p)}
                 title={t.termSnippetsDrawer}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
-                  snippetsDrawerOpen
-                    ? "bg-primary/15 text-primary border-primary/40"
-                    : "bg-secondary/70 text-muted-foreground hover:bg-accent hover:text-foreground border-border/70"
-                }`}
+                className={toolBtnClass(snippetsDrawerOpen)}
               >
                 <Code2 className="w-3.5 h-3.5 text-pink-400" />
-                <span className="hidden md:inline">{t.termSnippetsDrawer}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() =>
-                  handleSplitPane(activeLeaf.paneId, "vertical", activeLeaf)
-                }
-                title="Split Vertically (Cmd+D)"
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-secondary/70 hover:bg-accent text-xs font-medium text-foreground border border-border/70 transition-all cursor-pointer"
-              >
-                <Columns className="w-3.5 h-3.5 text-primary" />
-                <span className="hidden md:inline">Split V</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() =>
-                  handleSplitPane(activeLeaf.paneId, "horizontal", activeLeaf)
-                }
-                title="Split Horizontally (Cmd+Shift+D)"
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-secondary/70 hover:bg-accent text-xs font-medium text-foreground border border-border/70 transition-all cursor-pointer"
-              >
-                <Rows className="w-3.5 h-3.5 text-primary" />
-                <span className="hidden md:inline">Split H</span>
               </button>
 
               <button
@@ -918,251 +875,159 @@ export default function App() {
                   setWorkspaceView("resources");
                 }}
                 title="Open SFTP File Manager"
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-secondary/70 hover:bg-accent text-xs font-medium text-foreground border border-border/70 transition-all cursor-pointer"
+                className={toolBtnClass(false)}
               >
                 <HardDrive className="w-3.5 h-3.5 text-amber-400" />
-                <span className="hidden md:inline">SFTP</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => setTelemetryDrawerOpen((p) => !p)}
                 title="Toggle Side Monitor Drawer (Cmd+I)"
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all duration-150 cursor-pointer border ${
-                  telemetryDrawerOpen
-                    ? "bg-primary/15 text-primary border-primary/40 shadow-2xs"
-                    : "bg-secondary/70 text-muted-foreground hover:bg-accent hover:text-foreground border-border/70"
-                }`}
+                className={toolBtnClass(telemetryDrawerOpen)}
               >
                 <Activity className="w-3.5 h-3.5" />
-                <span>Monitor</span>
               </button>
+
+              <span className="w-px h-5 bg-border/80 mx-1" />
             </>
           )}
+
+          <button
+            type="button"
+            onClick={() => {
+              setCommandPaletteQuery("");
+              setCommandPaletteOpen(true);
+            }}
+            title={t.quickConnectBtn}
+            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-secondary/70 hover:bg-accent text-xs font-medium text-muted-foreground hover:text-foreground border border-border/70 transition-all cursor-pointer"
+          >
+            <Search className="w-3.5 h-3.5 text-primary" />
+            <kbd className="px-1.5 py-0.5 rounded-md bg-background/80 border border-border text-[10px] font-mono text-muted-foreground">
+              ⌘K
+            </kbd>
+          </button>
         </div>
       </header>
 
       {/* Main Workspace Area with Unified Left Sidebar */}
       <div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
-        {sidebarOpen && (
+        {workspaceView !== "terminal" && sidebarOpen && (
           <div
             onClick={() => setSidebarOpen(false)}
             className="md:hidden fixed inset-0 z-20 bg-black/50 backdrop-blur-xs"
           />
         )}
-        {sidebarOpen && (
-          <aside className="fixed md:static inset-y-0 left-0 z-30 w-60 shrink-0 bg-header/95 md:bg-header/85 border-r border-border/80 flex flex-col justify-between p-3 overflow-y-auto select-none">
-            <div className="space-y-5">
-              {/* 1. Dashboard Top Item */}
-              <div>
+        {/* Sidebar lives only in the Home tab; terminal tabs get the full width */}
+        {workspaceView !== "terminal" && (
+          <aside
+            className={`${
+              sidebarOpen ? "flex" : "hidden md:flex"
+            } fixed md:static inset-y-0 left-0 z-30 w-60 shrink-0 bg-header/95 md:bg-header/85 border-r border-border/80 flex-col justify-between p-3 overflow-y-auto select-none`}
+          >
+            {workspaceView === "settings" ? (
+              <div className="space-y-5">
+                <button
+                  type="button"
+                  onClick={() => setWorkspaceView(beforeSettingsViewRef.current)}
+                  className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-[13px] font-medium text-muted-foreground hover:bg-accent/60 hover:text-foreground border border-transparent transition-all cursor-pointer"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  <span>{t.navBack}</span>
+                </button>
+                {getSettingsNavGroups(appSettings.language).map((group) => (
+                  <div key={group.title} className="space-y-1">
+                    <div className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/75">
+                      {group.title}
+                    </div>
+                    {group.items.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => setSettingsSection(item.id)}
+                        className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-[13px] font-medium transition-all duration-200 cursor-pointer ${
+                          settingsSection === item.id
+                            ? "bg-primary/15 text-foreground border border-primary/35 shadow-xs"
+                            : "text-muted-foreground hover:bg-accent/60 hover:text-foreground border border-transparent"
+                        }`}
+                      >
+                        {item.icon}
+                        <span className="truncate">{item.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <>
+              <div className="space-y-1">
                 <button
                   type="button"
                   onClick={() => {
                     setInspectedHostId(null);
                     setWorkspaceView("dashboard");
                   }}
-                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-[13.5px] font-semibold transition-all duration-200 cursor-pointer ${
+                  className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-[13px] font-medium transition-all duration-200 cursor-pointer ${
                     workspaceView === "dashboard" && !inspectedHostId
-                      ? "bg-primary/15 text-foreground border border-primary/35 shadow-xs translate-x-0.5"
+                      ? "bg-primary/15 text-foreground border border-primary/35 shadow-xs"
                       : "text-muted-foreground hover:bg-accent/60 hover:text-foreground border border-transparent"
                   }`}
                 >
+                  <LayoutDashboard className="w-4 h-4 text-emerald-400" />
+                  <span>{t.navDashboard}</span>
+                </button>
+
+                {navItems.map((item) => {
+                  const active =
+                    workspaceView === "resources" &&
+                    (item.tabs ?? [item.id]).includes(resourceSubTab);
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => {
+                        setResourceSubTab(item.id);
+                        setWorkspaceView("resources");
+                      }}
+                      className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-[13px] font-medium transition-all duration-200 cursor-pointer ${
+                        active
+                          ? "bg-primary/15 text-foreground border border-primary/35 shadow-xs"
+                          : "text-muted-foreground hover:bg-accent/60 hover:text-foreground border border-transparent"
+                      }`}
+                    >
+                      <span className="flex items-center gap-3 min-w-0">
+                        {item.icon}
+                        <span className="truncate">{item.label}</span>
+                      </span>
+                      {typeof item.count === "number" && item.count > 0 && (
+                        <span className="px-2 py-0.5 rounded-full bg-secondary text-[11px] font-mono text-muted-foreground">
+                          {item.count}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="pt-3 border-t border-border/70">
+                <button
+                  type="button"
+                  onClick={() => setWorkspaceView("settings")}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-[13px] font-medium transition-all cursor-pointer ${
+                    "text-muted-foreground hover:bg-accent/60 hover:text-foreground border border-transparent"
+                  }`}
+                >
                   <span className="flex items-center gap-3">
-                    <span className="p-1.5 rounded-xl bg-card border border-border/70 shadow-2xs">
-                      <LayoutDashboard className="w-4 h-4 text-emerald-400" />
-                    </span>
-                    <span>{t.navDashboard}</span>
+                    <Settings className="w-4 h-4 text-primary" />
+                    <span>{t.navSettings}</span>
                   </span>
+                  <kbd className="text-[10px] font-mono text-muted-foreground">
+                    ⌘,
+                  </kbd>
                 </button>
               </div>
-
-              {/* 2. Resources Section */}
-              <div className="space-y-1">
-                <div className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/75">
-                  {t.navResources}
-                </div>
-                {resourceItems.map((item) => {
-                  const active =
-                    workspaceView === "resources" &&
-                    resourceSubTab === item.id;
-                  return (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => {
-                        setResourceSubTab(item.id);
-                        setWorkspaceView("resources");
-                      }}
-                      className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-[13px] font-medium transition-all duration-200 cursor-pointer ${
-                        active
-                          ? "bg-primary/15 text-foreground border border-primary/35 shadow-xs translate-x-0.5"
-                          : "text-muted-foreground hover:bg-accent/60 hover:text-foreground border border-transparent"
-                      }`}
-                    >
-                      <span className="flex items-center gap-3">
-                        <span className="p-1.5 rounded-xl bg-card border border-border/70 shadow-2xs">
-                          {item.icon}
-                        </span>
-                        <span>{item.label}</span>
-                      </span>
-                      {typeof item.count === "number" && item.count > 0 && (
-                        <span className="px-2 py-0.5 rounded-full bg-secondary text-[11px] font-mono text-muted-foreground">
-                          {item.count}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {/* 3. Toolbox Section */}
-              <div className="space-y-1">
-                <div className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/75">
-                  Toolbox
-                </div>
-                {toolboxItems.map((item) => {
-                  const active =
-                    workspaceView === "resources" &&
-                    resourceSubTab === item.id;
-                  return (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => {
-                        setResourceSubTab(item.id);
-                        setWorkspaceView("resources");
-                      }}
-                      className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-[13px] font-medium transition-all duration-200 cursor-pointer ${
-                        active
-                          ? "bg-primary/15 text-foreground border border-primary/35 shadow-xs translate-x-0.5"
-                          : "text-muted-foreground hover:bg-accent/60 hover:text-foreground border border-transparent"
-                      }`}
-                    >
-                      <span className="flex items-center gap-3">
-                        <span className="p-1.5 rounded-xl bg-card border border-border/70 shadow-2xs">
-                          {item.icon}
-                        </span>
-                        <span>{item.label}</span>
-                      </span>
-                      {typeof item.count === "number" && item.count > 0 && (
-                        <span className="px-2 py-0.5 rounded-full bg-secondary text-[11px] font-mono text-muted-foreground">
-                          {item.count}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {/* 4. On-Demand Terminal Sessions Section */}
-              <div className="space-y-1.5">
-                <div className="px-3 flex items-center justify-between">
-                  <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/75">
-                    Terminal
-                  </span>
-                  <button
-                    type="button"
-                    onClick={handleOpenLocalTab}
-                    title="Open Local Terminal Session (Cmd+T)"
-                    className="p-1 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors cursor-pointer"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-
-                {tabs.length === 0 ? (
-                  <div className="px-3 py-2 text-[11px] text-muted-foreground/70 italic">
-                    Connect to a machine to open a terminal
-                  </div>
-                ) : (
-                  <div className="space-y-1">
-                    {tabs.map((tab) => {
-                      const isTabActive =
-                        workspaceView === "terminal" &&
-                        tab.id === activeTab?.id;
-                      const leaves = collectLeaves(tab.root);
-                      const primaryLeaf =
-                        findLeafById(tab.root, tab.activePaneId) ?? leaves[0];
-                      const status = primaryLeaf?.status ?? "connecting";
-
-                      return (
-                        <div
-                          key={tab.id}
-                          onClick={() => {
-                            setActiveTabId(tab.id);
-                            setWorkspaceView("terminal");
-                          }}
-                          className={`group flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium cursor-pointer transition-all duration-150 ${
-                            isTabActive
-                              ? "bg-primary/15 text-foreground border border-primary/35 shadow-2xs"
-                              : "text-muted-foreground hover:bg-accent/60 hover:text-foreground border border-transparent"
-                          }`}
-                        >
-                          <div className="flex items-center gap-2.5 min-w-0">
-                            <span
-                              className={`w-2 h-2 rounded-full shrink-0 ${
-                                status === "connected"
-                                  ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.75)]"
-                                  : status === "connecting"
-                                    ? "bg-amber-400 animate-pulse"
-                                    : "bg-rose-500"
-                              }`}
-                            />
-                            <span className="truncate">
-                              {primaryLeaf?.title ?? tab.title}
-                            </span>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={(e) => handleCloseTab(tab.id, e)}
-                            className="opacity-0 group-hover:opacity-100 p-1 rounded-md hover:bg-rose-500/20 hover:text-rose-400 transition-all cursor-pointer"
-                          >
-                            <X className="w-3 h-3" />
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Bottom Settings Entry */}
-            <div className="pt-3 border-t border-border/70 space-y-1.5">
-              <button
-                type="button"
-                onClick={handleOpenLocalTab}
-                className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-[13px] font-medium text-muted-foreground hover:bg-accent/60 hover:text-foreground transition-all cursor-pointer"
-              >
-                <span className="p-1.5 rounded-xl bg-card border border-border/70">
-                  <Laptop className="w-4 h-4 text-emerald-400" />
-                </span>
-                <span>{t.newLocalShell}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setSettingsSection("terminal");
-                  setWorkspaceView("settings");
-                }}
-                className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-[13px] font-medium transition-all cursor-pointer ${
-                  workspaceView === "settings"
-                    ? "bg-primary/15 text-foreground border border-primary/35 shadow-xs"
-                    : "text-muted-foreground hover:bg-accent/60 hover:text-foreground border border-transparent"
-                }`}
-              >
-                <span className="flex items-center gap-3">
-                  <span className="p-1.5 rounded-xl bg-card border border-border/70">
-                    <Settings className="w-4 h-4 text-primary" />
-                  </span>
-                  <span>{t.navSettings}</span>
-                </span>
-                <kbd className="text-[10px] font-mono text-muted-foreground">
-                  ⌘,
-                </kbd>
-              </button>
-            </div>
+              </>
+            )}
           </aside>
         )}
 
@@ -1224,31 +1089,53 @@ export default function App() {
             />
           )}
 
-          {/* Resources & Toolbox View */}
+          {/* Resources & Toolbox View (Keychain groups several sub-tabs behind one sidebar item) */}
           {workspaceView === "resources" && (
-            <ResourcesWorkspace
-              hosts={hosts}
-              resources={resources}
-              appSettings={appSettings}
-              activeHostId={inspectedHostId || activeTerminalHostId}
-              initialTab={resourceSubTab}
-              hideSidebar={true}
-              openCreateMachineSignal={openCreateMachineSignal}
-              onRefreshHosts={() => {
-                loadHosts();
-                loadResources();
-              }}
-              onUpdateResources={setResources}
-              onSaveHost={handleSaveHost}
-              onDeleteHost={handleDeleteHost}
-              onConnectHost={handleConnectHostTab}
-              onInspectMachine={(hostId) => {
-                setInspectedHostId(hostId);
-                setWorkspaceView("dashboard");
-              }}
-              onOpenLocalTerminal={handleOpenLocalTab}
-              onRunSnippetInActivePane={handleRunSnippetInActivePane}
-            />
+            <div className="flex flex-col h-full">
+              {KEYCHAIN_TABS.includes(resourceSubTab) && (
+                <div className="px-5 pt-3 flex items-center gap-1.5 shrink-0">
+                  {keychainItems.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setResourceSubTab(item.id)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition-all cursor-pointer ${
+                        resourceSubTab === item.id
+                          ? "bg-primary/15 text-foreground border-primary/35"
+                          : "text-muted-foreground hover:bg-accent/60 hover:text-foreground border-transparent"
+                      }`}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="flex-1 min-h-0">
+                <ResourcesWorkspace
+                  hosts={hosts}
+                  resources={resources}
+                  appSettings={appSettings}
+                  activeHostId={inspectedHostId || activeTerminalHostId}
+                  initialTab={resourceSubTab}
+                  hideSidebar={true}
+                  openCreateMachineSignal={openCreateMachineSignal}
+                  onRefreshHosts={() => {
+                    loadHosts();
+                    loadResources();
+                  }}
+                  onUpdateResources={setResources}
+                  onSaveHost={handleSaveHost}
+                  onDeleteHost={handleDeleteHost}
+                  onConnectHost={handleConnectHostTab}
+                  onInspectMachine={(hostId) => {
+                    setInspectedHostId(hostId);
+                    setWorkspaceView("dashboard");
+                  }}
+                  onOpenLocalTerminal={handleOpenLocalTab}
+                  onRunSnippetInActivePane={handleRunSnippetInActivePane}
+                />
+              </div>
+            </div>
           )}
 
           {/* Dedicated Settings View */}
@@ -1257,7 +1144,7 @@ export default function App() {
               themeConfig={themeConfig}
               appSettings={appSettings}
               resources={resources}
-              initialSection={settingsSection}
+              activeTab={settingsSection}
               onChangeTheme={handleUpdateTheme}
               onChangeAppSettings={handleUpdateAppSettings}
               onUpdateResources={setResources}
@@ -1499,6 +1386,34 @@ export default function App() {
             </div>
 
             <div className="max-h-96 overflow-y-auto p-3 space-y-4">
+              {/* Quick actions section */}
+              {(!commandPaletteQuery.trim() ||
+                t.newLocalShell
+                  .toLowerCase()
+                  .includes(commandPaletteQuery.trim().toLowerCase())) && (
+                <div>
+                  <div className="px-2 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    {t.cmdPaletteSectionQuickActions}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCommandPaletteOpen(false);
+                      handleOpenLocalTab();
+                    }}
+                    className="w-full flex items-center justify-between px-3 py-2 rounded-xl hover:bg-accent/70 transition-colors cursor-pointer"
+                  >
+                    <span className="flex items-center gap-2.5 text-xs font-semibold text-foreground">
+                      <TerminalIcon className="w-4 h-4 text-emerald-400" />
+                      {t.newLocalShell}
+                    </span>
+                    <kbd className="px-1.5 py-0.5 rounded-md bg-secondary text-[10px] font-mono text-muted-foreground">
+                      ⌘T
+                    </kbd>
+                  </button>
+                </div>
+              )}
+
               {/* Hosts section */}
               <div>
                 <div className="px-2 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">

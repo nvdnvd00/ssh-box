@@ -3,7 +3,9 @@ import { AppLanguage } from "./themes";
 export interface AppI18nStrings {
   // Navigation & Sidebar
   navDashboard: string;
-  navResources: string;
+  navHome: string;
+  navBack: string;
+  navKeychain: string;
   navMachines: string;
   navIdentities: string;
   navSshKeys: string;
@@ -93,7 +95,9 @@ export interface AppI18nStrings {
 
 const VI_STRINGS: AppI18nStrings = {
   navDashboard: "Bảng điều khiển",
-  navResources: "Tài nguyên",
+  navHome: "Trang chủ",
+  navBack: "Quay lại",
+  navKeychain: "Kho khóa (Keychain)",
   navMachines: "Máy chủ (Hosts)",
   navIdentities: "Định danh (Identities)",
   navSshKeys: "Khóa SSH (Keys)",
@@ -183,7 +187,9 @@ const VI_STRINGS: AppI18nStrings = {
 
 const EN_STRINGS: AppI18nStrings = {
   navDashboard: "Dashboard",
-  navResources: "Resources",
+  navHome: "Home",
+  navBack: "Back",
+  navKeychain: "Keychain",
   navMachines: "Machines",
   navIdentities: "Identities",
   navSshKeys: "SSH Keys",

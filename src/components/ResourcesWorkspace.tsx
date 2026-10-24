@@ -733,6 +733,30 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
     }
   };
 
+  // Sequential so each card shows its own spinner and errors stay per rule
+  const handleToggleAllPfRules = async (active: boolean) => {
+    setErrorBanner(null);
+    const errors: string[] = [];
+    for (const rule of resources.portForwardingRules) {
+      if ((rule.status === "running") === active) continue;
+      setTogglingPfId(rule.id);
+      try {
+        await invoke("toggle_port_forwarding_rule", {
+          ruleId: rule.id,
+          active,
+        });
+      } catch (err) {
+        errors.push(`${rule.name}: ${err}`);
+      }
+    }
+    setTogglingPfId(null);
+    const refreshed = await invoke<ResourcesStoreData>("get_resources").catch(
+      () => null,
+    );
+    if (refreshed) onUpdateResources(refreshed);
+    if (errors.length > 0) setErrorBanner(errors.join(" · "));
+  };
+
   const handleDeletePfRule = async (ruleId: string) => {
     try {
       const next = await invoke<ResourcesStoreData>(
@@ -1194,6 +1218,30 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                 New Proxy
               </button>
             )}
+
+            {activeSubTab === "portForwarding" &&
+              resources.portForwardingRules.length > 0 && (
+                <>
+                  <button
+                    type="button"
+                    disabled={togglingPfId !== null}
+                    onClick={() => handleToggleAllPfRules(true)}
+                    className="h-[38px] inline-flex items-center gap-1.5 px-3 rounded-[10px] border bg-secondary hover:bg-accent border-border text-foreground text-xs font-medium cursor-pointer disabled:opacity-50"
+                  >
+                    <Play className="w-3.5 h-3.5" />
+                    Start All
+                  </button>
+                  <button
+                    type="button"
+                    disabled={togglingPfId !== null}
+                    onClick={() => handleToggleAllPfRules(false)}
+                    className="h-[38px] inline-flex items-center gap-1.5 px-3 rounded-[10px] border bg-secondary hover:bg-accent border-border text-foreground text-xs font-medium cursor-pointer disabled:opacity-50"
+                  >
+                    <Square className="w-3.5 h-3.5" />
+                    Stop All
+                  </button>
+                </>
+              )}
 
             {activeSubTab === "portForwarding" && (
               <button
@@ -4136,6 +4184,19 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                   </div>
                 </div>
               )}
+              <label className="flex items-center gap-2.5 cursor-pointer font-medium">
+                <input
+                  type="checkbox"
+                  checked={editingPfRule.autoStart}
+                  onChange={(e) =>
+                    setEditingPfRule({
+                      ...editingPfRule,
+                      autoStart: e.target.checked,
+                    })
+                  }
+                />
+                <span>Start automatically when the app opens</span>
+              </label>
               <div className="flex justify-end gap-2.5 pt-3 border-t border-border">
                 <button
                   type="button"

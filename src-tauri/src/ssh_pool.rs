@@ -241,6 +241,29 @@ pub fn build_shell_init_line(env_vars: &str, startup_command: &str) -> Option<St
     }
 }
 
+// Both print "p<pid>" and "c<name>" lines so one parser reads either
+fn port_owner_cmd(port: u16) -> String {
+    if cfg!(target_os = "windows") {
+        format!(
+            "$p = (Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess; if ($p) {{ \"p$p\"; \"c\" + (Get-Process -Id $p).ProcessName }}"
+        )
+    } else {
+        format!("lsof -nP -iTCP:{port} -sTCP:LISTEN -Fpc 2>/dev/null")
+    }
+}
+
+pub fn parse_port_owner(raw: &str) -> Option<(u32, String)> {
+    let mut pid = None;
+    for line in raw.lines().map(str::trim) {
+        if let Some(p) = line.strip_prefix('p') {
+            pid = p.parse::<u32>().ok();
+        } else if let (Some(id), Some(name)) = (pid, line.strip_prefix('c')) {
+            return Some((id, name.to_string()));
+        }
+    }
+    pid.map(|id| (id, "another process".to_string()))
+}
+
 pub fn verify_tofu_host_key(
     known_hosts_path: &Path,
     host_port_id: &str,
@@ -862,7 +885,10 @@ impl SshPool {
         host: &HostEntry,
     ) -> Result<(), String> {
         self.stop_port_forward(&rule.id);
-        let session = self.get_or_connect(host, None).await?;
+        // Fails fast on bad credentials; each connection below re-fetches the session
+        self.get_or_connect(host, None).await?;
+        let pool = self.clone();
+        let host = host.clone();
         let bind_addr = format!(
             "{}:{}",
             if rule.local_host.trim().is_empty() {
@@ -872,9 +898,26 @@ impl SshPool {
             },
             rule.local_port
         );
-        let listener = tokio::net::TcpListener::bind(&bind_addr)
-            .await
-            .map_err(|e| format!("Failed to bind {bind_addr}: {e}"))?;
+        let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
+            Ok(listener) => listener,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                let raw = crate::telemetry::run_host_or_local_cmd(
+                    "local",
+                    self,
+                    &port_owner_cmd(rule.local_port),
+                )
+                .await
+                .unwrap_or_default();
+                return Err(match parse_port_owner(&raw) {
+                    Some((pid, name)) => format!(
+                        "Local port {} is already in use by {name} (PID {pid})",
+                        rule.local_port
+                    ),
+                    None => format!("Failed to bind {bind_addr}: {e}"),
+                });
+            }
+            Err(e) => return Err(format!("Failed to bind {bind_addr}: {e}")),
+        };
 
         let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
         self.forward_stops
@@ -900,7 +943,8 @@ impl SshPool {
                     _ = stop_rx.recv() => break,
                     accept_res = listener.accept() => {
                         let Ok((mut tcp_stream, peer_addr)) = accept_res else { break };
-                        let sess = session.clone();
+                        let pool_cl = pool.clone();
+                        let host_cl = host.clone();
                         let mode_cl = mode.clone();
                         let thost = target_host.clone();
                         let tport = target_port;
@@ -945,6 +989,11 @@ impl SshPool {
                                 (thost, tport)
                             };
 
+                            // ponytail: a burst of connections right after a drop may each open
+                            // a session (last one cached wins); add a per-host connect lock if it matters
+                            let Ok(sess) = pool_cl.get_or_connect(&host_cl, None).await else {
+                                return;
+                            };
                             let channel_res = {
                                 let h = sess.handle.lock().await;
                                 h.channel_open_direct_tcpip(
@@ -1141,5 +1190,21 @@ mod tests {
         assert!(fallback_sockets.contains(&bw_sock));
 
         let _ = std::fs::remove_dir_all(&tmp_home);
+    }
+
+    #[test]
+    fn names_the_process_holding_a_busy_forward_port() {
+        // lsof always adds an "f" (fd) line; PowerShell output arrives with CRLF
+        assert_eq!(
+            parse_port_owner("p4821\ncnode\nf23\n"),
+            Some((4821, "node".to_string()))
+        );
+        assert_eq!(
+            parse_port_owner("p912\r\ncpostgres\r\n"),
+            Some((912, "postgres".to_string()))
+        );
+        // No listener found (or lsof missing): caller falls back to the raw bind error
+        assert_eq!(parse_port_owner(""), None);
+        assert_eq!(parse_port_owner("sh: lsof: not found"), None);
     }
 }

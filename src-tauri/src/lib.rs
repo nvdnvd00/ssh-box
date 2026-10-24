@@ -492,13 +492,19 @@ async fn spawn_local_pty(
     pane_id: String,
     cols: u16,
     rows: u16,
+    shell: Option<String>,
     on_data: Channel<Vec<u8>>,
 ) -> Result<(), String> {
     state
         .local_pty
-        .spawn_pane(pane_id, cols, rows, None, move |chunk| {
+        .spawn_pane(pane_id, cols, rows, shell.as_deref(), move |chunk| {
             on_data.send(chunk).is_ok()
         })
+}
+
+#[tauri::command]
+async fn list_local_shells() -> Vec<local_pty::LocalShellOption> {
+    local_pty::list_local_shells().await
 }
 
 #[tauri::command]
@@ -860,6 +866,7 @@ pub fn run() {
             docker_logs,
             kill_process,
             spawn_local_pty,
+            list_local_shells,
             connect_ssh_pane,
             write_pane_input,
             resize_pane,

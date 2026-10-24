@@ -773,56 +773,6 @@ fn save_session_log(
     Ok(full_path.to_string_lossy().to_string())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VaultBackupBundle {
-    pub version: u32,
-    pub exported_at: u64,
-    pub custom_hosts: Vec<HostEntry>,
-    pub resources: ResourcesStoreData,
-}
-
-#[tauri::command]
-fn export_vault_backup() -> Result<String, String> {
-    let (_, custom_cfg) = host_store::default_paths();
-    let custom_hosts: Vec<HostEntry> = std::fs::read_to_string(&custom_cfg)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
-    let resources = resources::load_resources();
-    let exported_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let bundle = VaultBackupBundle {
-        version: 1,
-        exported_at,
-        custom_hosts,
-        resources,
-    };
-    let json = serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())?;
-    let backups_dir = host_store::app_config_dir().join("backups");
-    std::fs::create_dir_all(&backups_dir).map_err(|e| e.to_string())?;
-    let backup_file = backups_dir.join(format!("ssh-box-vault-{exported_at}.json"));
-    let _ = std::fs::write(&backup_file, &json);
-    Ok(json)
-}
-
-#[tauri::command]
-fn import_vault_backup(
-    state: State<'_, AppState>,
-    json_payload: String,
-) -> Result<ResourcesStoreData, String> {
-    let bundle: VaultBackupBundle =
-        serde_json::from_str(&json_payload).map_err(|e| format!("Invalid backup JSON: {e}"))?;
-    let (_, custom_cfg) = host_store::default_paths();
-    for host in bundle.custom_hosts {
-        let _ = host_store::upsert_custom_host_at(&custom_cfg, host);
-    }
-    resources::save_resources(&bundle.resources)?;
-    Ok(enrich_resources(bundle.resources, &state.ssh_pool))
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -886,8 +836,6 @@ pub fn run() {
             clear_known_hosts,
             export_ssh_key_to_host,
             save_session_log,
-            export_vault_backup,
-            import_vault_backup,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

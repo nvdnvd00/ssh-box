@@ -1197,7 +1197,6 @@ export default function App() {
               onChangeTheme={handleUpdateTheme}
               onChangeAppSettings={handleUpdateAppSettings}
               onUpdateResources={setResources}
-              onRefreshHosts={loadHosts}
             />
           )}
         </main>

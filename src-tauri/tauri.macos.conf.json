@@ -14,5 +14,10 @@
         "transparent": true
       }
     ]
+  },
+  "bundle": {
+    "macOS": {
+      "signingIdentity": "-"
+    }
   }
 }

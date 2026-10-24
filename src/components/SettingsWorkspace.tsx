@@ -1312,6 +1312,46 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
                     </div>
                   </div>
                 </section>
+
+                <section className="space-y-2">
+                  <h2 className="text-[13px] font-semibold text-foreground px-1">
+                    {i18n.settingsClipboardTitle}
+                  </h2>
+                  <div className="rounded-2xl border border-border/80 bg-card/65 divide-y divide-border/60 overflow-hidden">
+                    <div className="flex items-center justify-between px-4 py-3.5">
+                      <div>
+                        <div className="text-[13px] font-medium text-foreground">
+                          {i18n.settingsCopyOnSelectLabel}
+                        </div>
+                        <div className="text-[11px] text-muted-foreground">
+                          {i18n.settingsCopyOnSelectDesc}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={appSettings.copyOnSelect}
+                        onClick={() =>
+                          onChangeAppSettings((prev) => ({
+                            ...prev,
+                            copyOnSelect: !prev.copyOnSelect,
+                          }))
+                        }
+                        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                          appSettings.copyOnSelect ? "bg-primary" : "bg-secondary"
+                        }`}
+                      >
+                        <span
+                          className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                            appSettings.copyOnSelect
+                              ? "translate-x-5"
+                              : "translate-x-0"
+                          }`}
+                        />
+                      </button>
+                    </div>
+                  </div>
+                </section>
               </>
             )}
 

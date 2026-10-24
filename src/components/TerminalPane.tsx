@@ -34,6 +34,7 @@ interface TerminalPaneProps {
   themeConfig: ThemeConfig;
   isVisible?: boolean;
   language?: AppLanguage;
+  copyOnSelect?: boolean;
   broadcastTargetPaneIds?: string[];
   onFocus: () => void;
   onUpdateStatus: (
@@ -84,6 +85,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   themeConfig,
   isVisible = true,
   language = "vi",
+  copyOnSelect = false,
   broadcastTargetPaneIds,
   onFocus,
   onUpdateStatus,
@@ -102,6 +104,8 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     broadcastTargetPaneIds,
   );
   broadcastTargetsRef.current = broadcastTargetPaneIds;
+  const copyOnSelectRef = useRef(copyOnSelect);
+  copyOnSelectRef.current = copyOnSelect;
 
   const [retryPassword, setRetryPassword] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
@@ -337,6 +341,17 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       selectionService?._removeMouseDownListeners?.();
     };
     window.addEventListener("blur", onWindowBlur);
+
+    // Copy on mouseup rather than onSelectionChange: the latter fires on every drag tick
+    // and on search highlights (term.select), which would clobber the clipboard.
+    // hasSelection() can be true over blank cells, so check the text to avoid wiping the clipboard.
+    const onMouseUpCopy = () => {
+      const text = copyOnSelectRef.current ? term.getSelection() : "";
+      if (text) {
+        navigator.clipboard.writeText(text).catch(() => undefined);
+      }
+    };
+    el.addEventListener("mouseup", onMouseUpCopy);
 
     const sendRawStringToPty = (str: string) => {
       if (!str) return;
@@ -588,6 +603,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       cancelAnimationFrame(rafId);
       resizeObserver.disconnect();
       window.removeEventListener("blur", onWindowBlur);
+      el.removeEventListener("mouseup", onMouseUpCopy);
       el.removeEventListener("compositionstart", onCompositionEvent, true);
       el.removeEventListener("compositionupdate", onCompositionEvent, true);
       el.removeEventListener("compositionend", onCompositionEvent, true);

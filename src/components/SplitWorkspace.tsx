@@ -10,6 +10,7 @@ interface SplitWorkspaceProps {
   themeConfig: ThemeConfig;
   isVisible?: boolean;
   language?: AppLanguage;
+  copyOnSelect?: boolean;
   broadcastTargetPaneIds?: string[];
   onFocusPane: (paneId: string) => void;
   onUpdateLeafStatus: (
@@ -38,6 +39,7 @@ export const SplitWorkspace: React.FC<SplitWorkspaceProps> = ({
   themeConfig,
   isVisible = true,
   language,
+  copyOnSelect,
   broadcastTargetPaneIds,
   onFocusPane,
   onUpdateLeafStatus,
@@ -57,6 +59,7 @@ export const SplitWorkspace: React.FC<SplitWorkspaceProps> = ({
         themeConfig={themeConfig}
         isVisible={isVisible}
         language={language}
+        copyOnSelect={copyOnSelect}
         broadcastTargetPaneIds={broadcastTargetPaneIds}
         onFocus={() => onFocusPane(node.paneId)}
         onUpdateStatus={(status, extra) =>
@@ -120,6 +123,7 @@ export const SplitWorkspace: React.FC<SplitWorkspaceProps> = ({
           themeConfig={themeConfig}
           isVisible={isVisible}
           language={language}
+          copyOnSelect={copyOnSelect}
           broadcastTargetPaneIds={broadcastTargetPaneIds}
           onFocusPane={onFocusPane}
           onUpdateLeafStatus={onUpdateLeafStatus}
@@ -159,6 +163,7 @@ export const SplitWorkspace: React.FC<SplitWorkspaceProps> = ({
           themeConfig={themeConfig}
           isVisible={isVisible}
           language={language}
+          copyOnSelect={copyOnSelect}
           broadcastTargetPaneIds={broadcastTargetPaneIds}
           onFocusPane={onFocusPane}
           onUpdateLeafStatus={onUpdateLeafStatus}

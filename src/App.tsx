@@ -1,11 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { check, Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import {
   Activity,
   ArrowLeft,
   Code2,
   Container,
+  Download,
   HardDrive,
   Home,
   KeyRound,
@@ -137,7 +140,28 @@ export default function App() {
     values: Record<string, string>;
   } | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
+  const [isUpdating, setIsUpdating] = useState(false);
   const t = getI18n(appSettings.language);
+
+  // Fails silently in dev (no endpoints) and on mobile (plugin not registered).
+  useEffect(() => {
+    check()
+      .then(setPendingUpdate)
+      .catch(() => undefined);
+  }, []);
+
+  const handleInstallUpdate = async () => {
+    if (!pendingUpdate || !window.confirm(t.updateConfirm)) return;
+    setIsUpdating(true);
+    try {
+      await pendingUpdate.downloadAndInstall();
+      await relaunch();
+    } catch (err) {
+      setIsUpdating(false);
+      window.alert(String(err));
+    }
+  };
   const isMacDesktop = useMemo(() => {
     if (typeof navigator === "undefined") return false;
     const ua = navigator.userAgent || "";
@@ -891,6 +915,23 @@ export default function App() {
 
               <span className="w-px h-5 bg-border/80 mx-1" />
             </>
+          )}
+
+          {pendingUpdate && (
+            <button
+              type="button"
+              onClick={handleInstallUpdate}
+              disabled={isUpdating}
+              title={t.updateConfirm}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-primary/15 text-primary border border-primary/40 text-xs font-semibold transition-all cursor-pointer disabled:opacity-60 disabled:cursor-wait"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>
+                {isUpdating
+                  ? t.updateInstalling
+                  : `${t.updateBtn} v${pendingUpdate.version}`}
+              </span>
+            </button>
           )}
 
           <button

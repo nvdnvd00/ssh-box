@@ -820,11 +820,14 @@ fn import_vault_backup(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             use tauri::Manager;
             if let Ok(app_dir) = app.path().app_data_dir() {
                 host_store::set_app_data_dir(app_dir);
             }
+            #[cfg(desktop)]
+            app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
             Ok(())
         })
         .manage(AppState::default())

@@ -680,6 +680,15 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
 
     onUpdateStatus("connecting", { errorMessage: undefined });
 
+    // "\r" is what Enter sends, so this also works in PowerShell/cmd via ConPTY
+    const sendStartupCommand = () => {
+      if (!leaf.startupCommand) return;
+      invoke("write_pane_input", {
+        paneId: leaf.paneId,
+        data: Array.from(textEncoder.encode(`${leaf.startupCommand}\r`)),
+      }).catch(() => undefined);
+    };
+
     if (leaf.kind === "local") {
       invoke("spawn_local_pty", {
         paneId: leaf.paneId,
@@ -692,6 +701,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         .then(() => {
           if (!cancelled) {
             onUpdateStatus("connected");
+            sendStartupCommand();
             term.focus();
           }
         })
@@ -726,6 +736,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
               fingerprint: res.fingerprint,
               errorMessage: undefined,
             });
+            sendStartupCommand();
             term.focus();
           }
         })

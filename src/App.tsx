@@ -396,6 +396,28 @@ export default function App() {
     [appSettings.autoOpenMonitorOnSsh],
   );
 
+  const handleOpenCommandTab = useCallback(
+    (hostId: string, title: string, startupCommand: string) => {
+      const host = hosts.find((h) => h.id === hostId);
+      const base =
+        hostId === "local"
+          ? createLocalLeaf(title)
+          : host && createSshLeaf(host);
+      if (!base) return;
+      const leaf = { ...base, title, startupCommand };
+      const newTab: WorkspaceTab = {
+        id: `tab-${leaf.paneId}`,
+        title,
+        root: leaf,
+        activePaneId: leaf.paneId,
+      };
+      setTabs((prev) => [...prev, newTab]);
+      setActiveTabId(newTab.id);
+      setWorkspaceView("terminal");
+    },
+    [hosts],
+  );
+
   const handleSplitPane = useCallback(
     (
       paneId: string,
@@ -1185,6 +1207,7 @@ export default function App() {
                     setWorkspaceView("dashboard");
                   }}
                   onOpenLocalTerminal={openLocalTab}
+                  onOpenCommandTab={handleOpenCommandTab}
                   onRunSnippetInActivePane={handleRunSnippetInActivePane}
                 />
               </div>

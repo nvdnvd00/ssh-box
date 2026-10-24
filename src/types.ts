@@ -224,6 +224,8 @@ export interface LeafPaneNode {
   errorMessage?: string;
   fingerprint?: string;
   reconnectNonce: number;
+  // Typed into the shell after every (re)connect, e.g. a docker exec
+  startupCommand?: string;
 }
 
 export interface SplitPaneNode {

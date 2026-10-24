@@ -77,6 +77,11 @@ interface ResourcesWorkspaceProps {
   onConnectHost: (host: HostEntry) => void;
   onInspectMachine?: (hostId: string) => void;
   onOpenLocalTerminal?: () => void;
+  onOpenCommandTab?: (
+    hostId: string,
+    title: string,
+    startupCommand: string,
+  ) => void;
   onRunSnippetInActivePane?: (code: string, snippetName?: string) => void;
 }
 
@@ -133,6 +138,7 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
   onConnectHost,
   onInspectMachine,
   onOpenLocalTerminal,
+  onOpenCommandTab,
   onRunSnippetInActivePane,
 }) => {
   const t = getI18n(appSettings?.language);
@@ -2685,6 +2691,28 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                                     >
                                       Logs
                                     </button>
+                                    {/* Local shells are hidden on mobile, so is this */}
+                                    {running &&
+                                      onOpenCommandTab &&
+                                      (dockerHostId !== "local" ||
+                                        onOpenLocalTerminal) && (
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            onOpenCommandTab(
+                                              dockerHostId,
+                                              c.name,
+                                              // c.id is the hex --no-trunc ID, safe unquoted
+                                              `docker exec -it ${c.id} sh -c "command -v bash >/dev/null && exec bash || exec sh"`,
+                                            )
+                                          }
+                                          title="Open Shell in Container"
+                                          className="px-2.5 py-1.5 rounded-xl bg-secondary hover:bg-accent text-foreground text-xs font-medium cursor-pointer inline-flex items-center gap-1"
+                                        >
+                                          <Terminal className="w-3.5 h-3.5" />
+                                          Shell
+                                        </button>
+                                      )}
                                   </div>
                                   <button
                                     type="button"

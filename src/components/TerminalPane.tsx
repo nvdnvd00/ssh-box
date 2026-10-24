@@ -54,6 +54,8 @@ interface TerminalPaneProps {
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+const isApplePlatform =
+  typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.platform);
 
 function stripAnsiCodes(raw: string): string {
   // eslint-disable-next-line no-control-regex
@@ -411,6 +413,14 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       if (!term.textarea || e.target !== term.textarea) return;
       e.stopPropagation();
 
+      // xterm's paste handler already sent the clipboard text; Chromium (WebView2) then also
+      // inserts it into the textarea, which would send it a second time.
+      if ((e as InputEvent).inputType === "insertFromPaste") {
+        term.textarea.value = "";
+        trackedInputRef.current = "";
+        return;
+      }
+
       const rawValue = term.textarea.value;
       if (rawValue.includes("\n") || rawValue.includes("\r")) {
         const cleanValue = rawValue.replace(/[\r\n]+/g, "");
@@ -490,6 +500,23 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           }
         }
         return true;
+      }
+
+      // Windows/Linux have no Cmd key: like Windows Terminal, Ctrl(+Shift)+C copies when text is
+      // selected (otherwise ^C reaches the shell) and Ctrl(+Shift)+V pastes. Returning false skips
+      // xterm, which would send ^V and preventDefault the browser's native paste.
+      if (!isApplePlatform && ev.ctrlKey && !ev.altKey && ev.type === "keydown") {
+        const key = ev.key.toLowerCase();
+        if (key === "c" && term.hasSelection()) {
+          navigator.clipboard
+            .writeText(term.getSelection())
+            .catch(() => undefined);
+          term.clearSelection();
+          return false;
+        }
+        if (key === "v") {
+          return false;
+        }
       }
 
       const isControlOrNavCode =

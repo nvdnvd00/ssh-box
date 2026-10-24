@@ -9,6 +9,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Instant, UNIX_EPOCH};
 
+fn local_command(program: &str) -> Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW: GUI-subsystem app otherwise pops a console per spawn
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd
+}
+
 fn local_permissions_mode(meta: &fs::Metadata, is_dir: bool) -> u32 {
     #[cfg(unix)]
     {
@@ -707,7 +719,7 @@ where
                 )
             };
 
-            let mut child = Command::new("tar")
+            let mut child = local_command("tar")
                 .args(&tar_args)
                 .arg(&parent.to_string_lossy().to_string())
                 .arg(&file_name)
@@ -865,7 +877,7 @@ where
             let mut buf = vec![0u8; SFTP_CHUNK_SIZE];
 
             if use_gzip_stream {
-                let mut child = Command::new("gzip")
+                let mut child = local_command("gzip")
                     .args(["-1", "-c", &src.to_string_lossy()])
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
@@ -1027,7 +1039,7 @@ where
             };
 
             let mut channel = pool.open_exec_channel(&host, &remote_tar_cmd).await?;
-            let mut child = Command::new("tar")
+            let mut child = local_command("tar")
                 .args(&local_tar_flags)
                 .arg(&dst_dir.to_string_lossy().to_string())
                 .stdin(Stdio::piped())

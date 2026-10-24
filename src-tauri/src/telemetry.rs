@@ -1099,6 +1099,8 @@ pub async fn run_host_or_local_cmd(
         {
             if let Ok(out) = tokio::process::Command::new("powershell.exe")
                 .args(["-NoProfile", "-NonInteractive", "-Command", cmd])
+                // CREATE_NO_WINDOW: GUI-subsystem app otherwise pops a console per spawn
+                .creation_flags(0x0800_0000)
                 .output()
                 .await
             {

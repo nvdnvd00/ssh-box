@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Activity,
@@ -8,6 +8,7 @@ import {
   Code2,
   Container,
   Copy,
+  Download,
   Edit3,
   FileKey,
   FolderGit2,
@@ -32,6 +33,7 @@ import {
   Tag,
   Terminal,
   Trash2,
+  Upload,
   UserCheck,
   Waypoints,
   X,
@@ -87,6 +89,29 @@ const TAG_PALETTE = [
   "#fb923c",
   "#ec4899",
 ];
+
+function downloadJson(fileName: string, data: unknown) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// Exported machines carry no identity/SSH key links.
+function toPortableMachine(h: HostEntry): HostEntry {
+  return {
+    ...h,
+    source: "custom",
+    authMethod: h.authMethod === "identity" ? "passwordOrKey" : h.authMethod,
+    identityId: null,
+    sshKeyId: null,
+  };
+}
 
 function formatUnixDate(ts?: number | null): string {
   if (!ts) return "—";
@@ -570,6 +595,70 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
     setTimeout(() => setCopiedKeyId(null), 1500);
   };
 
+  // Machine export/import: the user picks which machines go in or out.
+  const machineFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [machineTransfer, setMachineTransfer] = useState<{
+    mode: "export" | "import";
+    items: HostEntry[];
+    selected: boolean[];
+  } | null>(null);
+
+  const openMachineTransfer = (
+    mode: "export" | "import",
+    items: HostEntry[],
+  ) => setMachineTransfer({ mode, items, selected: items.map(() => true) });
+
+  const handlePickMachineFile = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setErrorBanner(null);
+    try {
+      const data = JSON.parse(await file.text());
+      if (data?.type !== "ssh-box/machines" || !Array.isArray(data.items)) {
+        throw new Error("Not an ssh-box machines export file");
+      }
+      openMachineTransfer("import", data.items.map(toPortableMachine));
+    } catch (err) {
+      setErrorBanner(String(err));
+    }
+  };
+
+  const handleConfirmMachineTransfer = async () => {
+    if (!machineTransfer) return;
+    const { mode, items, selected } = machineTransfer;
+    const picked = items.filter((_, i) => selected[i]);
+    setMachineTransfer(null);
+    setErrorBanner(null);
+    try {
+      if (mode === "export") {
+        downloadJson(
+          `ssh-box-machines-${new Date().toISOString().slice(0, 10)}.json`,
+          { type: "ssh-box/machines", items: picked.map(toPortableMachine) },
+        );
+        return;
+      }
+      for (const m of picked) {
+        // Same id already here: update it but keep its local identity/key links.
+        const existing = hosts.find((h) => h.id === m.id);
+        await onSaveHost(
+          existing
+            ? {
+                ...m,
+                authMethod: existing.authMethod,
+                identityId: existing.identityId,
+                sshKeyId: existing.sshKeyId,
+              }
+            : m,
+        );
+      }
+    } catch (err) {
+      setErrorBanner(String(err));
+    }
+  };
+
   const handleSaveProxyForm = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingProxy || !editingProxy.name.trim()) return;
@@ -952,6 +1041,37 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
             {/* Context-specific primary buttons */}
             {activeSubTab === "machines" && (
               <>
+                <button
+                  type="button"
+                  onClick={() => machineFileInputRef.current?.click()}
+                  title="Import machines from a JSON file"
+                  className="h-[38px] inline-flex items-center gap-1.5 px-3 rounded-[10px] bg-secondary hover:bg-accent border border-border text-xs font-medium text-foreground cursor-pointer transition-colors"
+                >
+                  <Upload className="w-3.5 h-3.5 text-primary" />
+                  Import
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    openMachineTransfer(
+                      "export",
+                      // ~/.ssh/config hosts already live in a portable file.
+                      hosts.filter((h) => h.source === "custom"),
+                    )
+                  }
+                  title="Export machines to a JSON file"
+                  className="h-[38px] inline-flex items-center gap-1.5 px-3 rounded-[10px] bg-secondary hover:bg-accent border border-border text-xs font-medium text-foreground cursor-pointer transition-colors"
+                >
+                  <Download className="w-3.5 h-3.5 text-primary" />
+                  Export
+                </button>
+                <input
+                  ref={machineFileInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  className="hidden"
+                  onChange={handlePickMachineFile}
+                />
                 <button
                   type="button"
                   onClick={() => setShowGroupModal(true)}
@@ -3243,6 +3363,98 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
       )}
 
       {/* Groups Management Modal */}
+      {machineTransfer && (
+        <div className="ui-modal-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
+          <div className="ui-modal-content w-full max-w-md rounded-2xl bg-popover border border-border shadow-2xl overflow-hidden">
+            <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
+              <h3 className="text-sm font-semibold">
+                {machineTransfer.mode === "export"
+                  ? "Export Machines"
+                  : "Import Machines"}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setMachineTransfer(null)}
+                className="p-1 rounded-lg hover:bg-secondary cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-5 space-y-3.5 text-xs">
+              <label className="flex items-center gap-2.5 cursor-pointer font-medium">
+                <input
+                  type="checkbox"
+                  checked={machineTransfer.selected.every(Boolean)}
+                  onChange={(e) =>
+                    setMachineTransfer((prev) =>
+                      prev && {
+                        ...prev,
+                        selected: prev.selected.map(() => e.target.checked),
+                      },
+                    )
+                  }
+                />
+                <span>
+                  Select all ({machineTransfer.selected.filter(Boolean).length}/
+                  {machineTransfer.items.length})
+                </span>
+              </label>
+              <div className="space-y-1.5 max-h-64 overflow-y-auto p-3 rounded-xl bg-input border border-border">
+                {machineTransfer.items.length === 0 ? (
+                  <div className="text-muted-foreground">No machines.</div>
+                ) : (
+                  machineTransfer.items.map((m, i) => (
+                    <label
+                      key={i}
+                      className="flex items-center gap-2.5 cursor-pointer py-1"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={machineTransfer.selected[i]}
+                        onChange={(e) =>
+                          setMachineTransfer((prev) =>
+                            prev && {
+                              ...prev,
+                              selected: prev.selected.map((v, j) =>
+                                j === i ? e.target.checked : v,
+                              ),
+                            },
+                          )
+                        }
+                      />
+                      <span className="min-w-0 truncate">
+                        {m.alias}{" "}
+                        <span className="text-muted-foreground">
+                          {m.user}@{m.hostname}:{m.port}
+                        </span>
+                      </span>
+                      {machineTransfer.mode === "import" &&
+                        hosts.some((h) => h.id === m.id) && (
+                          <span className="ml-auto shrink-0 text-[10px] text-amber-400">
+                            update
+                          </span>
+                        )}
+                    </label>
+                  ))
+                )}
+              </div>
+              <p className="text-muted-foreground">
+                Identity and SSH key links are not included.
+              </p>
+              <button
+                type="button"
+                disabled={!machineTransfer.selected.some(Boolean)}
+                onClick={handleConfirmMachineTransfer}
+                className="w-full h-[38px] rounded-[10px] bg-primary text-primary-foreground font-semibold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {machineTransfer.mode === "export" ? "Export" : "Import"} (
+                {machineTransfer.selected.filter(Boolean).length})
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showGroupModal && (
         <div className="ui-modal-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
           <div className="ui-modal-content w-full max-w-md rounded-2xl bg-popover border border-border shadow-2xl overflow-hidden">

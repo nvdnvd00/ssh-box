@@ -8,8 +8,11 @@ import {
   ChevronLeft,
   Container,
   Cpu,
+  Grip,
   HardDrive,
   Laptop,
+  LayoutGrid,
+  List,
   MemoryStick,
   Network,
   Plus,
@@ -17,15 +20,20 @@ import {
   Server,
   Skull,
   Terminal as TerminalIcon,
+  X,
   XCircle,
 } from "lucide-react";
 import {
+  DashboardDisplayStyle,
   DockerFullSnapshot,
   HostEntry,
   ResourcesStoreData,
   ServerMetrics,
 } from "../types";
 import { AppSettingsConfig } from "../themes";
+import { SelectField } from "./SelectField";
+
+const DASHBOARD_DISPLAY_STYLE_KEY = "ssh-box:dashboard-display-style";
 
 interface DashboardWorkspaceProps {
   hosts: HostEntry[];
@@ -360,7 +368,27 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
   onOpenSftpManager,
 }) => {
   const [selectedTagId, setSelectedTagId] = useState<string>("ALL");
+  const [displayStyle, setDisplayStyle] = useState<DashboardDisplayStyle>(() => {
+    try {
+      const saved = localStorage.getItem(DASHBOARD_DISPLAY_STYLE_KEY);
+      if (saved === "grid" || saved === "compact" || saved === "list") {
+        return saved;
+      }
+    } catch {
+      // ignore
+    }
+    return "grid";
+  });
   const [searchQuery, setSearchQuery] = useState("");
+
+  const handleChangeDisplayStyle = useCallback((next: DashboardDisplayStyle) => {
+    setDisplayStyle(next);
+    try {
+      localStorage.setItem(DASHBOARD_DISPLAY_STYLE_KEY, next);
+    } catch {
+      // ignore
+    }
+  }, []);
   const [procSearch, setProcSearch] = useState("");
   const [loadHistoryMap, setLoadHistoryMap] = useState<
     Record<string, LoadHistoryPoint[]>
@@ -430,16 +458,22 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
 
   const filteredHosts = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
+    const matchedTag = resources.tags.find(
+      (t) => t.name === selectedTagId || t.id === selectedTagId,
+    );
     return hosts.filter((h) => {
       if (selectedTagId === "NO_TAGS" && (h.tags?.length ?? 0) > 0) {
         return false;
       }
-      if (
-        selectedTagId !== "ALL" &&
-        selectedTagId !== "NO_TAGS" &&
-        !(h.tags ?? []).includes(selectedTagId)
-      ) {
-        return false;
+      if (selectedTagId !== "ALL" && selectedTagId !== "NO_TAGS") {
+        const hostTags = h.tags ?? [];
+        const hasTag =
+          hostTags.includes(selectedTagId) ||
+          (matchedTag
+            ? hostTags.includes(matchedTag.name) ||
+              hostTags.includes(matchedTag.id)
+            : false);
+        if (!hasTag) return false;
       }
       if (!q) return true;
       return (
@@ -448,7 +482,7 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
         h.user.toLowerCase().includes(q)
       );
     });
-  }, [hosts, selectedTagId, searchQuery]);
+  }, [hosts, resources.tags, selectedTagId, searchQuery]);
 
   // Build unified machine cards list (Localhost + configured SSH Hosts)
   const totalMachinesCount = filteredHosts.length + 1; // +1 for Localhost
@@ -1125,72 +1159,129 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
       ? (localMetrics.memUsedMb / localMetrics.memTotalMb) * 100
       : 0;
 
+  const metricBarColor = (pct: number) =>
+    pct > 85 ? "bg-rose-500" : pct > 65 ? "bg-amber-400" : "bg-emerald-500";
+
+  const tagFilterOptions = [
+    { value: "ALL", label: `All Tags (${hosts.length + 1})` },
+    { value: "NO_TAGS", label: "No Tags" },
+    ...resources.tags.map((tag) => ({
+      value: tag.name,
+      label: tag.name,
+    })),
+  ];
+
+  const unifiedRows = [
+    {
+      id: "local",
+      isLocal: true,
+      name: "Localhost",
+      subtitle: localMetrics?.osName || "macOS",
+      hostObj: null as HostEntry | null,
+      metrics: localMetrics,
+      memPct: localMemPct,
+    },
+    ...filteredHosts.map((host) => {
+      const m = metricsMap[host.id];
+      const memPct =
+        m && m.memTotalMb > 0 ? (m.memUsedMb / m.memTotalMb) * 100 : 0;
+      return {
+        id: host.id,
+        isLocal: false,
+        name: host.alias || host.hostname,
+        subtitle: `${host.user}@${host.hostname}:${host.port}`,
+        hostObj: host,
+        metrics: m,
+        memPct,
+      };
+    }),
+  ];
+
   return (
     <div className="flex flex-col h-full w-full bg-background text-foreground overflow-hidden select-none ui-fade-slide">
       {/* Top Header */}
-      <div className="h-14 shrink-0 px-6 border-b border-border/80 bg-header/50 backdrop-blur-md flex items-center justify-between gap-4">
-        <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
-          <button
-            type="button"
-            onClick={() => setSelectedTagId("ALL")}
-            className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer ${
-              selectedTagId === "ALL"
-                ? "bg-primary text-primary-foreground shadow-xs"
-                : "bg-secondary/80 text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            All
-          </button>
-          <button
-            type="button"
-            onClick={() => setSelectedTagId("NO_TAGS")}
-            className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer ${
-              selectedTagId === "NO_TAGS"
-                ? "bg-primary text-primary-foreground shadow-xs"
-                : "bg-secondary/80 text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            No Tags
-          </button>
-          {resources.tags.map((tag) => {
-            const active = selectedTagId === tag.id;
-            return (
-              <button
-                key={tag.id}
-                type="button"
-                onClick={() => setSelectedTagId(tag.id)}
-                className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer ${
-                  active
-                    ? "bg-primary text-primary-foreground shadow-xs"
-                    : "bg-secondary/80 text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                <span
-                  className="w-2 h-2 rounded-full"
-                  style={{ backgroundColor: tag.color }}
-                />
-                <span>{tag.name}</span>
-              </button>
-            );
-          })}
+      <div className="h-14 shrink-0 px-6 border-b border-border/80 bg-header/50 backdrop-blur-md flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="w-44">
+            <SelectField
+              size="sm"
+              value={selectedTagId}
+              onChange={setSelectedTagId}
+              options={tagFilterOptions}
+            />
+          </div>
+          {selectedTagId !== "ALL" && (
+            <button
+              type="button"
+              onClick={() => setSelectedTagId("ALL")}
+              title="Clear Tag Filter"
+              className="h-7 px-2 rounded-lg bg-secondary/80 hover:bg-accent text-muted-foreground hover:text-foreground border border-border text-xs inline-flex items-center gap-1 cursor-pointer transition-colors"
+            >
+              <X className="w-3 h-3" />
+              <span>Reset</span>
+            </button>
+          )}
         </div>
 
-        <div className="flex items-center gap-2.5 shrink-0">
-          <div className="relative w-56">
+        <div className="flex items-center gap-2 shrink-0">
+          <div className="relative w-52">
             <Search className="w-3.5 h-3.5 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search machines..."
-              className="w-full pl-8 pr-3 py-1.5 rounded-xl bg-secondary/80 border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary"
+              className="w-full h-8 pl-8 pr-3 rounded-xl bg-secondary/80 border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary"
             />
+          </div>
+
+          <div
+            role="group"
+            aria-label="Dashboard display mode"
+            className="h-8 inline-flex items-center rounded-xl bg-secondary/80 p-0.5 border border-border"
+          >
+            <button
+              type="button"
+              onClick={() => handleChangeDisplayStyle("grid")}
+              title="Detailed Cards View"
+              className={`p-1.5 rounded-lg cursor-pointer transition-colors ${
+                displayStyle === "grid"
+                  ? "bg-card text-primary shadow-2xs"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <LayoutGrid className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => handleChangeDisplayStyle("compact")}
+              title="Compact Cards View"
+              className={`p-1.5 rounded-lg cursor-pointer transition-colors ${
+                displayStyle === "compact"
+                  ? "bg-card text-primary shadow-2xs"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Grip className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => handleChangeDisplayStyle("list")}
+              title="Table List View"
+              className={`p-1.5 rounded-lg cursor-pointer transition-colors ${
+                displayStyle === "list"
+                  ? "bg-card text-primary shadow-2xs"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <List className="w-3.5 h-3.5" />
+            </button>
           </div>
 
           <button
             type="button"
             onClick={onOpenAddMachine}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-semibold shadow-xs hover:opacity-95 transition-all cursor-pointer active:scale-97"
+            className="h-8 inline-flex items-center gap-1.5 px-3 rounded-xl bg-primary text-primary-foreground text-xs font-semibold shadow-xs hover:opacity-95 transition-all cursor-pointer active:scale-97"
           >
             <Plus className="w-3.5 h-3.5" />
             <span>Add Machine</span>
@@ -1245,233 +1336,575 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
           </div>
         </div>
 
-        {/* Machine Telemetry Cards Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {/* 1. Localhost Machine Card */}
-          <div
-            onClick={() => onSelectHost("local")}
-            className="group rounded-2xl border border-border/80 bg-card/75 hover:bg-card hover:border-primary/50 p-5 flex flex-col justify-between gap-4 shadow-xs transition-all duration-200 cursor-pointer hover:-translate-y-0.5"
-          >
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2.5 min-w-0">
-                <div className="w-8 h-8 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
-                  <Laptop className="w-4 h-4" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-sm font-bold text-foreground truncate">
-                    Localhost
+        {/* MODE 1: DETAILED GRID */}
+        {displayStyle === "grid" && (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            {/* 1. Localhost Machine Card */}
+            <div
+              onClick={() => onSelectHost("local")}
+              className="group rounded-2xl border border-border/80 bg-card/75 hover:bg-card hover:border-primary/50 p-5 flex flex-col justify-between gap-4 shadow-xs transition-all duration-200 cursor-pointer hover:-translate-y-0.5"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="w-8 h-8 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+                    <Laptop className="w-4 h-4" />
                   </div>
-                  <div className="text-[11px] text-muted-foreground truncate">
-                    {localMetrics?.osName || "macOS"}
-                  </div>
-                </div>
-              </div>
-
-              {onOpenLocalTerminal && (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onOpenLocalTerminal();
-                  }}
-                  title="Open Local Terminal"
-                  className="p-2 rounded-xl bg-secondary/90 hover:bg-primary hover:text-primary-foreground text-muted-foreground transition-colors cursor-pointer"
-                >
-                  <TerminalIcon className="w-4 h-4" />
-                </button>
-              )}
-            </div>
-
-            <div className="space-y-1.5 text-xs border-t border-border/60 pt-3">
-              <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Cores</span>
-                <span className="font-mono font-semibold text-foreground">
-                  {localMetrics?.cpuCores ?? "—"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">RAM</span>
-                <span className="font-mono font-semibold text-foreground">
-                  {localMetrics
-                    ? `${(localMetrics.memTotalMb / 1024).toFixed(2)} GB`
-                    : "—"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Disk</span>
-                <span className="font-mono font-semibold text-foreground">
-                  {localMetrics
-                    ? `${localMetrics.diskTotalGb.toFixed(2)} GB`
-                    : "—"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Uptime</span>
-                <span className="font-mono font-semibold text-foreground">
-                  {formatUptime(localMetrics?.uptimeSeconds)}
-                </span>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-around py-2 border-t border-border/60">
-              <CircularRingGauge
-                percent={localMetrics?.cpuPercent ?? 0}
-                label="CPU"
-                size={64}
-              />
-              <CircularRingGauge
-                percent={localMemPct}
-                label="RAM"
-                size={64}
-              />
-            </div>
-
-            <div className="space-y-1.5 text-xs border-t border-border/60 pt-3">
-              <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Network</span>
-                <div className="text-right font-mono text-[11px]">
-                  <div className="text-emerald-400">
-                    ↑ {formatBytesPerSec(localMetrics?.netTxKbps ?? 0)}
-                  </div>
-                  <div className="text-sky-400">
-                    ↓ {formatBytesPerSec(localMetrics?.netRxKbps ?? 0)}
-                  </div>
-                </div>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Disk</span>
-                <div className="text-right font-mono text-[11px] text-foreground">
-                  <div>
-                    R{" "}
-                    {formatRawBytesPerSec(
-                      localMetrics?.volumes?.[0]?.readBytesPerSec ?? 0,
-                    )}
-                  </div>
-                  <div>
-                    W{" "}
-                    {formatRawBytesPerSec(
-                      localMetrics?.volumes?.[0]?.writeBytesPerSec ?? 0,
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* 2. Configured Remote SSH Machine Cards */}
-          {filteredHosts.map((host) => {
-            const m = metricsMap[host.id];
-            const memPct =
-              m && m.memTotalMb > 0 ? (m.memUsedMb / m.memTotalMb) * 100 : 0;
-
-            return (
-              <div
-                key={host.id}
-                onClick={() => onSelectHost(host.id)}
-                className="group rounded-2xl border border-border/80 bg-card/75 hover:bg-card hover:border-primary/50 p-5 flex flex-col justify-between gap-4 shadow-xs transition-all duration-200 cursor-pointer hover:-translate-y-0.5"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <div className="w-8 h-8 rounded-xl bg-orange-500/15 border border-orange-500/30 flex items-center justify-center text-orange-400 shrink-0">
-                      <Server className="w-4 h-4" />
+                  <div className="min-w-0">
+                    <div className="text-sm font-bold text-foreground truncate">
+                      Localhost
                     </div>
-                    <div className="min-w-0">
-                      <div className="text-sm font-bold text-foreground truncate">
-                        {host.alias || host.hostname}
-                      </div>
-                      <div className="text-[11px] text-muted-foreground font-mono truncate">
-                        {host.user}@{host.hostname}:{host.port}
-                      </div>
+                    <div className="text-[11px] text-muted-foreground truncate">
+                      {localMetrics?.osName || "macOS"}
                     </div>
                   </div>
+                </div>
 
+                {onOpenLocalTerminal && (
                   <button
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      onConnectHostTerminal(host);
+                      onOpenLocalTerminal();
                     }}
-                    title="Connect SSH Terminal"
+                    title="Open Local Terminal"
                     className="p-2 rounded-xl bg-secondary/90 hover:bg-primary hover:text-primary-foreground text-muted-foreground transition-colors cursor-pointer"
                   >
                     <TerminalIcon className="w-4 h-4" />
                   </button>
-                </div>
+                )}
+              </div>
 
-                <div className="space-y-1.5 text-xs border-t border-border/60 pt-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-muted-foreground">Cores</span>
-                    <span className="font-mono font-semibold text-foreground">
-                      {m?.cpuCores ?? "—"}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-muted-foreground">RAM</span>
-                    <span className="font-mono font-semibold text-foreground">
-                      {m ? `${(m.memTotalMb / 1024).toFixed(2)} GB` : "—"}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-muted-foreground">Disk</span>
-                    <span className="font-mono font-semibold text-foreground">
-                      {m ? `${m.diskTotalGb.toFixed(2)} GB` : "—"}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-muted-foreground">Uptime</span>
-                    <span className="font-mono font-semibold text-foreground">
-                      {m ? formatUptime(m.uptimeSeconds) : "Click to Monitor"}
-                    </span>
-                  </div>
+              <div className="space-y-1.5 text-xs border-t border-border/60 pt-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Cores</span>
+                  <span className="font-mono font-semibold text-foreground">
+                    {localMetrics?.cpuCores ?? "—"}
+                  </span>
                 </div>
-
-                <div className="flex items-center justify-around py-2 border-t border-border/60">
-                  <CircularRingGauge
-                    percent={m?.cpuPercent ?? 0}
-                    label="CPU"
-                    size={64}
-                  />
-                  <CircularRingGauge
-                    percent={memPct}
-                    label="RAM"
-                    size={64}
-                  />
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">RAM</span>
+                  <span className="font-mono font-semibold text-foreground">
+                    {localMetrics
+                      ? `${(localMetrics.memTotalMb / 1024).toFixed(2)} GB`
+                      : "—"}
+                  </span>
                 </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Disk</span>
+                  <span className="font-mono font-semibold text-foreground">
+                    {localMetrics
+                      ? `${localMetrics.diskTotalGb.toFixed(2)} GB`
+                      : "—"}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Uptime</span>
+                  <span className="font-mono font-semibold text-foreground">
+                    {formatUptime(localMetrics?.uptimeSeconds)}
+                  </span>
+                </div>
+              </div>
 
-                <div className="space-y-1.5 text-xs border-t border-border/60 pt-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-muted-foreground">Network</span>
-                    <div className="text-right font-mono text-[11px]">
-                      <div className="text-emerald-400">
-                        ↑ {formatBytesPerSec(m?.netTxKbps ?? 0)}
-                      </div>
-                      <div className="text-sky-400">
-                        ↓ {formatBytesPerSec(m?.netRxKbps ?? 0)}
-                      </div>
+              <div className="flex items-center justify-around py-2 border-t border-border/60">
+                <CircularRingGauge
+                  percent={localMetrics?.cpuPercent ?? 0}
+                  label="CPU"
+                  size={64}
+                />
+                <CircularRingGauge
+                  percent={localMemPct}
+                  label="RAM"
+                  size={64}
+                />
+              </div>
+
+              <div className="space-y-1.5 text-xs border-t border-border/60 pt-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Network</span>
+                  <div className="text-right font-mono text-[11px]">
+                    <div className="text-emerald-400">
+                      ↑ {formatBytesPerSec(localMetrics?.netTxKbps ?? 0)}
+                    </div>
+                    <div className="text-sky-400">
+                      ↓ {formatBytesPerSec(localMetrics?.netRxKbps ?? 0)}
                     </div>
                   </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-muted-foreground">Disk</span>
-                    <div className="text-right font-mono text-[11px] text-foreground">
-                      <div>
-                        R{" "}
-                        {formatRawBytesPerSec(
-                          m?.volumes?.[0]?.readBytesPerSec ?? 0,
-                        )}
-                      </div>
-                      <div>
-                        W{" "}
-                        {formatRawBytesPerSec(
-                          m?.volumes?.[0]?.writeBytesPerSec ?? 0,
-                        )}
-                      </div>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Disk</span>
+                  <div className="text-right font-mono text-[11px] text-foreground">
+                    <div>
+                      R{" "}
+                      {formatRawBytesPerSec(
+                        localMetrics?.volumes?.[0]?.readBytesPerSec ?? 0,
+                      )}
+                    </div>
+                    <div>
+                      W{" "}
+                      {formatRawBytesPerSec(
+                        localMetrics?.volumes?.[0]?.writeBytesPerSec ?? 0,
+                      )}
                     </div>
                   </div>
                 </div>
               </div>
-            );
-          })}
-        </div>
+            </div>
+
+            {/* 2. Configured Remote SSH Machine Cards */}
+            {filteredHosts.map((host) => {
+              const m = metricsMap[host.id];
+              const memPct =
+                m && m.memTotalMb > 0 ? (m.memUsedMb / m.memTotalMb) * 100 : 0;
+
+              return (
+                <div
+                  key={host.id}
+                  onClick={() => onSelectHost(host.id)}
+                  className="group rounded-2xl border border-border/80 bg-card/75 hover:bg-card hover:border-primary/50 p-5 flex flex-col justify-between gap-4 shadow-xs transition-all duration-200 cursor-pointer hover:-translate-y-0.5"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="w-8 h-8 rounded-xl bg-orange-500/15 border border-orange-500/30 flex items-center justify-center text-orange-400 shrink-0">
+                        <Server className="w-4 h-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-sm font-bold text-foreground truncate">
+                          {host.alias || host.hostname}
+                        </div>
+                        <div className="text-[11px] text-muted-foreground font-mono truncate">
+                          {host.user}@{host.hostname}:{host.port}
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onConnectHostTerminal(host);
+                      }}
+                      title="Connect SSH Terminal"
+                      className="p-2 rounded-xl bg-secondary/90 hover:bg-primary hover:text-primary-foreground text-muted-foreground transition-colors cursor-pointer"
+                    >
+                      <TerminalIcon className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  <div className="space-y-1.5 text-xs border-t border-border/60 pt-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Cores</span>
+                      <span className="font-mono font-semibold text-foreground">
+                        {m?.cpuCores ?? "—"}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">RAM</span>
+                      <span className="font-mono font-semibold text-foreground">
+                        {m ? `${(m.memTotalMb / 1024).toFixed(2)} GB` : "—"}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Disk</span>
+                      <span className="font-mono font-semibold text-foreground">
+                        {m ? `${m.diskTotalGb.toFixed(2)} GB` : "—"}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Uptime</span>
+                      <span className="font-mono font-semibold text-foreground">
+                        {m ? formatUptime(m.uptimeSeconds) : "Click to Monitor"}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-around py-2 border-t border-border/60">
+                    <CircularRingGauge
+                      percent={m?.cpuPercent ?? 0}
+                      label="CPU"
+                      size={64}
+                    />
+                    <CircularRingGauge
+                      percent={memPct}
+                      label="RAM"
+                      size={64}
+                    />
+                  </div>
+
+                  <div className="space-y-1.5 text-xs border-t border-border/60 pt-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Network</span>
+                      <div className="text-right font-mono text-[11px]">
+                        <div className="text-emerald-400">
+                          ↑ {formatBytesPerSec(m?.netTxKbps ?? 0)}
+                        </div>
+                        <div className="text-sky-400">
+                          ↓ {formatBytesPerSec(m?.netRxKbps ?? 0)}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Disk</span>
+                      <div className="text-right font-mono text-[11px] text-foreground">
+                        <div>
+                          R{" "}
+                          {formatRawBytesPerSec(
+                            m?.volumes?.[0]?.readBytesPerSec ?? 0,
+                          )}
+                        </div>
+                        <div>
+                          W{" "}
+                          {formatRawBytesPerSec(
+                            m?.volumes?.[0]?.writeBytesPerSec ?? 0,
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* MODE 2: COMPACT GRID */}
+        {displayStyle === "compact" && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3">
+            {unifiedRows.map((row) => {
+              const m = row.metrics;
+              const cpuPct = Math.min(100, Math.max(0, m?.cpuPercent ?? 0));
+              const ramPct = Math.min(100, Math.max(0, row.memPct));
+              const diskPct = Math.min(100, Math.max(0, m?.diskPercent ?? 0));
+
+              return (
+                <div
+                  key={row.id}
+                  onClick={() => onSelectHost(row.id)}
+                  className="group rounded-2xl border border-border/80 bg-card/75 hover:bg-card hover:border-primary/50 p-3.5 flex flex-col justify-between gap-3 shadow-xs transition-all duration-150 cursor-pointer"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <div
+                        className={`w-7 h-7 rounded-xl flex items-center justify-center shrink-0 border ${
+                          row.isLocal
+                            ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-400"
+                            : "bg-orange-500/15 border-orange-500/30 text-orange-400"
+                        }`}
+                      >
+                        {row.isLocal ? (
+                          <Laptop className="w-3.5 h-3.5" />
+                        ) : (
+                          <Server className="w-3.5 h-3.5" />
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-xs font-bold text-foreground truncate flex items-center gap-1.5">
+                          <span className="truncate">{row.name}</span>
+                          <span
+                            className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                              m ? "bg-emerald-400" : "bg-muted-foreground/40"
+                            }`}
+                          />
+                        </div>
+                        <div className="text-[10.5px] text-muted-foreground font-mono truncate">
+                          {row.subtitle}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1 shrink-0">
+                      {(!row.isLocal || onOpenLocalTerminal) && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (row.isLocal) {
+                              onOpenLocalTerminal?.();
+                            } else if (row.hostObj) {
+                              onConnectHostTerminal(row.hostObj);
+                            }
+                          }}
+                          title="Open Terminal"
+                          className="p-1.5 rounded-lg bg-secondary/90 hover:bg-primary hover:text-primary-foreground text-muted-foreground transition-colors cursor-pointer"
+                        >
+                          <TerminalIcon className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                      {!row.isLocal && onOpenSftpManager && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onOpenSftpManager(row.id);
+                          }}
+                          title="Open SFTP"
+                          className="p-1.5 rounded-lg bg-secondary/90 hover:bg-accent text-muted-foreground hover:text-amber-400 transition-colors cursor-pointer"
+                        >
+                          <HardDrive className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5 pt-2 border-t border-border/50 text-[11px]">
+                    <div className="flex items-center gap-2">
+                      <span className="w-8 text-muted-foreground">CPU</span>
+                      <div className="flex-1 h-1.5 rounded-full bg-secondary overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all duration-300 ${metricBarColor(
+                            cpuPct,
+                          )}`}
+                          style={{ width: `${cpuPct}%` }}
+                        />
+                      </div>
+                      <span className="w-9 text-right font-mono font-semibold text-foreground">
+                        {m ? `${Math.round(cpuPct)}%` : "—"}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <span className="w-8 text-muted-foreground">RAM</span>
+                      <div className="flex-1 h-1.5 rounded-full bg-secondary overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all duration-300 ${metricBarColor(
+                            ramPct,
+                          )}`}
+                          style={{ width: `${ramPct}%` }}
+                        />
+                      </div>
+                      <span className="w-9 text-right font-mono font-semibold text-foreground">
+                        {m ? `${Math.round(ramPct)}%` : "—"}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <span className="w-8 text-muted-foreground">Disk</span>
+                      <div className="flex-1 h-1.5 rounded-full bg-secondary overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all duration-300 ${metricBarColor(
+                            diskPct,
+                          )}`}
+                          style={{ width: `${diskPct}%` }}
+                        />
+                      </div>
+                      <span className="w-9 text-right font-mono font-semibold text-foreground">
+                        {m ? `${Math.round(diskPct)}%` : "—"}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between pt-2 border-t border-border/50 text-[10.5px] font-mono text-muted-foreground">
+                    <span>
+                      {m ? formatUptime(m.uptimeSeconds) : "Standby"}
+                    </span>
+                    <span className="inline-flex items-center gap-2">
+                      <span className="text-emerald-400">
+                        ↑ {formatBytesPerSec(m?.netTxKbps ?? 0)}
+                      </span>
+                      <span className="text-sky-400">
+                        ↓ {formatBytesPerSec(m?.netRxKbps ?? 0)}
+                      </span>
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* MODE 3: TABLE LIST VIEW */}
+        {displayStyle === "list" && (
+          <div
+            tabIndex={0}
+            role="region"
+            aria-label="Machines telemetry table"
+            className="rounded-2xl border border-border/80 bg-card/75 overflow-x-auto shadow-xs"
+          >
+            <table className="w-full text-left border-collapse text-xs">
+              <thead className="sticky top-0 z-10 bg-card/95 backdrop-blur-xs text-[11px] text-muted-foreground border-b border-border/70">
+                <tr>
+                  <th className="py-3 px-4 font-semibold">Machine</th>
+                  <th className="py-3 px-3 font-semibold">System / Uptime</th>
+                  <th className="py-3 px-3 font-semibold">CPU</th>
+                  <th className="py-3 px-3 font-semibold">RAM</th>
+                  <th className="py-3 px-3 font-semibold">Disk</th>
+                  <th className="py-3 px-3 font-semibold">Network</th>
+                  <th className="py-3 px-4 font-semibold text-right">
+                    Actions
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border/50">
+                {unifiedRows.map((row) => {
+                  const m = row.metrics;
+                  const cpuPct = Math.min(100, Math.max(0, m?.cpuPercent ?? 0));
+                  const ramPct = Math.min(100, Math.max(0, row.memPct));
+                  const diskPct = Math.min(
+                    100,
+                    Math.max(0, m?.diskPercent ?? 0),
+                  );
+
+                  return (
+                    <tr
+                      key={row.id}
+                      onClick={() => onSelectHost(row.id)}
+                      className="group hover:bg-accent/50 transition-colors cursor-pointer"
+                    >
+                      <th
+                        scope="row"
+                        className="py-2.5 px-4 font-normal text-left"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div
+                            className={`w-7 h-7 rounded-xl flex items-center justify-center shrink-0 border ${
+                              row.isLocal
+                                ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-400"
+                                : "bg-orange-500/15 border-orange-500/30 text-orange-400"
+                            }`}
+                          >
+                            {row.isLocal ? (
+                              <Laptop className="w-3.5 h-3.5" />
+                            ) : (
+                              <Server className="w-3.5 h-3.5" />
+                            )}
+                          </div>
+                          <div className="min-w-0">
+                            <div className="text-xs font-bold text-foreground truncate flex items-center gap-1.5">
+                              <span>{row.name}</span>
+                              <span
+                                className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                                  m
+                                    ? "bg-emerald-400"
+                                    : "bg-muted-foreground/40"
+                                }`}
+                              />
+                            </div>
+                            <div className="text-[11px] text-muted-foreground font-mono truncate">
+                              {row.subtitle}
+                            </div>
+                          </div>
+                        </div>
+                      </th>
+
+                      <td className="py-2.5 px-3 font-mono text-[11px] text-muted-foreground">
+                        <div className="text-foreground">
+                          {m?.osName || (row.isLocal ? "macOS" : "Remote SSH")}
+                        </div>
+                        <div>
+                          {m
+                            ? `${m.cpuCores}c • ${formatUptime(m.uptimeSeconds)}`
+                            : "Click to monitor"}
+                        </div>
+                      </td>
+
+                      <td className="py-2.5 px-3 min-w-[120px]">
+                        <div className="flex items-center gap-2">
+                          <div className="w-16 h-1.5 rounded-full bg-secondary overflow-hidden">
+                            <div
+                              className={`h-full rounded-full ${metricBarColor(
+                                cpuPct,
+                              )}`}
+                              style={{ width: `${cpuPct}%` }}
+                            />
+                          </div>
+                          <span className="font-mono font-semibold text-foreground text-[11px]">
+                            {m ? `${Math.round(cpuPct)}%` : "—"}
+                          </span>
+                        </div>
+                      </td>
+
+                      <td className="py-2.5 px-3 min-w-[140px]">
+                        <div className="flex items-center gap-2">
+                          <div className="w-16 h-1.5 rounded-full bg-secondary overflow-hidden">
+                            <div
+                              className={`h-full rounded-full ${metricBarColor(
+                                ramPct,
+                              )}`}
+                              style={{ width: `${ramPct}%` }}
+                            />
+                          </div>
+                          <span className="font-mono text-[11px] text-foreground">
+                            {m
+                              ? `${Math.round(ramPct)}% (${(
+                                  m.memTotalMb / 1024
+                                ).toFixed(1)}G)`
+                              : "—"}
+                          </span>
+                        </div>
+                      </td>
+
+                      <td className="py-2.5 px-3 min-w-[120px]">
+                        <div className="flex items-center gap-2">
+                          <div className="w-16 h-1.5 rounded-full bg-secondary overflow-hidden">
+                            <div
+                              className={`h-full rounded-full ${metricBarColor(
+                                diskPct,
+                              )}`}
+                              style={{ width: `${diskPct}%` }}
+                            />
+                          </div>
+                          <span className="font-mono text-[11px] text-foreground">
+                            {m ? `${Math.round(diskPct)}%` : "—"}
+                          </span>
+                        </div>
+                      </td>
+
+                      <td className="py-2.5 px-3 font-mono text-[11px]">
+                        <div className="text-emerald-400">
+                          ↑ {formatBytesPerSec(m?.netTxKbps ?? 0)}
+                        </div>
+                        <div className="text-sky-400">
+                          ↓ {formatBytesPerSec(m?.netRxKbps ?? 0)}
+                        </div>
+                      </td>
+
+                      <td
+                        className="py-2.5 px-4 text-right"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <div className="inline-flex items-center justify-end gap-1">
+                          {(!row.isLocal || onOpenLocalTerminal) && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (row.isLocal) {
+                                  onOpenLocalTerminal?.();
+                                } else if (row.hostObj) {
+                                  onConnectHostTerminal(row.hostObj);
+                                }
+                              }}
+                              title="Open Terminal"
+                              className="p-1.5 rounded-lg bg-secondary/90 hover:bg-primary hover:text-primary-foreground text-muted-foreground transition-colors cursor-pointer"
+                            >
+                              <TerminalIcon className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                          {!row.isLocal && onOpenSftpManager && (
+                            <button
+                              type="button"
+                              onClick={() => onOpenSftpManager(row.id)}
+                              title="Open SFTP"
+                              className="p-1.5 rounded-lg bg-secondary/90 hover:bg-accent text-muted-foreground hover:text-amber-400 transition-colors cursor-pointer"
+                            >
+                              <HardDrive className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => onOpenDockerManager(row.id)}
+                            title="Open Docker Manager"
+                            className="p-1.5 rounded-lg bg-secondary/90 hover:bg-accent text-muted-foreground hover:text-sky-400 transition-colors cursor-pointer"
+                          >
+                            <Container className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );

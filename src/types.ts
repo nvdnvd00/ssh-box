@@ -202,6 +202,7 @@ export interface SftpListResponse {
 }
 
 export type ResourceDisplayStyle = "grid" | "list";
+export type DashboardDisplayStyle = "grid" | "compact" | "list";
 export type ResourceSortStyle = "name" | "date";
 export type DockerPanelTab =
   | "overview"

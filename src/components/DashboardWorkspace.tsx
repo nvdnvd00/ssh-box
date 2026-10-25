@@ -41,6 +41,8 @@ interface DashboardWorkspaceProps {
   metricsMap: Record<string, ServerMetrics>;
   selectedHostId: string | null;
   appSettings: AppSettingsConfig;
+  localMonitorEnabled?: boolean;
+  onToggleHostMonitor?: (hostId: string, enabled: boolean) => void;
   onSelectHost: (hostId: string | null) => void;
   onConnectHostTerminal: (host: HostEntry) => void;
   /** Omitted on mobile, where local terminals are disabled */
@@ -360,6 +362,8 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
   resources,
   metricsMap,
   selectedHostId,
+  localMonitorEnabled = true,
+  onToggleHostMonitor,
   onSelectHost,
   onConnectHostTerminal,
   onOpenLocalTerminal,
@@ -367,6 +371,32 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
   onOpenDockerManager,
   onOpenSftpManager,
 }) => {
+  const renderMonitorSwitch = (hostId: string, enabled: boolean) => (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={enabled}
+      aria-label={enabled ? "Disable auto-update monitor" : "Enable auto-update monitor"}
+      title={
+        enabled
+          ? "Auto-update monitor: On (Click to turn off)"
+          : "Auto-update monitor: Off (Click to turn on)"
+      }
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggleHostMonitor?.(hostId, !enabled);
+      }}
+      className={`relative inline-flex h-5 w-9 shrink-0 items-center cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ${
+        enabled ? "bg-primary" : "bg-secondary/90"
+      }`}
+    >
+      <span
+        className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-xs transition duration-200 ${
+          enabled ? "translate-x-4" : "translate-x-0"
+        }`}
+      />
+    </button>
+  );
   const [selectedTagId, setSelectedTagId] = useState<string>("ALL");
   const [displayStyle, setDisplayStyle] = useState<DashboardDisplayStyle>(() => {
     try {
@@ -397,7 +427,17 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
     useState<DockerFullSnapshot | null>(null);
   const [killingPid, setKillingPid] = useState<number | null>(null);
 
-  const selectedMetrics = selectedHostId ? metricsMap[selectedHostId] : null;
+  const selectedHostObj =
+    !selectedHostId || selectedHostId === "local"
+      ? null
+      : hosts.find((h) => h.id === selectedHostId) ?? null;
+  const isSelectedAutoUpdate = !selectedHostId
+    ? false
+    : selectedHostId === "local"
+      ? localMonitorEnabled
+      : selectedHostObj?.showStatus !== false;
+  const selectedMetrics =
+    selectedHostId && isSelectedAutoUpdate ? metricsMap[selectedHostId] : null;
 
   // Record load history when metrics update
   useEffect(() => {
@@ -429,7 +469,7 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
   }, []);
 
   useEffect(() => {
-    if (!selectedHostId) {
+    if (!selectedHostId || !isSelectedAutoUpdate) {
       setDetailDockerSnap(null);
       return;
     }
@@ -438,7 +478,7 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
       refreshDetailDocker(selectedHostId);
     }, 6000);
     return () => clearInterval(timer);
-  }, [selectedHostId, refreshDetailDocker]);
+  }, [selectedHostId, isSelectedAutoUpdate, refreshDetailDocker]);
 
   const handleKillProcess = async (pid: number) => {
     if (!selectedHostId) return;
@@ -487,7 +527,10 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
   // Build unified machine cards list (Localhost + configured SSH Hosts)
   const totalMachinesCount = filteredHosts.length + 1; // +1 for Localhost
   const onlineMachinesCount =
-    1 + filteredHosts.filter((h) => Boolean(metricsMap[h.id])).length;
+    (localMonitorEnabled && Boolean(metricsMap["local"]) ? 1 : 0) +
+    filteredHosts.filter(
+      (h) => h.showStatus !== false && Boolean(metricsMap[h.id]),
+    ).length;
   const offlineMachinesCount = Math.max(
     0,
     totalMachinesCount - onlineMachinesCount,
@@ -497,10 +540,7 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
   // DETAIL MONITOR VIEW (Matches Reference Screenshots 1 & 2: HRM-PROD-ELS)
   // ============================================================================
   if (selectedHostId) {
-    const hostObj =
-      selectedHostId === "local"
-        ? null
-        : hosts.find((h) => h.id === selectedHostId) ?? null;
+    const hostObj = selectedHostObj;
     const displayName =
       selectedHostId === "local"
         ? "Localhost (macOS)"
@@ -539,6 +579,8 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
           </button>
 
           <div className="flex items-center gap-2">
+            {renderMonitorSwitch(selectedHostId, isSelectedAutoUpdate)}
+
             {(selectedHostId !== "local" || onOpenLocalTerminal) && (
               <button
                 type="button"
@@ -595,9 +637,25 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                   <h1 className="text-lg font-bold tracking-tight text-foreground">
                     {displayName}
                   </h1>
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    {m ? "Live Telemetry" : "Connecting Probe..."}
+                  <span
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium border ${
+                      !isSelectedAutoUpdate
+                        ? "bg-secondary/80 text-muted-foreground border-border"
+                        : "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
+                    }`}
+                  >
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${
+                        !isSelectedAutoUpdate
+                          ? "bg-muted-foreground/50"
+                          : "bg-emerald-400 animate-pulse"
+                      }`}
+                    />
+                    {!isSelectedAutoUpdate
+                      ? "Auto-update Off"
+                      : m
+                        ? "Live Telemetry"
+                        : "Connecting Probe..."}
                   </span>
                 </div>
                 <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground">
@@ -1153,7 +1211,7 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
   // ============================================================================
   // DASHBOARD OVERVIEW MODE (Matches Reference Screenshot 7)
   // ============================================================================
-  const localMetrics = metricsMap["local"];
+  const localMetrics = localMonitorEnabled ? metricsMap["local"] : undefined;
   const localMemPct =
     localMetrics && localMetrics.memTotalMb > 0
       ? (localMetrics.memUsedMb / localMetrics.memTotalMb) * 100
@@ -1180,9 +1238,11 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
       hostObj: null as HostEntry | null,
       metrics: localMetrics,
       memPct: localMemPct,
+      autoUpdate: localMonitorEnabled,
     },
     ...filteredHosts.map((host) => {
-      const m = metricsMap[host.id];
+      const autoUpdate = host.showStatus !== false;
+      const m = autoUpdate ? metricsMap[host.id] : undefined;
       const memPct =
         m && m.memTotalMb > 0 ? (m.memUsedMb / m.memTotalMb) * 100 : 0;
       return {
@@ -1193,6 +1253,7 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
         hostObj: host,
         metrics: m,
         memPct,
+        autoUpdate,
       };
     }),
   ];
@@ -1359,19 +1420,22 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                   </div>
                 </div>
 
-                {onOpenLocalTerminal && (
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onOpenLocalTerminal();
-                    }}
-                    title="Open Local Terminal"
-                    className="p-2 rounded-xl bg-secondary/90 hover:bg-primary hover:text-primary-foreground text-muted-foreground transition-colors cursor-pointer"
-                  >
-                    <TerminalIcon className="w-4 h-4" />
-                  </button>
-                )}
+                <div className="flex items-center gap-2 shrink-0">
+                  {renderMonitorSwitch("local", localMonitorEnabled)}
+                  {onOpenLocalTerminal && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenLocalTerminal();
+                      }}
+                      title="Open Local Terminal"
+                      className="p-2 rounded-xl bg-secondary/90 hover:bg-primary hover:text-primary-foreground text-muted-foreground transition-colors cursor-pointer"
+                    >
+                      <TerminalIcon className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
               </div>
 
               <div className="space-y-1.5 text-xs border-t border-border/60 pt-3">
@@ -1400,7 +1464,11 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                 <div className="flex items-center justify-between">
                   <span className="text-muted-foreground">Uptime</span>
                   <span className="font-mono font-semibold text-foreground">
-                    {formatUptime(localMetrics?.uptimeSeconds)}
+                    {localMetrics
+                      ? formatUptime(localMetrics.uptimeSeconds)
+                      : localMonitorEnabled
+                        ? "Connecting..."
+                        : "Auto-update off"}
                   </span>
                 </div>
               </div>
@@ -1452,7 +1520,8 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
 
             {/* 2. Configured Remote SSH Machine Cards */}
             {filteredHosts.map((host) => {
-              const m = metricsMap[host.id];
+              const autoUpdate = host.showStatus !== false;
+              const m = autoUpdate ? metricsMap[host.id] : undefined;
               const memPct =
                 m && m.memTotalMb > 0 ? (m.memUsedMb / m.memTotalMb) * 100 : 0;
 
@@ -1477,17 +1546,20 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                       </div>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onConnectHostTerminal(host);
-                      }}
-                      title="Connect SSH Terminal"
-                      className="p-2 rounded-xl bg-secondary/90 hover:bg-primary hover:text-primary-foreground text-muted-foreground transition-colors cursor-pointer"
-                    >
-                      <TerminalIcon className="w-4 h-4" />
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {renderMonitorSwitch(host.id, autoUpdate)}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onConnectHostTerminal(host);
+                        }}
+                        title="Connect SSH Terminal"
+                        className="p-2 rounded-xl bg-secondary/90 hover:bg-primary hover:text-primary-foreground text-muted-foreground transition-colors cursor-pointer"
+                      >
+                        <TerminalIcon className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
 
                   <div className="space-y-1.5 text-xs border-t border-border/60 pt-3">
@@ -1512,7 +1584,11 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                     <div className="flex items-center justify-between">
                       <span className="text-muted-foreground">Uptime</span>
                       <span className="font-mono font-semibold text-foreground">
-                        {m ? formatUptime(m.uptimeSeconds) : "Click to Monitor"}
+                        {m
+                          ? formatUptime(m.uptimeSeconds)
+                          : autoUpdate
+                            ? "Connecting..."
+                            : "Auto-update off"}
                       </span>
                     </div>
                   </div>
@@ -1611,7 +1687,8 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-1 shrink-0">
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {renderMonitorSwitch(row.id, row.autoUpdate)}
                       {(!row.isLocal || onOpenLocalTerminal) && (
                         <button
                           type="button"
@@ -1694,7 +1771,11 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
 
                   <div className="flex items-center justify-between pt-2 border-t border-border/50 text-[10.5px] font-mono text-muted-foreground">
                     <span>
-                      {m ? formatUptime(m.uptimeSeconds) : "Standby"}
+                      {m
+                        ? formatUptime(m.uptimeSeconds)
+                        : row.autoUpdate
+                          ? "Connecting..."
+                          : "Auto-update off"}
                     </span>
                     <span className="inline-flex items-center gap-2">
                       <span className="text-emerald-400">
@@ -1792,7 +1873,9 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                         <div>
                           {m
                             ? `${m.cpuCores}c • ${formatUptime(m.uptimeSeconds)}`
-                            : "Click to monitor"}
+                            : row.autoUpdate
+                              ? "Connecting..."
+                              : "Auto-update off"}
                         </div>
                       </td>
 
@@ -1861,7 +1944,8 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                         className="py-2.5 px-4 text-right"
                         onClick={(e) => e.stopPropagation()}
                       >
-                        <div className="inline-flex items-center justify-end gap-1">
+                        <div className="inline-flex items-center justify-end gap-1.5">
+                          {renderMonitorSwitch(row.id, row.autoUpdate)}
                           {(!row.isLocal || onOpenLocalTerminal) && (
                             <button
                               type="button"

@@ -367,68 +367,139 @@ export default function App() {
     return "localhost";
   }, [activeLeaf]);
 
-  // Determine which host (if any) needs live telemetry right now:
-  // - If viewing Dashboard overview: poll "local" for the Localhost card
-  // - If inspecting a specific machine in Dashboard Detail Monitor: poll `inspectedHostId`
+  const [localMonitorEnabled, setLocalMonitorEnabled] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("ssh-box:local-monitor-enabled") !== "false";
+    } catch {
+      return true;
+    }
+  });
+
+  const handleToggleHostMonitor = useCallback(
+    async (hostId: string, enabled: boolean) => {
+      if (hostId === "local") {
+        setLocalMonitorEnabled(enabled);
+        try {
+          localStorage.setItem(
+            "ssh-box:local-monitor-enabled",
+            String(enabled),
+          );
+        } catch {
+          // ignore
+        }
+        return;
+      }
+      const target = hosts.find((h) => h.id === hostId);
+      if (!target) return;
+      const updatedHost: HostEntry = { ...target, showStatus: enabled };
+      setHosts((prev) =>
+        prev.map((h) => (h.id === hostId ? updatedHost : h)),
+      );
+      try {
+        const saved = await invoke<HostEntry[]>("save_host", {
+          host: updatedHost,
+          secret: null,
+        });
+        setHosts(saved);
+      } catch {
+        // keep optimistic state if save fails
+      }
+    },
+    [hosts],
+  );
+
+  // Determine which hosts need live telemetry right now:
+  // - If viewing Dashboard: automatically poll all machines whose auto-update switch is enabled
+  //   (without requiring tap-to-connect)
   // - If inside Terminal view AND `telemetryDrawerOpen` is true: poll `activeTerminalHostId`
-  const monitoredHostId = useMemo(() => {
+  const monitoredHostIds = useMemo(() => {
     if (workspaceView === "dashboard") {
-      return inspectedHostId ?? "local";
+      const ids: string[] = [];
+      if (localMonitorEnabled) {
+        ids.push("local");
+      }
+      for (const h of hosts) {
+        if (h.showStatus !== false) {
+          ids.push(h.id);
+        }
+      }
+      return ids;
     }
     if (workspaceView === "terminal" && telemetryDrawerOpen && activeLeaf) {
       if (activeLeaf.kind === "ssh" && activeLeaf.status !== "connected") {
-        return null;
+        return [];
       }
-      return activeTerminalHostId;
+      return [activeTerminalHostId];
     }
-    return null;
+    return [];
   }, [
     workspaceView,
-    inspectedHostId,
+    localMonitorEnabled,
+    hosts,
     telemetryDrawerOpen,
     activeLeaf,
     activeTerminalHostId,
   ]);
 
+  const activeSubsRef = useRef<Map<string, number>>(new Map());
+
   useEffect(() => {
-    if (!monitoredHostId) {
-      return;
+    const targetSet = new Set(monitoredHostIds);
+    const intervalSecs = appSettings.dashboardRefreshSecs;
+    const currentSubs = activeSubsRef.current;
+
+    for (const [hostId, prevInterval] of Array.from(currentSubs.entries())) {
+      if (!targetSet.has(hostId) || prevInterval !== intervalSecs) {
+        currentSubs.delete(hostId);
+        invoke("unsubscribe_telemetry", { hostId }).catch(() => undefined);
+      }
     }
 
-    const channel = new Channel<ServerMetrics>();
-    channel.onmessage = (m) => {
-      setMetricsMap((prev) => ({ ...prev, [m.hostId]: m }));
-      setCpuHistoryMap((prev) => ({
-        ...prev,
-        [m.hostId]: [...(prev[m.hostId] ?? []).slice(-29), m.cpuPercent],
-      }));
-      const memPct =
-        m.memTotalMb > 0 ? (m.memUsedMb / m.memTotalMb) * 100 : 0;
-      setMemHistoryMap((prev) => ({
-        ...prev,
-        [m.hostId]: [...(prev[m.hostId] ?? []).slice(-29), memPct],
-      }));
-      setRxHistoryMap((prev) => ({
-        ...prev,
-        [m.hostId]: [...(prev[m.hostId] ?? []).slice(-29), m.netRxKbps],
-      }));
-      setTxHistoryMap((prev) => ({
-        ...prev,
-        [m.hostId]: [...(prev[m.hostId] ?? []).slice(-29), m.netTxKbps],
-      }));
-    };
+    for (const hostId of targetSet) {
+      if (currentSubs.has(hostId)) continue;
+      currentSubs.set(hostId, intervalSecs);
 
-    invoke("subscribe_telemetry", {
-      hostId: monitoredHostId,
-      onMetrics: channel,
-    }).catch(() => undefined);
+      const channel = new Channel<ServerMetrics>();
+      channel.onmessage = (m) => {
+        if (!activeSubsRef.current.has(m.hostId)) return;
+        setMetricsMap((prev) => ({ ...prev, [m.hostId]: m }));
+        setCpuHistoryMap((prev) => ({
+          ...prev,
+          [m.hostId]: [...(prev[m.hostId] ?? []).slice(-29), m.cpuPercent],
+        }));
+        const memPct =
+          m.memTotalMb > 0 ? (m.memUsedMb / m.memTotalMb) * 100 : 0;
+        setMemHistoryMap((prev) => ({
+          ...prev,
+          [m.hostId]: [...(prev[m.hostId] ?? []).slice(-29), memPct],
+        }));
+        setRxHistoryMap((prev) => ({
+          ...prev,
+          [m.hostId]: [...(prev[m.hostId] ?? []).slice(-29), m.netRxKbps],
+        }));
+        setTxHistoryMap((prev) => ({
+          ...prev,
+          [m.hostId]: [...(prev[m.hostId] ?? []).slice(-29), m.netTxKbps],
+        }));
+      };
 
+      invoke("subscribe_telemetry", {
+        hostId,
+        intervalSecs,
+        onMetrics: channel,
+      }).catch(() => undefined);
+    }
+  }, [monitoredHostIds, appSettings.dashboardRefreshSecs]);
+
+  useEffect(() => {
+    const currentSubs = activeSubsRef.current;
     return () => {
-      invoke("unsubscribe_telemetry", { hostId: monitoredHostId }).catch(
-        () => undefined,
-      );
+      for (const hostId of Array.from(currentSubs.keys())) {
+        invoke("unsubscribe_telemetry", { hostId }).catch(() => undefined);
+      }
+      currentSubs.clear();
     };
-  }, [monitoredHostId]);
+  }, []);
 
   const handleOpenLocalTab = useCallback(() => {
     const leaf = createLocalLeaf("Local Shell");
@@ -1210,6 +1281,8 @@ export default function App() {
               metricsMap={metricsMap}
               selectedHostId={inspectedHostId}
               appSettings={appSettings}
+              localMonitorEnabled={localMonitorEnabled}
+              onToggleHostMonitor={handleToggleHostMonitor}
               onSelectHost={(hostId) => setInspectedHostId(hostId)}
               onConnectHostTerminal={handleConnectHostTab}
               onOpenLocalTerminal={openLocalTab}

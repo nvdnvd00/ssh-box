@@ -371,7 +371,8 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
   onOpenDockerManager,
   onOpenSftpManager,
 }) => {
-  const renderMonitorSwitch = (hostId: string, enabled: boolean) => (
+  // Icon toggle sized like the neighbouring action buttons; `small` matches the compact/list rows.
+  const renderMonitorSwitch = (hostId: string, enabled: boolean, small = false) => (
     <button
       type="button"
       role="switch"
@@ -386,15 +387,15 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
         e.stopPropagation();
         onToggleHostMonitor?.(hostId, !enabled);
       }}
-      className={`relative inline-flex h-5 w-9 shrink-0 items-center cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ${
-        enabled ? "bg-primary" : "bg-secondary/90"
+      className={`shrink-0 transition-colors cursor-pointer ${
+        small ? "p-1.5 rounded-lg" : "p-2 rounded-xl"
+      } ${
+        enabled
+          ? "bg-primary/15 text-primary ring-1 ring-inset ring-primary/40 hover:bg-primary/25"
+          : "bg-secondary/90 text-muted-foreground/60 hover:bg-accent hover:text-foreground"
       }`}
     >
-      <span
-        className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-xs transition duration-200 ${
-          enabled ? "translate-x-4" : "translate-x-0"
-        }`}
-      />
+      <Activity className={small ? "w-3.5 h-3.5" : "w-4 h-4"} />
     </button>
   );
   const [selectedTagId, setSelectedTagId] = useState<string>("ALL");
@@ -1688,7 +1689,7 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                     </div>
 
                     <div className="flex items-center gap-1.5 shrink-0">
-                      {renderMonitorSwitch(row.id, row.autoUpdate)}
+                      {renderMonitorSwitch(row.id, row.autoUpdate, true)}
                       {(!row.isLocal || onOpenLocalTerminal) && (
                         <button
                           type="button"
@@ -1945,7 +1946,7 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                         onClick={(e) => e.stopPropagation()}
                       >
                         <div className="inline-flex items-center justify-end gap-1.5">
-                          {renderMonitorSwitch(row.id, row.autoUpdate)}
+                          {renderMonitorSwitch(row.id, row.autoUpdate, true)}
                           {(!row.isLocal || onOpenLocalTerminal) && (
                             <button
                               type="button"

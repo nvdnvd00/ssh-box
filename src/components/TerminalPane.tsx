@@ -27,6 +27,7 @@ import {
   ThemeConfig,
 } from "../themes";
 import { getI18n } from "../i18n";
+import { isApplePlatform, matchShortcut, withShortcutHint } from "../shortcuts";
 
 interface TerminalPaneProps {
   leaf: LeafPaneNode;
@@ -54,8 +55,6 @@ interface TerminalPaneProps {
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
-const isApplePlatform =
-  typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.platform);
 
 function stripAnsiCodes(raw: string): string {
   // eslint-disable-next-line no-control-regex
@@ -472,35 +471,50 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     el.addEventListener("paste", onPasteReset, true);
 
     term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
-      if (ev.metaKey) {
+      // A matched shortcut never reaches xterm. Terminal actions run here; returning false
+      // doesn't stop propagation, so App-level actions still reach App's window listener.
+      const action = matchShortcut(ev);
+      if (action) {
         if (ev.type === "keydown") {
-          const key = ev.key.toLowerCase();
-          if (key === "f") {
-            ev.preventDefault();
-            setSearchOpen(true);
-            setTimeout(() => searchInputRef.current?.focus(), 20);
-            return false;
-          }
-          if (
-            key === "d" ||
-            key === "w" ||
-            key === "t" ||
-            key === "i" ||
-            key === "k" ||
-            key === ","
-          ) {
-            return false;
-          }
-          if (key === "c" && term.hasSelection()) {
-            navigator.clipboard
-              .writeText(term.getSelection())
-              .catch(() => undefined);
-            term.clearSelection();
-            return false;
+          switch (action) {
+            case "copy":
+              ev.preventDefault();
+              if (term.hasSelection()) {
+                navigator.clipboard
+                  .writeText(term.getSelection())
+                  .catch(() => undefined);
+                term.clearSelection();
+              }
+              break;
+            case "selectAll":
+              ev.preventDefault();
+              term.selectAll();
+              break;
+            case "find":
+              ev.preventDefault();
+              setSearchOpen(true);
+              setTimeout(() => searchInputRef.current?.focus(), 20);
+              break;
+            case "clear":
+              ev.preventDefault();
+              term.clear();
+              break;
+            case "lineStart":
+            case "lineEnd":
+            case "deleteLine":
+              ev.preventDefault();
+              resetTextareaBuffer(true);
+              // readline: ^A start of line, ^E end of line, ^U kill to start
+              sendRawStringToPty(
+                { lineStart: "\x01", lineEnd: "\x05", deleteLine: "\x15" }[action],
+              );
+              break;
+            // "paste" keeps the browser default: the OS pastes into xterm's textarea.
           }
         }
-        return true;
+        return false;
       }
+      if (ev.metaKey) return true;
 
       // Windows/Linux have no Cmd key: like Windows Terminal, Ctrl(+Shift)+C copies when text is
       // selected (otherwise ^C reaches the shell) and Ctrl(+Shift)+V pastes. Returning false skips
@@ -909,7 +923,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
                 return next;
               });
             }}
-            title={`${t.termSearchPlaceholder} (⌘F)`}
+            title={withShortcutHint(t.termSearchPlaceholder, "find")}
             className={`p-1 rounded-md transition-colors cursor-pointer ${
               searchOpen
                 ? "bg-primary/20 text-primary"
@@ -974,7 +988,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
               e.stopPropagation();
               onSplitVertical();
             }}
-            title={`${t.termSplitVertical} (⌘D)`}
+            title={withShortcutHint(t.termSplitVertical, "splitVertical")}
             className="p-1 hover:bg-accent hover:text-foreground rounded-md transition-colors cursor-pointer"
           >
             <Columns className="w-3 h-3" />
@@ -985,7 +999,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
               e.stopPropagation();
               onSplitHorizontal();
             }}
-            title={`${t.termSplitHorizontal} (⌘⇧D)`}
+            title={withShortcutHint(t.termSplitHorizontal, "splitHorizontal")}
             className="p-1 hover:bg-accent hover:text-foreground rounded-md transition-colors cursor-pointer"
           >
             <Rows className="w-3 h-3" />
@@ -996,7 +1010,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
               e.stopPropagation();
               onClosePane();
             }}
-            title={`${t.termClosePane} (⌘W)`}
+            title={withShortcutHint(t.termClosePane, "closePane")}
             className="p-1 hover:bg-rose-500/20 hover:text-rose-400 rounded-md transition-colors cursor-pointer"
           >
             <X className="w-3 h-3" />

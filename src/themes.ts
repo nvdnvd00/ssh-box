@@ -1,4 +1,5 @@
 import type { ITheme } from "@xterm/xterm";
+import { parseShortcutOverrides } from "./shortcuts";
 
 export type AppThemeId =
   | "zinc-dark"
@@ -65,6 +66,8 @@ export interface AppSettingsConfig {
   localShell: string;
   tmuxSshEnabled: boolean;
   tmuxLocalEnabled: boolean;
+  /** Shortcut id → combo the user picked; "" = unbound. Absent ids use the platform default. */
+  shortcuts: Record<string, string>;
 }
 
 export interface ThemeConfig extends AppThemeConfig, TerminalThemeConfig {}
@@ -507,6 +510,7 @@ export const DEFAULT_APP_SETTINGS: AppSettingsConfig = {
   localShell: "",
   tmuxSshEnabled: false,
   tmuxLocalEnabled: false,
+  shortcuts: {},
 };
 
 export const DEFAULT_THEME_CONFIG: ThemeConfig = {
@@ -664,6 +668,7 @@ export function parseAppSettings(
       typeof parsed.tmuxLocalEnabled === "boolean"
         ? parsed.tmuxLocalEnabled
         : DEFAULT_APP_SETTINGS.tmuxLocalEnabled,
+    shortcuts: parseShortcutOverrides(parsed.shortcuts),
   };
 }
 

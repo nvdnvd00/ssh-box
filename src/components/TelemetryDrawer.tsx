@@ -22,6 +22,7 @@ import {
 import { ServerMetrics } from "../types";
 import { ACCENT_COLORS, AccentColorId } from "../themes";
 import { SelectField } from "./SelectField";
+import { withShortcutHint } from "../shortcuts";
 
 interface TelemetryDrawerProps {
   isOpen: boolean;
@@ -264,7 +265,7 @@ export const TelemetryDrawer: React.FC<TelemetryDrawerProps> = ({
             <button
               type="button"
               onClick={onClose}
-              title="Close Monitor (Cmd+I)"
+              title={withShortcutHint("Close Monitor", "toggleMonitor")}
               className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
             >
               <X className="w-3.5 h-3.5" />

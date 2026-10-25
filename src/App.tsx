@@ -45,6 +45,7 @@ import {
 import {
   applyAppThemeToRoot,
   AppSettingsConfig,
+  DEFAULT_TERMINAL_THEME,
   loadAppSettings,
   loadThemeConfig,
   parseAppSettings,
@@ -58,6 +59,12 @@ import {
   getI18n,
   interpolateSnippetVariables,
 } from "./i18n";
+import {
+  matchShortcut,
+  setShortcutOverrides,
+  shortcutHint,
+  withShortcutHint,
+} from "./shortcuts";
 import { SplitWorkspace } from "./components/SplitWorkspace";
 import { TelemetryDrawer } from "./components/TelemetryDrawer";
 import { ResourcesWorkspace } from "./components/ResourcesWorkspace";
@@ -793,57 +800,113 @@ export default function App() {
     [sendCommandToTargetPanes],
   );
 
-  // Global keyboard shortcuts
+  // Runs during render (idempotent) so hints rendered below already show the new keys.
+  useMemo(
+    () => setShortcutOverrides(appSettings.shortcuts),
+    [appSettings.shortcuts],
+  );
+
+  // Global keyboard shortcuts. Terminal-only actions (copy, find, clear...) run in TerminalPane.
   useEffect(() => {
+    const zoom = (delta: number | null) =>
+      setThemeConfig((prev) => ({
+        ...prev,
+        fontSize:
+          delta === null
+            ? DEFAULT_TERMINAL_THEME.fontSize
+            : Math.max(10, Math.min(22, prev.fontSize + delta)),
+      }));
+    const showTab = (index: number) => {
+      const tab = tabs[(index + tabs.length) % tabs.length];
+      if (!tab) return;
+      setActiveTabId(tab.id);
+      setWorkspaceView("terminal");
+    };
+    const focusPane = (step: number) => {
+      if (!activeTab || !activeLeaf || workspaceView !== "terminal") return;
+      const leaves = collectLeaves(activeTab.root);
+      const i = leaves.findIndex((l) => l.paneId === activeLeaf.paneId);
+      handleFocusPane(leaves[(i + step + leaves.length) % leaves.length].paneId);
+    };
+    const tabIndex = tabs.findIndex((t) => t.id === activeTab?.id);
+
     const onKeyDown = (e: KeyboardEvent) => {
-      if (!e.metaKey) return;
-      const key = e.key.toLowerCase();
+      const action = matchShortcut(e);
+      if (!action) return;
 
-      if (key === "k") {
-        e.preventDefault();
-        setCommandPaletteOpen((prev) => !prev);
-        setCommandPaletteQuery("");
-        return;
+      switch (action) {
+        case "zoomIn":
+          zoom(1);
+          break;
+        case "zoomOut":
+          zoom(-1);
+          break;
+        case "zoomReset":
+          zoom(null);
+          break;
+        case "commandPalette":
+          setCommandPaletteOpen((prev) => !prev);
+          setCommandPaletteQuery("");
+          break;
+        case "splitVertical":
+        case "splitHorizontal":
+          if (activeLeaf && workspaceView === "terminal") {
+            handleSplitPane(
+              activeLeaf.paneId,
+              action === "splitVertical" ? "vertical" : "horizontal",
+              activeLeaf,
+            );
+          }
+          break;
+        case "closePane":
+          if (activeLeaf && workspaceView === "terminal") {
+            handleClosePane(activeLeaf.paneId);
+          }
+          break;
+        case "newLocalTab":
+          openLocalTab?.();
+          break;
+        case "nextTab":
+          showTab(tabIndex + 1);
+          break;
+        case "prevTab":
+          showTab(tabIndex - 1);
+          break;
+        case "nextPane":
+          focusPane(1);
+          break;
+        case "prevPane":
+          focusPane(-1);
+          break;
+        case "toggleMonitor":
+          if (workspaceView === "terminal") {
+            setTelemetryDrawerOpen((prev) => !prev);
+          }
+          break;
+        case "openSettings":
+          setWorkspaceView((prev) =>
+            prev === "settings" ? beforeSettingsViewRef.current : "settings",
+          );
+          break;
+        default:
+          if (!action.startsWith("goToTab")) return;
+          if (Number(action.slice(7)) <= tabs.length) {
+            showTab(Number(action.slice(7)) - 1);
+          }
       }
-
-      if (key === "d" && !e.shiftKey) {
-        e.preventDefault();
-        if (activeLeaf && workspaceView === "terminal") {
-          handleSplitPane(activeLeaf.paneId, "vertical", activeLeaf);
-        }
-      } else if (key === "d" && e.shiftKey) {
-        e.preventDefault();
-        if (activeLeaf && workspaceView === "terminal") {
-          handleSplitPane(activeLeaf.paneId, "horizontal", activeLeaf);
-        }
-      } else if (key === "w") {
-        e.preventDefault();
-        if (activeLeaf && workspaceView === "terminal") {
-          handleClosePane(activeLeaf.paneId);
-        }
-      } else if (key === "t") {
-        e.preventDefault();
-        openLocalTab?.();
-      } else if (key === "i") {
-        e.preventDefault();
-        if (workspaceView === "terminal") {
-          setTelemetryDrawerOpen((prev) => !prev);
-        }
-      } else if (key === ",") {
-        e.preventDefault();
-        setWorkspaceView((prev) =>
-          prev === "settings" ? beforeSettingsViewRef.current : "settings",
-        );
-      }
+      e.preventDefault();
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
+    tabs,
+    activeTab,
     activeLeaf,
     workspaceView,
     handleSplitPane,
     handleClosePane,
+    handleFocusPane,
     openLocalTab,
   ]);
 
@@ -1006,7 +1069,7 @@ export default function App() {
               setCommandPaletteQuery("");
               setCommandPaletteOpen(true);
             }}
-            title={t.quickConnectBtn}
+            title={withShortcutHint(t.quickConnectBtn, "commandPalette")}
             className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors cursor-pointer shrink-0"
           >
             <Plus className="w-4 h-4" />
@@ -1071,7 +1134,10 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setTelemetryDrawerOpen((p) => !p)}
-                title="Toggle Side Monitor Drawer (Cmd+I)"
+                title={withShortcutHint(
+                  "Toggle Side Monitor Drawer",
+                  "toggleMonitor",
+                )}
                 className={toolBtnClass(telemetryDrawerOpen)}
               >
                 <Activity className="w-3.5 h-3.5" />
@@ -1104,13 +1170,15 @@ export default function App() {
               setCommandPaletteQuery("");
               setCommandPaletteOpen(true);
             }}
-            title={t.quickConnectBtn}
+            title={withShortcutHint(t.quickConnectBtn, "commandPalette")}
             className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-secondary/70 hover:bg-accent text-xs font-medium text-muted-foreground hover:text-foreground border border-border/70 transition-all cursor-pointer"
           >
             <Search className="w-3.5 h-3.5 text-primary" />
-            <kbd className="px-1.5 py-0.5 rounded-md bg-background/80 border border-border text-[10px] font-mono text-muted-foreground">
-              ⌘K
-            </kbd>
+            {shortcutHint("commandPalette") && (
+              <kbd className="px-1.5 py-0.5 rounded-md bg-background/80 border border-border text-[10px] font-mono text-muted-foreground">
+                {shortcutHint("commandPalette")}
+              </kbd>
+            )}
           </button>
         </div>
       </header>
@@ -1227,7 +1295,7 @@ export default function App() {
                     <span>{t.navSettings}</span>
                   </span>
                   <kbd className="text-[10px] font-mono text-muted-foreground">
-                    ⌘,
+                    {shortcutHint("openSettings")}
                   </kbd>
                 </button>
               </div>
@@ -1623,9 +1691,11 @@ export default function App() {
                       <TerminalIcon className="w-4 h-4 text-emerald-400" />
                       {t.newLocalShell}
                     </span>
-                    <kbd className="px-1.5 py-0.5 rounded-md bg-secondary text-[10px] font-mono text-muted-foreground">
-                      ⌘T
-                    </kbd>
+                    {shortcutHint("newLocalTab") && (
+                      <kbd className="px-1.5 py-0.5 rounded-md bg-secondary text-[10px] font-mono text-muted-foreground">
+                        {shortcutHint("newLocalTab")}
+                      </kbd>
+                    )}
                   </button>
                 </div>
               )}

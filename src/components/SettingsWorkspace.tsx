@@ -43,6 +43,7 @@ import {
 import { getI18n } from "../i18n";
 import { MachineTag, ResourcesStoreData } from "../types";
 import { SelectField } from "./SelectField";
+import { ShortcutSettings } from "./ShortcutSettings";
 
 export type SettingsTabId =
   | "general"
@@ -1512,30 +1513,11 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
 
             {/* SHORTCUTS TAB */}
             {activeTab === "shortcuts" && (
-              <section className="space-y-4">
-                <div className="rounded-2xl border border-border/80 bg-card/65 divide-y divide-border/60 overflow-hidden">
-                  <div className="px-4 py-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                    Keyboard Shortcuts
-                  </div>
-                  {[
-                    { label: "Open Settings", keys: "⌘ ," },
-                    { label: "Split Terminal Vertically", keys: "⌘ D" },
-                    { label: "Split Terminal Horizontally", keys: "⇧ ⌘ D" },
-                    { label: "Close Active Terminal Pane", keys: "⌘ W" },
-                    { label: "Open Local Terminal Session", keys: "⌘ T" },
-                  ].map((sc) => (
-                    <div
-                      key={sc.label}
-                      className="flex items-center justify-between px-4 py-3 text-[13px]"
-                    >
-                      <span className="text-foreground">{sc.label}</span>
-                      <kbd className="px-2.5 py-1 rounded-lg bg-secondary border border-border font-mono text-xs text-muted-foreground">
-                        {sc.keys}
-                      </kbd>
-                    </div>
-                  ))}
-                </div>
-              </section>
+              <ShortcutSettings
+                lang={lang}
+                overrides={appSettings.shortcuts}
+                onChangeAppSettings={onChangeAppSettings}
+              />
             )}
 
             {/* ABOUT TAB */}

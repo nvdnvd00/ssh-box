@@ -122,7 +122,7 @@ const VI_STRINGS: AppI18nStrings = {
   navSftp: "Truyền tệp SFTP",
   navTerminal: "Terminal",
   navSettings: "Cài đặt",
-  quickConnectBtn: "Tìm & Kết nối nhanh (⌘K)",
+  quickConnectBtn: "Tìm & Kết nối nhanh",
   newLocalShell: "Mở Terminal nội bộ",
 
   cmdPalettePlaceholder:
@@ -229,7 +229,7 @@ const EN_STRINGS: AppI18nStrings = {
   navSftp: "SFTP Browser",
   navTerminal: "Terminal",
   navSettings: "Settings",
-  quickConnectBtn: "Quick Connect & Actions (⌘K)",
+  quickConnectBtn: "Quick Connect & Actions",
   newLocalShell: "New Local Shell",
 
   cmdPalettePlaceholder:

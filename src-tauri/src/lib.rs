@@ -605,6 +605,7 @@ async fn close_pane(state: State<'_, AppState>, pane_id: String) -> Result<(), S
 async fn subscribe_telemetry(
     state: State<'_, AppState>,
     host_id: String,
+    interval_secs: Option<u64>,
     on_metrics: Channel<ServerMetrics>,
 ) -> Result<(), String> {
     let (stop_tx, stop_rx) = mpsc::channel::<()>(1);
@@ -615,7 +616,8 @@ async fn subscribe_telemetry(
         }
         stops.insert(host_id.clone(), stop_tx);
     }
-    telemetry::start_monitoring(host_id, state.ssh_pool.clone(), on_metrics, stop_rx);
+    let secs = interval_secs.unwrap_or(2).clamp(1, 60);
+    telemetry::start_monitoring(host_id, state.ssh_pool.clone(), secs, on_metrics, stop_rx);
     Ok(())
 }
 

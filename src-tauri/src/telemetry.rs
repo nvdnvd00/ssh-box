@@ -1191,19 +1191,25 @@ async fn probe_local_snapshot() -> Result<String, String> {
 pub fn start_monitoring(
     host_id: String,
     pool: SshPool,
+    interval_secs: u64,
     channel: Channel<ServerMetrics>,
     mut stop_rx: tokio::sync::mpsc::Receiver<()>,
 ) {
     tokio::spawn(async move {
         let mut prev_counters: Option<RawCpuCounters> = None;
         let mut last_tick = Instant::now();
-        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_secs.clamp(1, 60)));
         let mut consecutive_failures = 0u8;
+        let mut backoff_skip = 0u8;
 
         loop {
             tokio::select! {
                 _ = stop_rx.recv() => break,
                 _ = interval.tick() => {
+                    if backoff_skip > 0 {
+                        backoff_skip -= 1;
+                        continue;
+                    }
                     let raw_res = if host_id == "local" {
                         probe_local_snapshot().await
                     } else {
@@ -1221,9 +1227,9 @@ pub fn start_monitoring(
                             break;
                         }
                     } else {
-                        consecutive_failures += 1;
+                        consecutive_failures = consecutive_failures.saturating_add(1);
                         if consecutive_failures >= 3 {
-                            break;
+                            backoff_skip = 2;
                         }
                     }
                 }

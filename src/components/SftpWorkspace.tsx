@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import {
   ArrowLeft,
@@ -192,18 +192,34 @@ export const SftpWorkspace: React.FC<SftpWorkspaceProps> = ({
     saving: boolean;
   } | null>(null);
 
-  // Sync initialRemoteHostId when prop changes
+  const remoteReqIdRef = useRef(0);
+  const hostsRef = useRef(hosts);
+  hostsRef.current = hosts;
+
+  // Sync initialRemoteHostId only when the prop itself changes
   useEffect(() => {
     if (
       initialRemoteHostId &&
       initialRemoteHostId !== "local" &&
-      hosts.some((h) => h.id === initialRemoteHostId)
+      hostsRef.current.some((h) => h.id === initialRemoteHostId)
     ) {
       setRemoteHostId(initialRemoteHostId);
-    } else if (!remoteHostId && hosts.length > 0) {
-      setRemoteHostId(hosts[0].id);
     }
-  }, [initialRemoteHostId, hosts, remoteHostId]);
+  }, [initialRemoteHostId]);
+
+  // Fallback when no valid remoteHostId is selected (e.g. initial load or deleted host)
+  useEffect(() => {
+    if (hosts.length === 0) return;
+    if (!remoteHostId || !hosts.some((h) => h.id === remoteHostId)) {
+      const preferred =
+        initialRemoteHostId &&
+        initialRemoteHostId !== "local" &&
+        hosts.some((h) => h.id === initialRemoteHostId)
+          ? initialRemoteHostId
+          : hosts[0].id;
+      setRemoteHostId(preferred);
+    }
+  }, [hosts, remoteHostId, initialRemoteHostId]);
 
   const loadLocalDir = useCallback(async (targetPath: string) => {
     setLocalLoading(true);
@@ -227,6 +243,7 @@ export const SftpWorkspace: React.FC<SftpWorkspaceProps> = ({
   const loadRemoteDir = useCallback(
     async (hostId: string, targetPath: string) => {
       if (!hostId) return;
+      const reqId = ++remoteReqIdRef.current;
       setRemoteLoading(true);
       setRemoteError(null);
       try {
@@ -234,14 +251,18 @@ export const SftpWorkspace: React.FC<SftpWorkspaceProps> = ({
           hostId,
           path: targetPath,
         });
+        if (reqId !== remoteReqIdRef.current) return;
         setRemoteCwd(res.cwd);
         setRemotePathInput(res.cwd);
         setRemoteEntries(res.entries);
         setRemoteSelectedPath(null);
       } catch (err) {
+        if (reqId !== remoteReqIdRef.current) return;
         setRemoteError(String(err));
       } finally {
-        setRemoteLoading(false);
+        if (reqId === remoteReqIdRef.current) {
+          setRemoteLoading(false);
+        }
       }
     },
     [],
@@ -256,12 +277,17 @@ export const SftpWorkspace: React.FC<SftpWorkspaceProps> = ({
       setRemoteEntries([]);
       setRemoteCwd("");
       setRemotePathInput("");
+      setRemoteSelectedPath(null);
       return;
     }
-    const hostObj = hosts.find((h) => h.id === remoteHostId);
+    const hostObj = hostsRef.current.find((h) => h.id === remoteHostId);
     const startPath = hostObj?.defaultSftpPath?.trim() || "~";
+    setRemoteEntries([]);
+    setRemoteCwd("");
+    setRemotePathInput(startPath);
+    setRemoteSelectedPath(null);
     loadRemoteDir(remoteHostId, startPath);
-  }, [remoteHostId, hosts, loadRemoteDir]);
+  }, [remoteHostId, loadRemoteDir]);
 
   const selectedLocalEntry = useMemo(
     () => localEntries.find((e) => e.path === localSelectedPath) ?? null,

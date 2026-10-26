@@ -66,6 +66,7 @@ import {
   withShortcutHint,
 } from "./shortcuts";
 import { SplitWorkspace } from "./components/SplitWorkspace";
+import { normalizeTerminalInput } from "./components/TerminalPane";
 import { TelemetryDrawer } from "./components/TelemetryDrawer";
 import { ResourcesWorkspace } from "./components/ResourcesWorkspace";
 import { DashboardWorkspace } from "./components/DashboardWorkspace";
@@ -763,7 +764,8 @@ export default function App() {
 
   const sendCommandToTargetPanes = useCallback(
     (rawCode: string) => {
-      const payload = rawCode.endsWith("\n") ? rawCode : `${rawCode}\n`;
+      const normalized = normalizeTerminalInput(rawCode);
+      const payload = normalized.endsWith("\n") ? normalized : `${normalized}\n`;
       const bytes = Array.from(new TextEncoder().encode(payload));
       const targets =
         broadcastTargetPaneIds && broadcastTargetPaneIds.length > 0

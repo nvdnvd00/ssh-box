@@ -61,12 +61,19 @@ function stripAnsiCodes(raw: string): string {
   return raw.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*(\x07|\x1b\\)/g, "");
 }
 
+export function normalizeTerminalInput(raw: string): string {
+  if (!raw) return "";
+  return raw
+    .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, " ")
+    .replace(/[\u200B\u2060\uFEFF]/g, "");
+}
+
 export function computeImeDiff(
   prevRaw: string,
   nextRaw: string,
 ): { backspaces: number; insertText: string } {
-  const prev = Array.from(prevRaw.normalize("NFC"));
-  const next = Array.from(nextRaw.normalize("NFC"));
+  const prev = Array.from(normalizeTerminalInput(prevRaw).normalize("NFC"));
+  const next = Array.from(normalizeTerminalInput(nextRaw).normalize("NFC"));
 
   let common = 0;
   const minLen = Math.min(prev.length, next.length);
@@ -341,6 +348,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
 
     const onWindowBlur = () => {
       selectionService?._removeMouseDownListeners?.();
+      resetTextareaBuffer(true);
     };
     window.addEventListener("blur", onWindowBlur);
 
@@ -356,13 +364,14 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     el.addEventListener("mouseup", onMouseUpCopy);
 
     const sendRawStringToPty = (str: string) => {
-      if (!str) return;
+      const normalized = normalizeTerminalInput(str);
+      if (!normalized) return;
       if (term.hasSelection()) {
         term.clearSelection();
       }
-      let finalStr = str;
-      if (ctrlArmedRef.current && str.length === 1) {
-        const code = str.toUpperCase().charCodeAt(0);
+      let finalStr = normalized;
+      if (ctrlArmedRef.current && normalized.length === 1) {
+        const code = normalized.toUpperCase().charCodeAt(0);
         if (code >= 64 && code <= 95) {
           finalStr = String.fromCharCode(code - 64);
         }
@@ -414,13 +423,13 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
 
       // xterm's paste handler already sent the clipboard text; Chromium (WebView2) then also
       // inserts it into the textarea, which would send it a second time.
-      if ((e as InputEvent).inputType === "insertFromPaste") {
-        term.textarea.value = "";
-        trackedInputRef.current = "";
+      const inputType = (e as InputEvent).inputType;
+      if (inputType === "insertFromPaste" || inputType === "insertFromDrop") {
+        resetTextareaBuffer(false);
         return;
       }
 
-      const rawValue = term.textarea.value;
+      const rawValue = normalizeTerminalInput(term.textarea.value);
       if (rawValue.includes("\n") || rawValue.includes("\r")) {
         const cleanValue = rawValue.replace(/[\r\n]+/g, "");
         const { backspaces, insertText } = computeImeDiff(
@@ -454,13 +463,17 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         sendRawStringToPty(payload);
       }
 
-      if (rawValue.endsWith(" ")) {
+      if (rawValue.endsWith(" ") || rawValue.endsWith("\t")) {
         trackedInputRef.current = "";
         term.textarea.value = "";
       }
     };
 
     const onPasteReset = () => {
+      resetTextareaBuffer(false);
+    };
+
+    const onContextMenuReset = () => {
       trackedInputRef.current = "";
     };
 
@@ -469,8 +482,15 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     el.addEventListener("compositionend", onCompositionEvent, true);
     el.addEventListener("input", onTextareaInput, true);
     el.addEventListener("paste", onPasteReset, true);
+    el.addEventListener("contextmenu", onContextMenuReset, true);
 
     term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
+      const isModifierOnly =
+        ev.key === "Shift" ||
+        ev.key === "Control" ||
+        ev.key === "Alt" ||
+        ev.key === "Meta";
+
       // A matched shortcut never reaches xterm. Terminal actions run here; returning false
       // doesn't stop propagation, so App-level actions still reach App's window listener.
       const action = matchShortcut(ev);
@@ -497,6 +517,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
               break;
             case "clear":
               ev.preventDefault();
+              resetTextareaBuffer(true);
               term.clear();
               break;
             case "lineStart":
@@ -509,12 +530,35 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
                 { lineStart: "\x01", lineEnd: "\x05", deleteLine: "\x15" }[action],
               );
               break;
+            case "paste":
+              resetTextareaBuffer(false);
+              break;
             // "paste" keeps the browser default: the OS pastes into xterm's textarea.
           }
         }
         return false;
       }
-      if (ev.metaKey) return true;
+      if (ev.metaKey) {
+        if (ev.type === "keydown" && !isModifierOnly) {
+          resetTextareaBuffer(true);
+        }
+        return true;
+      }
+
+      // Treat Option+Space (Alt+Space) on macOS as a standard ASCII space so it never inserts NBSP (\u00A0)
+      if (
+        ev.altKey &&
+        !ev.ctrlKey &&
+        !ev.metaKey &&
+        (ev.code === "Space" || ev.key === "\u00a0" || ev.key === " ")
+      ) {
+        if (ev.type === "keydown") {
+          ev.preventDefault();
+          resetTextareaBuffer(true);
+          sendRawStringToPty(" ");
+        }
+        return false;
+      }
 
       // Windows/Linux have no Cmd key: like Windows Terminal, Ctrl(+Shift)+C copies when text is
       // selected (otherwise ^C reaches the shell) and Ctrl(+Shift)+V pastes. Returning false skips
@@ -529,6 +573,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           return false;
         }
         if (key === "v") {
+          resetTextareaBuffer(false);
           return false;
         }
       }
@@ -550,7 +595,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         /^F([1-9]|1[0-2])$/.test(ev.code);
 
       if (ev.ctrlKey || ev.altKey || isControlOrNavCode) {
-        if (ev.type === "keydown") {
+        if (ev.type === "keydown" && !isModifierOnly) {
           resetTextareaBuffer(true);
           if (
             (ev.code === "Enter" || ev.code === "NumpadEnter") &&
@@ -651,6 +696,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       el.removeEventListener("compositionend", onCompositionEvent, true);
       el.removeEventListener("input", onTextareaInput, true);
       el.removeEventListener("paste", onPasteReset, true);
+      el.removeEventListener("contextmenu", onContextMenuReset, true);
       inputDisposable.dispose();
       binaryDisposable.dispose();
       invoke("close_pane", { paneId: leaf.paneId }).catch(() => undefined);

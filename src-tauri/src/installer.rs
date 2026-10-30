@@ -229,6 +229,135 @@ pub fn parse_scan(os: HostOs, raw: &str) -> InstallerScan {
     InstallerScan { os, managers, tools }
 }
 
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum InstallAction {
+    Install { manager: String, package: String },
+    Uninstall { manager: String, package: String },
+    EnableService { service: String },
+    InstallManager { manager: String },
+    Refresh,
+}
+
+const WINGET_FLAGS: &str = "--silent --accept-package-agreements --accept-source-agreements";
+
+fn checked<'a>(os: HostOs, manager: &str, name: &'a str) -> Result<&'a str, String> {
+    if !managers_for(os).contains(&manager) {
+        return Err(format!("manager {manager} not supported on this OS"));
+    }
+    if !valid_name(name) {
+        return Err(format!("invalid name: {name}"));
+    }
+    Ok(name)
+}
+
+pub fn action_script(os: HostOs, a: &InstallAction) -> Result<String, String> {
+    use InstallAction::*;
+    match a {
+        Install { manager, package } | Uninstall { manager, package } => {
+            let add = matches!(a, Install { .. });
+            let pkg = checked(os, manager, package)?;
+            let (q, pq) = (shq(pkg), ps_quote(pkg));
+            Ok(match (manager.as_str(), add) {
+                ("apt", true) => format!("DEBIAN_FRONTEND=noninteractive apt-get install -y {q}"),
+                ("apt", false) => format!("DEBIAN_FRONTEND=noninteractive apt-get remove -y {q}"),
+                ("dnf", true) => format!("dnf install -y {q}"),
+                ("dnf", false) => format!("dnf remove -y {q}"),
+                ("snap", true) => format!("snap install {q}"),
+                ("snap", false) => format!("snap remove {q}"),
+                ("brew", true) => format!("brew install {q}"),
+                ("brew", false) => format!("brew uninstall {q}"),
+                ("winget", true) => format!("winget install --id {pq} -e {WINGET_FLAGS}"),
+                ("winget", false) => format!("winget uninstall --id {pq} -e --silent"),
+                ("npm", true) => format!("npm install -g {}", if os == HostOs::Windows { pq } else { q }),
+                (_, _) => format!("npm uninstall -g {}", if os == HostOs::Windows { pq } else { q }),
+            })
+        }
+        EnableService { service } => {
+            if !valid_name(service) {
+                return Err(format!("invalid name: {service}"));
+            }
+            Ok(match os {
+                HostOs::Linux => format!("systemctl enable --now {}", shq(service)),
+                HostOs::Macos => format!("brew services start {}", shq(service)),
+                HostOs::Windows => {
+                    let q = ps_quote(service);
+                    format!("Set-Service -Name {q} -StartupType Automatic; Start-Service -Name {q}")
+                }
+            })
+        }
+        InstallManager { manager } => match (manager.as_str(), os) {
+            ("brew", HostOs::Macos) => Ok("NONINTERACTIVE=1 /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"".into()),
+            ("snap", HostOs::Linux) => Ok("DEBIAN_FRONTEND=noninteractive apt-get install -y snapd".into()),
+            ("npm", HostOs::Linux) => Ok("if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs npm; else dnf install -y nodejs npm; fi".into()),
+            ("npm", HostOs::Macos) => Ok("brew install node".into()),
+            ("npm", HostOs::Windows) => Ok(format!("winget install --id OpenJS.NodeJS.LTS -e {WINGET_FLAGS}")),
+            ("winget", HostOs::Windows) => Err("WINGET_MANUAL".into()),
+            _ => Err(format!("cannot install manager {manager} on this OS")),
+        },
+        Refresh => match os {
+            HostOs::Linux => Ok("if command -v apt-get >/dev/null 2>&1; then apt-get update -qq; else dnf makecache -q; fi".into()),
+            _ => Err("refresh is only supported on Linux".into()),
+        },
+    }
+}
+
+pub fn needs_root(os: HostOs, a: &InstallAction) -> bool {
+    use InstallAction::*;
+    os == HostOs::Linux
+        && match a {
+            Install { manager, .. } | Uninstall { manager, .. } => ["apt", "dnf", "snap"].contains(&manager.as_str()),
+            EnableService { .. } | Refresh | InstallManager { .. } => true,
+        }
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHit {
+    pub manager: String,
+    pub package: String,
+    pub description: String,
+}
+
+pub fn search_script(os: HostOs, present: &[String], query: &str) -> Result<String, String> {
+    if !valid_name(query) {
+        return Err(format!("invalid query: {query}"));
+    }
+    let q = shq(query);
+    let mut s = String::new();
+    for m in managers_for(os).iter().filter(|m| present.iter().any(|p| p == *m)) {
+        s += &match (*m, os) {
+            ("apt", _) => format!("apt-cache search --names-only {q} 2>/dev/null | head -n 20 | sed -E 's/^([^ ]+) - /HIT:apt:\\1:/'\n"),
+            ("dnf", _) => format!("dnf search -q {q} 2>/dev/null | grep ' : ' | head -n 20 | sed -E 's/^([^ ]+) : /HIT:dnf:\\1:/'\n"),
+            ("snap", _) => format!("snap find {q} 2>/dev/null | awk 'NR>1{{n=$1; $1=$2=$3=$4=\"\"; sub(/^ +/,\"\"); print \"HIT:snap:\" n \":\" $0}}' | head -n 20\n"),
+            ("brew", _) => format!("brew search {q} 2>/dev/null | grep -v '^==>' | head -n 20 | sed 's/^/HIT:brew:/; s/$/:/'\n"),
+            ("winget", _) => format!(
+                "winget search --source winget {} | Out-String -Stream | ForEach-Object {{ if ($_ -match '^(.+?)\\s{{2,}}([A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+)\\s') {{ 'HIT:winget:' + $Matches[2] + ':' + $Matches[1].Trim() }} }} | Select-Object -First 20\n",
+                ps_quote(query)
+            ),
+            // npm search --parseable: name<TAB>description<TAB>...
+            (_, HostOs::Windows) => format!("npm search --parseable {} | Select-Object -First 20 | ForEach-Object {{ $p = $_ -split [char]9; 'HIT:npm:' + $p[0] + ':' + $p[1] }}\n", ps_quote(query)),
+            _ => format!("npm search --parseable {q} 2>/dev/null | head -n 20 | awk -F'\\t' '{{print \"HIT:npm:\" $1 \":\" $2}}'\n"),
+        };
+    }
+    if s.is_empty() {
+        return Err("no package manager available".into());
+    }
+    Ok(s)
+}
+
+pub fn parse_search(raw: &str) -> Vec<SearchHit> {
+    raw.lines()
+        .filter_map(|l| {
+            let p: Vec<&str> = l.trim().splitn(4, ':').collect();
+            match p.as_slice() {
+                ["HIT", m, n, d] => Some(SearchHit { manager: m.to_string(), package: n.to_string(), description: d.trim().to_string() }),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +450,60 @@ mod tests {
         for os in [HostOs::Linux, HostOs::Macos] {
             assert!(!scan_script(os).contains("$("));
         }
+    }
+
+    fn act(k: &str, m: &str, p: &str) -> InstallAction {
+        serde_json::from_str(&format!(r#"{{"kind":"{k}","manager":"{m}","package":"{p}"}}"#)).unwrap()
+    }
+
+    #[test]
+    fn action_apt_install_noninteractive() {
+        let s = action_script(HostOs::Linux, &act("install", "apt", "fail2ban")).unwrap();
+        assert!(s.contains("DEBIAN_FRONTEND=noninteractive") && s.contains("apt-get install -y 'fail2ban'"));
+    }
+
+    #[test]
+    fn action_rejects_bad_name() {
+        assert!(action_script(HostOs::Linux, &act("install", "apt", "a;b")).is_err());
+        assert!(action_script(HostOs::Linux, &act("install", "brew", "jq")).is_err());
+        assert!(action_script(HostOs::Linux, &InstallAction::EnableService { service: "a b".into() }).is_err());
+    }
+
+    #[test]
+    fn uninstall_uses_given_manager() {
+        let s = action_script(HostOs::Macos, &act("uninstall", "brew", "jq")).unwrap();
+        assert!(s.contains("brew uninstall") && !s.contains("npm"));
+    }
+
+    #[test]
+    fn winget_flags_present() {
+        let s = action_script(HostOs::Windows, &act("install", "winget", "Tailscale.Tailscale")).unwrap();
+        assert!(s.contains("--accept-package-agreements") && s.contains("--accept-source-agreements") && s.contains("'Tailscale.Tailscale'"));
+        assert_eq!(action_script(HostOs::Windows, &InstallAction::InstallManager { manager: "winget".into() }), Err("WINGET_MANUAL".into()));
+    }
+
+    #[test]
+    fn needs_root_matrix() {
+        assert!(needs_root(HostOs::Linux, &act("install", "apt", "x")));
+        assert!(!needs_root(HostOs::Linux, &act("install", "npm", "x")));
+        assert!(!needs_root(HostOs::Macos, &act("install", "brew", "x")));
+        assert!(!needs_root(HostOs::Macos, &act("install", "npm", "x")));
+        assert!(!needs_root(HostOs::Macos, &InstallAction::EnableService { service: "x".into() }));
+        assert!(needs_root(HostOs::Linux, &InstallAction::Refresh));
+        assert!(action_script(HostOs::Macos, &InstallAction::Refresh).is_err());
+    }
+
+    #[test]
+    fn search_rejects_metachars() {
+        assert!(search_script(HostOs::Linux, &["apt".into()], "a;rm -rf").is_err());
+        let s = search_script(HostOs::Linux, &["apt".into(), "npm".into()], "jq").unwrap();
+        assert!(s.contains("head -n 20") && s.contains("HIT:apt:") && s.contains("HIT:npm:"));
+    }
+
+    #[test]
+    fn parse_search_splits_desc_with_colons() {
+        let h = parse_search("junk\nHIT:apt:jq:JSON: processor\nHIT:brew:wget:\n");
+        assert_eq!(h[0], SearchHit { manager: "apt".into(), package: "jq".into(), description: "JSON: processor".into() });
+        assert_eq!(h[1].description, "");
     }
 }

@@ -720,7 +720,7 @@ elif command -v netstat >/dev/null 2>&1; then
   netstat -tulpn 2>/dev/null || true
 fi
 "#;
-    let raw = run_privileged_script(host_id, pool, sudo_password, script).await?;
+    let raw = run_privileged_script(host_id, pool, sudo_password, script, None).await?;
     Ok(parse_firewall_snapshot(&raw))
 }
 
@@ -941,7 +941,7 @@ pub async fn add_firewall_rule(
 ) -> Result<FirewallSnapshot, String> {
     let script =
         build_add_firewall_rule_script(&action, &port_spec, &protocol, &source_ip, &comment)?;
-    run_privileged_script(host_id, pool, sudo_password.clone(), &script).await?;
+    run_privileged_script(host_id, pool, sudo_password.clone(), &script, None).await?;
     get_firewall_snapshot(host_id, pool, sudo_password).await
 }
 
@@ -953,7 +953,7 @@ pub async fn delete_firewall_rule(
     sudo_password: Option<String>,
 ) -> Result<FirewallSnapshot, String> {
     let script = build_delete_firewall_rule_script(rule_index, &raw_spec);
-    run_privileged_script(host_id, pool, sudo_password.clone(), &script).await?;
+    run_privileged_script(host_id, pool, sudo_password.clone(), &script, None).await?;
     get_firewall_snapshot(host_id, pool, sudo_password).await
 }
 
@@ -966,7 +966,7 @@ pub async fn set_firewall_state(
     sudo_password: Option<String>,
 ) -> Result<FirewallSnapshot, String> {
     let script = build_set_firewall_state_script(enabled, &default_incoming, ssh_port);
-    run_privileged_script(host_id, pool, sudo_password.clone(), &script).await?;
+    run_privileged_script(host_id, pool, sudo_password.clone(), &script, None).await?;
     get_firewall_snapshot(host_id, pool, sudo_password).await
 }
 
@@ -974,56 +974,52 @@ pub fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\"'\"'"))
 }
 
-pub fn resolve_sudo_password(host_id: &str, sudo_password: Option<String>) -> Option<String> {
-    if let Some(pw) = sudo_password {
-        if !pw.is_empty() {
-            return Some(pw);
-        }
-    }
-    let hosts = crate::host_store::load_all_hosts();
-    if let Some(host) = hosts.iter().find(|h| h.id == host_id) {
-        let store = crate::resources::load_resources();
-        let creds = crate::resources::resolve_host_credentials_from(&store, host, None);
-        if let Some(sec) = creds.secret {
-            if !sec.is_empty() {
-                return Some(sec);
-            }
-        }
-    }
-    if let Ok(Some(sec)) = crate::vault::get_host_secret(host_id) {
-        if !sec.is_empty() {
-            return Some(sec);
-        }
-    }
-    None
+pub const ERR_SUDO_REQUIRED: &str = "SUDO_REQUIRED";
+pub const ERR_SUDO_DENIED: &str = "SUDO_DENIED";
+pub const ERR_LOCKOUT_BLOCKED: &str = "LOCKOUT_BLOCKED";
+pub const ERR_COMMAND_FAILED: &str = "COMMAND_FAILED";
+pub const ERR_VERIFY_FAILED: &str = "VERIFY_FAILED";
+pub const ERR_UNSUPPORTED: &str = "UNSUPPORTED";
+
+// Errors cross to the UI as "CODE: detail"; the frontend translates CODE.
+pub fn vps_err(code: &str, detail: impl std::fmt::Display) -> String {
+    format!("{code}: {detail}")
 }
 
-pub fn build_privileged_command(script: &str, sudo_password: Option<&str>) -> String {
-    let pw_quoted = shell_single_quote(sudo_password.unwrap_or(""));
+// stdin protocol: line 1 is the sudo password, everything after it is the script's secret.
+pub fn privileged_stdin(sudo_password: Option<&str>, secret: Option<&str>) -> Result<Vec<u8>, String> {
+    let pw = sudo_password.unwrap_or("");
+    if pw.contains('\n') || pw.contains('\r') {
+        return Err(vps_err(ERR_SUDO_DENIED, "sudo password must not contain a line break"));
+    }
+    Ok(format!("{pw}\n{}", secret.unwrap_or("")).into_bytes())
+}
+
+// Passwords and secrets arrive on stdin, never in this command line (visible in `ps` on the server).
+// System paths go AFTER $PATH so tests can stand in fake sudo/id binaries.
+pub fn build_privileged_command(script: &str) -> String {
     format!(
         r#"LC_ALL=C
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
-if [ "$(id -u)" = "0" ]; then
-  sh -s << 'SSHBOX_EOF_9912' 2>&1
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin"
+IFS= read -r SSHBOX_PW || SSHBOX_PW=
+SSHBOX_SECRET_FILE=$(mktemp)
+chmod 600 "$SSHBOX_SECRET_FILE"
+cat > "$SSHBOX_SECRET_FILE"
+trap 'rm -f "$SSHBOX_SECRET_FILE"' EXIT
+sshbox_body() {{
+  printf 'SSHBOX_SECRET_FILE=%s\nexport PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"\n' "$SSHBOX_SECRET_FILE"
+  cat << 'SSHBOX_EOF_9912'
 {script}
-:
 SSHBOX_EOF_9912
+}}
+if [ "$(id -u)" = "0" ]; then
+  sshbox_body | sh -s 2>&1
   rc=$?
 elif sudo -n true 2>/dev/null; then
-  sudo -n sh -s << 'SSHBOX_EOF_9912' 2>&1
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
-{script}
-:
-SSHBOX_EOF_9912
+  sshbox_body | sudo -n sh -s 2>&1
   rc=$?
-elif [ -n {pw_quoted} ]; then
-  {{ printf '%s\n' {pw_quoted}; cat << 'SSHBOX_EOF_9912'
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
-{script}
-:
-SSHBOX_EOF_9912
-}} | sudo -S -p '' sh -s 2>&1
+elif [ -n "$SSHBOX_PW" ]; then
+  {{ printf '%s\n' "$SSHBOX_PW"; sshbox_body; }} | sudo -S -p '' sh -s 2>&1
   rc=$?
 else
   echo "SSHBOX_ERR_SUDO_PASSWORD_REQUIRED"
@@ -1036,23 +1032,10 @@ fi
     )
 }
 
-pub async fn run_privileged_script(
-    host_id: &str,
-    pool: &SshPool,
-    sudo_password: Option<String>,
-    script: &str,
-) -> Result<String, String> {
-    let resolved_pw = resolve_sudo_password(host_id, sudo_password);
-    let wrapped_cmd = build_privileged_command(script, resolved_pw.as_deref());
-    let raw = crate::telemetry::run_host_or_local_cmd(host_id, pool, &wrapped_cmd).await?;
-
+pub fn classify_privileged_output(raw: &str) -> Result<String, String> {
     if raw.contains("SSHBOX_ERR_SUDO_PASSWORD_REQUIRED") {
-        return Err(
-            "Sudo password required. Unlock sudo in the top bar to manage system configuration."
-                .to_string(),
-        );
+        return Err(vps_err(ERR_SUDO_REQUIRED, "sudo password required"));
     }
-
     if let Some(idx) = raw.rfind("SSHBOX_EXIT_CODE:") {
         let body = raw[..idx].trim();
         let lower = body.to_lowercase();
@@ -1060,17 +1043,38 @@ pub async fn run_privileged_script(
             || lower.contains("incorrect password")
             || lower.contains("a password is required")
         {
-            return Err("Sudo authentication failed: incorrect sudo password.".to_string());
+            return Err(vps_err(ERR_SUDO_DENIED, "incorrect sudo password"));
         }
-        let msg = if body.is_empty() {
-            "Privileged command failed on remote host.".to_string()
-        } else {
-            body.to_string()
-        };
-        return Err(msg);
+        let detail = if body.is_empty() { raw[idx..].trim() } else { body };
+        return Err(vps_err(ERR_COMMAND_FAILED, detail));
     }
+    Ok(raw.to_string())
+}
 
-    Ok(raw)
+pub(crate) fn find_remote_host(host_id: &str) -> Result<crate::host_store::HostEntry, String> {
+    if host_id == "local" || host_id.trim().is_empty() {
+        return Err(vps_err(ERR_UNSUPPORTED, "Linux servers only"));
+    }
+    crate::host_store::load_all_hosts()
+        .into_iter()
+        .find(|h| h.id == host_id)
+        .ok_or_else(|| vps_err(ERR_COMMAND_FAILED, format!("unknown host {host_id}")))
+}
+
+// Write scripts start with `set -eu` themselves; read-only scripts may tolerate failing probes.
+pub async fn run_privileged_script(
+    host_id: &str,
+    pool: &SshPool,
+    sudo_password: Option<String>,
+    script: &str,
+    secret: Option<&str>,
+) -> Result<String, String> {
+    let host = find_remote_host(host_id)?;
+    let stdin = privileged_stdin(sudo_password.as_deref(), secret)?;
+    let out = pool
+        .exec_bytes_on_host(&host, &build_privileged_command(script), Some(&stdin))
+        .await?;
+    classify_privileged_output(&String::from_utf8_lossy(&out))
 }
 
 pub fn parse_privilege_probe(raw: &str) -> VpsPrivilegeInfo {
@@ -1116,7 +1120,7 @@ pub async fn probe_privilege(
     pool: &SshPool,
     sudo_password: Option<String>,
 ) -> Result<VpsPrivilegeInfo, String> {
-    let resolved_pw = resolve_sudo_password(host_id, sudo_password);
+    let resolved_pw = sudo_password.filter(|p| !p.is_empty());
     let pw_quoted = shell_single_quote(resolved_pw.as_deref().unwrap_or(""));
     let cmd = format!(
         r#"LC_ALL=C sh -c '
@@ -1563,7 +1567,7 @@ echo "ROLLBACK_PENDING:$rb_pending"
 echo "---SSHD_CONFIG_START---"
 cat /etc/ssh/sshd_config 2>/dev/null || true
 "#;
-    let raw = run_privileged_script(host_id, pool, sudo_password, script).await?;
+    let raw = run_privileged_script(host_id, pool, sudo_password, script, None).await?;
     Ok(parse_sshd_probe_output(&raw))
 }
 
@@ -1633,7 +1637,7 @@ fi
 "#
     );
 
-    run_privileged_script(host_id, pool, sudo_password.clone(), &script).await?;
+    run_privileged_script(host_id, pool, sudo_password.clone(), &script, None).await?;
     get_sshd_config(host_id, pool, sudo_password).await
 }
 
@@ -1652,7 +1656,7 @@ if [ -f /tmp/sshbox-sshd-rollback.pid ]; then
   rm -f /tmp/sshbox-sshd-rollback.pid
 fi
 "#;
-    run_privileged_script(host_id, pool, sudo_password.clone(), script).await?;
+    run_privileged_script(host_id, pool, sudo_password.clone(), script, None).await?;
     get_sshd_config(host_id, pool, sudo_password).await
 }
 
@@ -1678,7 +1682,7 @@ else
   exit 1
 fi
 "#;
-    run_privileged_script(host_id, pool, sudo_password.clone(), script).await?;
+    run_privileged_script(host_id, pool, sudo_password.clone(), script, None).await?;
     get_sshd_config(host_id, pool, sudo_password).await
 }
 
@@ -1980,7 +1984,7 @@ awk -F: '$3 == 0 || ($3 >= 1000 && $3 < 65534) { print $0 }' /etc/passwd 2>/dev/
   fi
 done
 "#;
-    let raw = run_privileged_script(host_id, pool, sudo_password, script).await?;
+    let raw = run_privileged_script(host_id, pool, sudo_password, script, None).await?;
     Ok(parse_access_keys_snapshot(&raw))
 }
 
@@ -2221,7 +2225,7 @@ pub async fn authorize_ssh_key(
     sudo_password: Option<String>,
 ) -> Result<AccessKeysSnapshot, String> {
     let script = build_authorize_ssh_key_script(&username, &public_key)?;
-    run_privileged_script(host_id, pool, sudo_password.clone(), &script).await?;
+    run_privileged_script(host_id, pool, sudo_password.clone(), &script, None).await?;
     get_access_keys_snapshot(host_id, pool, sudo_password).await
 }
 
@@ -2233,7 +2237,7 @@ pub async fn revoke_ssh_key(
     sudo_password: Option<String>,
 ) -> Result<AccessKeysSnapshot, String> {
     let script = build_revoke_ssh_key_script(&username, &key_body)?;
-    run_privileged_script(host_id, pool, sudo_password.clone(), &script).await?;
+    run_privileged_script(host_id, pool, sudo_password.clone(), &script, None).await?;
     get_access_keys_snapshot(host_id, pool, sudo_password).await
 }
 
@@ -2256,7 +2260,7 @@ pub async fn create_linux_user(
         docker_access,
         initial_public_key.as_deref(),
     )?;
-    run_privileged_script(host_id, pool, sudo_password.clone(), &script).await?;
+    run_privileged_script(host_id, pool, sudo_password.clone(), &script, None).await?;
     get_access_keys_snapshot(host_id, pool, sudo_password).await
 }
 
@@ -2271,13 +2275,160 @@ pub async fn update_linux_user_privilege(
 ) -> Result<AccessKeysSnapshot, String> {
     let script =
         build_update_linux_user_privilege_script(&username, sudo_access, nopasswd_sudo, locked)?;
-    run_privileged_script(host_id, pool, sudo_password.clone(), &script).await?;
+    run_privileged_script(host_id, pool, sudo_password.clone(), &script, None).await?;
     get_access_keys_snapshot(host_id, pool, sudo_password).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Runs shell snippets locally against fake `sudo`/`id` binaries placed first in PATH.
+    #[cfg(unix)]
+    pub(crate) mod shell {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::{Path, PathBuf};
+        use std::process::{Command, Stdio};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+        pub const FAKE_SUDO: &str = r#"case "$1" in -n) exit 1;; esac
+IFS= read -r pw
+printf '%s' "$pw" > "$FAKE_SUDO_LOG"
+[ "$pw" = "$FAKE_SUDO_OK" ] || { echo 'Sorry, try again.'; exit 1; }
+exec sh -s"#;
+
+        pub fn temp_dir() -> PathBuf {
+            let n = NEXT.fetch_add(1, Ordering::SeqCst);
+            let d = std::env::temp_dir().join(format!("sshbox-test-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        }
+
+        pub fn fake_bin(dir: &Path, name: &str, body: &str) {
+            std::fs::create_dir_all(dir).unwrap();
+            let p = dir.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // Non-root `id` plus a sudo that logs the password it read and checks it against FAKE_SUDO_OK.
+        pub fn fake_sudo_env(dir: &Path) -> PathBuf {
+            let bin = dir.join("bin");
+            fake_bin(&bin, "id", "echo 1000");
+            fake_bin(&bin, "sudo", FAKE_SUDO);
+            bin
+        }
+
+        pub fn run_local(cmd: &str, stdin: &[u8], bin: &Path, envs: &[(&str, &str)], cwd: &Path) -> String {
+            let mut child = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(cmd)
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .envs(envs.iter().copied())
+                .current_dir(cwd)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(stdin).unwrap();
+            let out = child.wait_with_output().unwrap();
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        }
+    }
+
+    #[cfg(unix)]
+    fn run_wrapped(script: &str, pw: Option<&str>, secret: Option<&str>, sudo_ok: &str) -> (String, std::path::PathBuf) {
+        let dir = shell::temp_dir();
+        let bin = shell::fake_sudo_env(&dir);
+        let log = dir.join("sudo.log");
+        let tmp = dir.join("tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let stdin = privileged_stdin(pw, secret).unwrap();
+        let out = shell::run_local(
+            &build_privileged_command(script),
+            &stdin,
+            &bin,
+            &[
+                ("FAKE_SUDO_LOG", log.to_str().unwrap()),
+                ("FAKE_SUDO_OK", sudo_ok),
+                ("TMPDIR", tmp.to_str().unwrap()),
+            ],
+            &dir,
+        );
+        (out, dir)
+    }
+
+    // The old probe nested the password inside sh -c '…': a quote or ; broke the command or ran another one.
+    #[cfg(unix)]
+    #[test]
+    fn sudo_password_reaches_sudo_intact_and_runs_nothing_else() {
+        for pw in [
+            "p@ss word",
+            "a'b",
+            "a\"b",
+            "abc$HOME",
+            "a;touch INJECTED",
+            "a`touch INJECTED`b",
+            "$(touch INJECTED)",
+            "a\\b",
+        ] {
+            assert!(!build_privileged_command("echo SCRIPT_RAN").contains(pw));
+            let (out, dir) = run_wrapped("echo SCRIPT_RAN", Some(pw), None, pw);
+            assert_eq!(std::fs::read_to_string(dir.join("sudo.log")).unwrap(), pw, "{out}");
+            assert!(!dir.join("INJECTED").exists(), "password {pw:?} ran a command");
+            assert!(classify_privileged_output(&out).unwrap().contains("SCRIPT_RAN"), "{out}");
+        }
+    }
+
+    // New-user passwords and key lines must reach the script without being part of the command line.
+    #[cfg(unix)]
+    #[test]
+    fn secret_reaches_script_and_temp_file_is_removed() {
+        let secret = "u:p'a$s;`x`\nsecond line";
+        let (out, dir) = run_wrapped("cat \"$SSHBOX_SECRET_FILE\"", Some("pw"), Some(secret), "pw");
+        assert!(out.contains(secret), "{out}");
+        assert_eq!(std::fs::read_dir(dir.join("tmp")).unwrap().count(), 0);
+    }
+
+    // The old wrapper ended every script with `:`, so a failed command still reported success.
+    #[cfg(unix)]
+    #[test]
+    fn failing_command_mid_script_returns_command_failed() {
+        let (out, _) = run_wrapped("set -eu\nfalse\necho AFTER", Some("pw"), None, "pw");
+        let err = classify_privileged_output(&out).unwrap_err();
+        assert!(err.starts_with("COMMAND_FAILED"), "{err}");
+        assert!(!out.contains("AFTER"), "{out}");
+
+        let (out, _) = run_wrapped("true\nfalse", Some("pw"), None, "pw");
+        assert!(classify_privileged_output(&out).unwrap_err().starts_with("COMMAND_FAILED"), "{out}");
+    }
+
+    // The UI asks for a password on SUDO_REQUIRED and shows an error on SUDO_DENIED.
+    #[cfg(unix)]
+    #[test]
+    fn missing_and_wrong_sudo_password_map_to_codes() {
+        let (out, _) = run_wrapped("echo X", None, None, "right");
+        assert!(classify_privileged_output(&out).unwrap_err().starts_with("SUDO_REQUIRED"), "{out}");
+        let (out, _) = run_wrapped("echo X", Some("wrong"), None, "right");
+        assert!(classify_privileged_output(&out).unwrap_err().starts_with("SUDO_DENIED"), "{out}");
+    }
+
+    // Line 1 of stdin is the sudo password; a newline inside it would feed the rest to the script.
+    #[test]
+    fn newline_in_password_is_rejected_before_sending() {
+        assert!(privileged_stdin(Some("a\nb"), None).unwrap_err().starts_with("SUDO_DENIED"));
+        assert!(privileged_stdin(Some("a\rb"), None).unwrap_err().starts_with("SUDO_DENIED"));
+        assert_eq!(privileged_stdin(Some("pw"), Some("s")).unwrap(), b"pw\ns".to_vec());
+    }
 
     #[test]
     fn parses_default_and_custom_sshd_config_accurately() {

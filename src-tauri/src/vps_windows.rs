@@ -111,7 +111,7 @@ const SSHD_HELPER: &str = r#"function sshbox_sshd([string]$argline) {
   $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
   $p = [Diagnostics.Process]::Start($psi)
   $o = $p.StandardOutput.ReadToEndAsync(); $e = $p.StandardError.ReadToEndAsync()
-  if (-not $p.WaitForExit(15000)) { try { $p.Kill() } catch { }; return [pscustomobject]@{ Code = -1; Out = ''; Err = 'sshd timed out after 15s' } }
+  if (-not $p.WaitForExit(15000)) { try { $p.Kill() } catch { }; [void]$p.WaitForExit(3000); $why = if ($e.Wait(1000)) { $e.Result.Trim() } else { '' }; return [pscustomobject]@{ Code = -1; Out = ''; Err = ($why + "`nsshd timed out after 15s").Trim() } }
   [pscustomobject]@{ Code = $p.ExitCode; Out = $o.Result; Err = $e.Result }
 }
 "#;
@@ -165,7 +165,7 @@ pub fn build_sshd_rollback_script_windows(new_port: Option<u16>) -> String {
         )
     });
     format!(
-        "$ErrorActionPreference = 'Continue'\n{}sshbox_restore\nRestart-Service sshd\n{rule}Remove-Item -LiteralPath '{WINDOWS_ROLLBACK_SCRIPT}' -Force\nUnregister-ScheduledTask -TaskName {WINDOWS_ROLLBACK_TASK} -Confirm:$false\n",
+        "$ErrorActionPreference = 'Stop'\n$ok = $true\n{}try {{ sshbox_restore }} catch {{ $ok = $false }}\nRemove-Item -LiteralPath \"$F.sshbox.new\" -Force -ErrorAction SilentlyContinue\ntry {{ Restart-Service sshd }} catch {{ $ok = $false }}\ntry {{ {rule}}} catch {{ $ok = $false }}\nRemove-Item -LiteralPath '{WINDOWS_ROLLBACK_SCRIPT}' -Force -ErrorAction SilentlyContinue\nUnregister-ScheduledTask -TaskName {WINDOWS_ROLLBACK_TASK} -Confirm:$false -ErrorAction SilentlyContinue\nif (-not $ok) {{ exit 1 }}\n",
         windows_restore_fn()
     )
 }
@@ -197,7 +197,7 @@ try {{
   $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
   Register-ScheduledTask -TaskName {WINDOWS_ROLLBACK_TASK} -Action $act -Trigger $trg -Settings $set -User SYSTEM -RunLevel Highest -Force | Out-Null
 }} catch {{
-  sshbox_restore; Remove-Item -LiteralPath $N, $R -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $N, $R, "$F.sshbox.bak", "$F.sshbox.absent" -Force -ErrorAction SilentlyContinue
   Unregister-ScheduledTask -TaskName {WINDOWS_ROLLBACK_TASK} -Confirm:$false -ErrorAction SilentlyContinue
   throw
 }}
@@ -262,10 +262,12 @@ const WINDOWS_ACCOUNTS_BODY: &str = r#"$admins = @(Get-LocalGroupMember -SID S-1
 $rows = foreach ($u in Get-LocalUser) {
   $isAdmin = $admins -contains $u.Name
   $file = "C:\Users\$($u.Name)\.ssh\authorized_keys"
-  if ($isAdmin) {
-    $r = sshbox_sshd ('-T -C "user=' + $u.Name + ',host=localhost,addr=127.0.0.1"')
-    if ($r.Code -ne 0) { throw "sshd -T failed for $($u.Name): $($r.Err)" }
-    if (@($r.Out -split "`r?`n") -match '^authorizedkeysfile .*administrators_authorized_keys') { $file = 'C:\ProgramData\ssh\administrators_authorized_keys' }
+  # Only enabled admins need it (disabled built-ins make sshd hang); a failure keeps the default file for that row.
+  if ($isAdmin -and $u.Enabled) {
+    try {
+      $r = sshbox_sshd ('-T -C "user=' + $u.Name + ',host=localhost,addr=127.0.0.1"')
+      if ($r.Code -eq 0 -and (@($r.Out -split "`r?`n") -match '^authorizedkeysfile .*administrators_authorized_keys')) { $file = 'C:\ProgramData\ssh\administrators_authorized_keys' }
+    } catch { }
   }
   $keys = @()
   try { $keys = @(Get-Content -LiteralPath $file -ErrorAction Stop) } catch { }
@@ -965,8 +967,9 @@ mod tests {
     #[test]
     fn windows_apply_cleans_up_when_arming_fails_and_rolls_back_after() {
         let s = build_sshd_apply_script_windows(None, 22);
-        let c = s.find("sshbox_restore; Remove-Item -LiteralPath $N, $R").unwrap();
+        let c = s.find("Remove-Item -LiteralPath $N, $R, \"$F.sshbox.bak\"").unwrap();
         assert!(c < s.find("Move-Item -LiteralPath $N").unwrap());
+        assert!(!s[c - 20..c].contains("sshbox_restore"), "the live file is untouched before arming");
         assert!(s.contains("-StartWhenAvailable"));
         let tail = &s[s.find("Move-Item -LiteralPath $N").unwrap()..];
         assert!(tail.contains("sshbox-rollback.ps1' 2>&1 | Out-Null; $rbrc = $LASTEXITCODE"));
@@ -1005,5 +1008,31 @@ mod tests {
         let s = windows_cleanup_script();
         assert!(s.find("Unregister-ScheduledTask").unwrap() < s.find("SSHBOX_ALREADY_ROLLED_BACK").unwrap());
         assert!(s.contains("throw"));
+    }
+
+    // One disabled built-in admin (sshd hangs on it) or a failing sshd -T must degrade a row, never fail the whole tab.
+    #[test]
+    fn windows_accounts_skip_sshd_for_disabled_and_non_admin_and_never_throw() {
+        let s = windows_accounts_read_script();
+        assert!(s.contains("if ($isAdmin -and $u.Enabled)"));
+        let body = &s[s.find("$isAdmin -and $u.Enabled").unwrap()..s.find("$keys = @()").unwrap()];
+        assert!(body.contains("try {") && body.contains("catch { }") && !body.contains("throw"));
+        assert_eq!(s.matches("sshbox_sshd (").count(), 1);
+    }
+
+    // On this build every bad config ends in a timeout, so the real sshd error must still reach the user (first line).
+    #[test]
+    fn windows_sshd_helper_keeps_stderr_on_timeout() {
+        assert!(SSHD_HELPER.contains("$e.Wait(1000)") && SSHD_HELPER.contains("timed out after 15s"));
+        assert!(SSHD_HELPER.find("$why +").unwrap() < SSHD_HELPER.find("timed out after 15s").unwrap());
+    }
+
+    // "Roll back now" must not claim success when a restore step failed, yet every step and the task removal still run.
+    #[test]
+    fn windows_rollback_reports_failure_but_still_unregisters() {
+        let s = build_sshd_rollback_script_windows(Some(2222));
+        assert!(s.contains("try { sshbox_restore } catch { $ok = $false }") && s.contains("try { Restart-Service sshd } catch { $ok = $false }"));
+        assert!(s.contains("sshd_config.sshbox.new") || s.contains("$F.sshbox.new"));
+        assert!(s.find("Unregister-ScheduledTask").unwrap() < s.find("if (-not $ok) { exit 1 }").unwrap());
     }
 }

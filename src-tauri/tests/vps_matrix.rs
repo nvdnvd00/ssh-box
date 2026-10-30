@@ -571,11 +571,13 @@ async fn w8_max_auth_tries(pool: &SshPool, h: &HostEntry) -> Result<String, Stri
     let at = a.iter().position(|l| *l == directive).ok_or("directive missing")?;
     let first_match = a.iter().position(|l| l.starts_with("Match ")).ok_or("no Match line")?;
     ensure(at < first_match, format!("directive at line {at}, first Match at {first_match}"))?;
-    let mut rest = a.iter();
-    ensure(b.iter().all(|l| rest.any(|x| x == l)), "original lines lost or reordered".into())?;
-    let blank = |v: &[&str]| v.iter().filter(|l| l.trim().is_empty()).count();
-    let (added, added_blank) = (a.len() - b.len(), blank(&a) - blank(&b));
-    ensure(added - added_blank <= 2 && added_blank <= 2, format!("{added} lines added, {added_blank} blank"))?;
+    // One contiguous block (directive, ssh-box header, blank separators) before the first Match; every other line, blank ones included, unchanged.
+    let i = b.iter().zip(&a).take_while(|(x, y)| x == y).count();
+    let added = a.len().saturating_sub(b.len());
+    let block = &a[i..i + added];
+    let added_blank = block.iter().filter(|l| l.is_empty()).count();
+    ensure(a[i + added..] == b[i..], format!("lines changed outside the inserted block at {i}: {:?}", &a[i + added..]))?;
+    ensure(block.iter().all(|l| l.is_empty() || *l == directive || *l == "# --- Managed by ssh-box ---") && added_blank <= 2 && i + added <= first_match, format!("inserted block {block:?}"))?;
     win_apply_finish(pool, h, SshdSettings { max_auth_tries: orig, ..kept.settings }).await?;
     let back = win_effective(pool, h, "maxauthtries").await;
     ensure(back == format!("maxauthtries {orig}"), format!("set back: {back}"))?;

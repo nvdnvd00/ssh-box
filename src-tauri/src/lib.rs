@@ -827,6 +827,43 @@ fn save_session_log(
 }
 
 #[tauri::command]
+fn installer_local_os() -> installer::HostOs {
+    installer::local_os()
+}
+
+#[tauri::command]
+async fn installer_scan(
+    state: State<'_, AppState>,
+    host_id: String,
+    os: installer::HostOs,
+    sudo_password: Option<String>,
+) -> Result<installer::InstallerScan, String> {
+    installer::scan(&host_id, &state.ssh_pool, os, sudo_password).await
+}
+
+#[tauri::command]
+async fn installer_search(
+    state: State<'_, AppState>,
+    host_id: String,
+    os: installer::HostOs,
+    present: Vec<String>,
+    query: String,
+) -> Result<Vec<installer::SearchHit>, String> {
+    installer::search(&host_id, &state.ssh_pool, os, present, query).await
+}
+
+#[tauri::command]
+async fn installer_run(
+    state: State<'_, AppState>,
+    host_id: String,
+    os: installer::HostOs,
+    action: installer::InstallAction,
+    sudo_password: Option<String>,
+) -> Result<String, String> {
+    installer::run_action(&host_id, &state.ssh_pool, os, action, sudo_password).await
+}
+
+#[tauri::command]
 async fn vps_probe(
     state: State<'_, AppState>,
     host_id: String,
@@ -1047,6 +1084,10 @@ pub fn run() {
             clear_known_hosts,
             export_ssh_key_to_host,
             save_session_log,
+            installer_local_os,
+            installer_scan,
+            installer_search,
+            installer_run,
             vps_probe,
             vps_get_sshd_settings,
             vps_apply_sshd_settings,

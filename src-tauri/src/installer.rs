@@ -4,7 +4,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use crate::vps_config::shell_single_quote as shq;
-use crate::vps_windows::ps_quote;
+use crate::ssh_pool::SshPool;
+use crate::vps_config::{
+    find_remote_host, run_privileged_script, vps_err, ERR_COMMAND_FAILED, ERR_SUDO_DENIED, ERR_SUDO_REQUIRED, ERR_UNSUPPORTED,
+};
+use crate::vps_windows::{ps_quote, run_windows_script};
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -360,6 +366,168 @@ pub fn parse_search(raw: &str) -> Vec<SearchHit> {
         .collect()
 }
 
+const TIMEOUT: &str = "TIMEOUT";
+
+async fn pipe(mut cmd: tokio::process::Command, stdin: Vec<u8>) -> Result<String, String> {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| vps_err(ERR_COMMAND_FAILED, e))?;
+    let mut sin = child.stdin.take().ok_or_else(|| vps_err(ERR_COMMAND_FAILED, "no stdin"))?;
+    // Ignore write errors: the child may exit before reading everything.
+    let _ = sin.write_all(&stdin).await;
+    drop(sin);
+    let out = child.wait_with_output().await.map_err(|e| vps_err(ERR_COMMAND_FAILED, e))?;
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    if out.status.success() {
+        Ok(text)
+    } else {
+        let low = text.to_lowercase();
+        if low.contains("incorrect password") || low.contains("sorry, try again") {
+            return Err(vps_err(ERR_SUDO_DENIED, "incorrect sudo password"));
+        }
+        Err(vps_err(ERR_COMMAND_FAILED, text.trim()))
+    }
+}
+
+pub async fn run_local(
+    os: HostOs,
+    script: &str,
+    sudo_password: Option<&str>,
+    root: bool,
+    elevated: bool,
+) -> Result<String, String> {
+    if os == HostOs::Windows {
+        return run_local_windows(script, elevated).await;
+    }
+    let _ = elevated;
+    let mut cmd = tokio::process::Command::new(if root { "sudo" } else { "sh" });
+    if !root {
+        cmd.arg("-s");
+        return pipe(cmd, script.as_bytes().to_vec()).await;
+    }
+    match sudo_password.filter(|p| !p.is_empty()) {
+        Some(pw) => {
+            if pw.contains('\n') || pw.contains('\r') {
+                return Err(vps_err(ERR_SUDO_DENIED, "sudo password must not contain a line break"));
+            }
+            cmd.args(["-S", "-p", "", "sh", "-s"]);
+            pipe(cmd, format!("{pw}\n{script}").into_bytes()).await
+        }
+        None => {
+            // Passwordless sudo works without prompting; otherwise ask the UI for a password.
+            let ok = tokio::process::Command::new("sudo")
+                .args(["-n", "true"])
+                .stdin(std::process::Stdio::null())
+                .output()
+                .await
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !ok {
+                return Err(vps_err(ERR_SUDO_REQUIRED, "sudo password required"));
+            }
+            cmd.args(["-n", "sh", "-s"]);
+            pipe(cmd, script.as_bytes().to_vec()).await
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn run_local_windows(script: &str, elevated: bool) -> Result<String, String> {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let ps = |args: &[&str]| {
+        let mut c = tokio::process::Command::new("powershell.exe");
+        c.args(["-NoProfile", "-NonInteractive"]).args(args).creation_flags(CREATE_NO_WINDOW);
+        c
+    };
+    if !elevated {
+        return pipe(ps(&["-Command", "-"]), script.as_bytes().to_vec()).await;
+    }
+    // UAC prompt via RunAs; the elevated child cannot pipe back, so it writes to a temp file.
+    let dir = std::env::temp_dir();
+    let id = std::process::id();
+    let (ps1, out) = (dir.join(format!("sshbox-inst-{id}.ps1")), dir.join(format!("sshbox-inst-{id}.txt")));
+    std::fs::write(&ps1, format!("& {{\n{script}\n}} *> {} \n", ps_quote(&out.to_string_lossy())))
+        .map_err(|e| vps_err(ERR_COMMAND_FAILED, e))?;
+    let outer = format!(
+        "Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',{}",
+        ps_quote(&ps1.to_string_lossy())
+    );
+    let r = pipe(ps(&["-Command", "-"]), outer.into_bytes()).await;
+    let text = std::fs::read_to_string(&out).unwrap_or_default();
+    let _ = std::fs::remove_file(&ps1);
+    let _ = std::fs::remove_file(&out);
+    r.map(|_| text)
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn run_local_windows(_script: &str, _elevated: bool) -> Result<String, String> {
+    Err(vps_err(ERR_UNSUPPORTED, "windows_only"))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run(
+    host_id: &str,
+    pool: &SshPool,
+    os: HostOs,
+    script: &str,
+    sudo_password: Option<String>,
+    root: bool,
+    elevated: bool,
+    secs: u64,
+) -> Result<String, String> {
+    let fut = async {
+        if host_id == "local" {
+            run_local(os, script, sudo_password.as_deref(), root, elevated).await
+        } else if os == HostOs::Windows {
+            run_windows_script(host_id, pool, script, None).await
+        } else if root {
+            run_privileged_script(host_id, pool, sudo_password, script, None).await
+        } else {
+            let host = find_remote_host(host_id)?;
+            let out = pool.exec_bytes_on_host(&host, "sh -s 2>&1", Some(script.as_bytes())).await?;
+            Ok(String::from_utf8_lossy(&out).into_owned())
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(secs), fut)
+        .await
+        .unwrap_or_else(|_| Err(vps_err(TIMEOUT, format!("exceeded {secs}s"))))
+}
+
+pub fn local_os() -> HostOs {
+    if cfg!(target_os = "windows") {
+        HostOs::Windows
+    } else if cfg!(target_os = "macos") {
+        HostOs::Macos
+    } else {
+        HostOs::Linux
+    }
+}
+
+pub async fn scan(host_id: &str, pool: &SshPool, os: HostOs, pw: Option<String>) -> Result<InstallerScan, String> {
+    // Scan is read-only: no root needed.
+    let raw = run(host_id, pool, os, &scan_script(os), pw, false, false, 60).await?;
+    Ok(parse_scan(os, &raw))
+}
+
+pub async fn search(host_id: &str, pool: &SshPool, os: HostOs, present: Vec<String>, query: String) -> Result<Vec<SearchHit>, String> {
+    let script = search_script(os, &present, &query)?;
+    Ok(parse_search(&run(host_id, pool, os, &script, None, false, false, 30).await?))
+}
+
+pub async fn run_action(host_id: &str, pool: &SshPool, os: HostOs, a: InstallAction, pw: Option<String>) -> Result<String, String> {
+    let script = action_script(os, &a)?;
+    let elevated = host_id == "local"
+        && os == HostOs::Windows
+        && matches!(a, InstallAction::Uninstall { .. } | InstallAction::EnableService { .. });
+    run(host_id, pool, os, &script, pw, needs_root(os, &a), elevated, 600).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,5 +677,20 @@ mod tests {
         let h = parse_search("junk\nHIT:apt:jq:JSON: processor\nHIT:brew:wget:\n");
         assert_eq!(h[0], SearchHit { manager: "apt".into(), package: "jq".into(), description: "JSON: processor".into() });
         assert_eq!(h[1].description, "");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_local_times_out() {
+        let pool = crate::ssh_pool::SshPool::default();
+        let e = run("local", &pool, HostOs::Linux, "sleep 5", None, false, false, 1).await.unwrap_err();
+        assert!(e.contains("TIMEOUT"), "{e}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_local_echo() {
+        let out = run_local(HostOs::Linux, "echo hi", None, false, false).await.unwrap();
+        assert_eq!(out.trim(), "hi");
     }
 }

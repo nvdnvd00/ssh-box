@@ -1,4 +1,5 @@
 use crate::ssh_pool::{AuthUsed, SshPool};
+use crate::vps_support::{check_hidden_rows, compute_support, unix_family, OsCaps, OsFamily, SupportLevel, VpsSupport};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -7,6 +8,7 @@ pub enum PrivilegeLevel {
     Root,
     SudoNoPassword,
     SudoPassword,
+    Admin,
     None,
 }
 
@@ -16,6 +18,7 @@ pub enum FirewallEngine {
     Ufw,
     Firewalld,
     Iptables,
+    Windows,
     None,
 }
 
@@ -42,6 +45,10 @@ pub struct VpsProbe {
     pub ssh_socket_active: bool,
     pub selinux_enforcing: bool,
     pub firewall_engine: FirewallEngine,
+    pub os_family: OsFamily,
+    pub support: VpsSupport,
+    #[serde(skip)]
+    pub caps: OsCaps,
 }
 
 // The sshd directives the SSH studio reads and writes (spec §1.1).
@@ -692,7 +699,7 @@ if iptables -S INPUT 2>/dev/null | grep -qE -- '-P INPUT (DROP|REJECT)'; then ec
 if ip6tables -S INPUT 2>/dev/null | grep -qE -- '-P INPUT (DROP|REJECT)|^-A INPUT'; then echo IPV6:1; else echo IPV6:0; fi
 echo ---IPTABLES---
 iptables -S INPUT 2>/dev/null || true"#,
-        FirewallEngine::None => "echo ENABLED:0\necho DEFAULT_INCOMING:allow\necho IPV6:0",
+        FirewallEngine::None | FirewallEngine::Windows => "echo ENABLED:0\necho DEFAULT_INCOMING:allow\necho IPV6:0",
     };
     format!(
         "echo ---META---\n{meta}\necho ---SOCKETS---\nss -tulpnH 2>/dev/null || ss -tulpn 2>/dev/null || true\n"
@@ -704,6 +711,7 @@ fn engine_name(engine: FirewallEngine) -> &'static str {
         FirewallEngine::Ufw => "ufw",
         FirewallEngine::Firewalld => "firewalld",
         FirewallEngine::Iptables => "iptables",
+        FirewallEngine::Windows => "windows",
         FirewallEngine::None => "none",
     }
 }
@@ -831,7 +839,7 @@ pub fn build_set_firewall_state_script(
                 "systemctl disable --now firewalld\n"
             });
         }
-        FirewallEngine::Iptables | FirewallEngine::None => {
+        FirewallEngine::Iptables | FirewallEngine::Windows | FirewallEngine::None => {
             return Err(vps_err(ERR_UNSUPPORTED, "firewall_read_only"))
         }
     }
@@ -1192,6 +1200,11 @@ elif command -v iptables >/dev/null 2>&1; then fw=iptables
 else fw=none
 fi
 echo "FW:$fw"
+if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+echo "MAC_VERSION:$(sw_vers -productVersion 2>/dev/null)"
+echo ---SSHD_MAIN---
+cat /etc/ssh/sshd_config 2>/dev/null
+fi
 "#;
 
 pub fn parse_probe_output(raw: &str, auth: AuthUsed) -> Result<VpsProbe, String> {
@@ -1200,9 +1213,11 @@ pub fn parse_probe_output(raw: &str, auth: AuthUsed) -> Result<VpsProbe, String>
             .find_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_string()))
             .unwrap_or_default()
     };
-    if field("UNAME:") != "Linux" {
-        return Err(vps_err(ERR_UNSUPPORTED, "linux_only"));
-    }
+    let os_family = match field("UNAME:").as_str() {
+        "Linux" => OsFamily::Linux,
+        "Darwin" => OsFamily::Macos,
+        _ => return Err(vps_err(ERR_UNSUPPORTED, "unsupported_os")),
+    };
     let privilege = match field("SUDO:").as_str() {
         "root" => PrivilegeLevel::Root,
         "nopasswd" => PrivilegeLevel::SudoNoPassword,
@@ -1210,8 +1225,41 @@ pub fn parse_probe_output(raw: &str, auth: AuthUsed) -> Result<VpsProbe, String>
         "password_bad" => return Err(vps_err(ERR_SUDO_DENIED, "incorrect sudo password")),
         _ => PrivilegeLevel::None,
     };
-    // $SSH_CONNECTION = "client_ip client_port server_ip server_port"
-    let conn = field("SSH_CONNECTION:");
+    let (client_ip, server_ip, server_port) = parse_ssh_connection(&field("SSH_CONNECTION:"))?;
+    let firewall_engine = match field("FW:").as_str() {
+        "ufw" => FirewallEngine::Ufw,
+        "firewalld" => FirewallEngine::Firewalld,
+        "iptables" => FirewallEngine::Iptables,
+        _ => FirewallEngine::None,
+    };
+    let macos = os_family == OsFamily::Macos;
+    let sshd_main = raw.split_once("---SSHD_MAIN---\n").map_or("", |(_, rest)| rest);
+    let mut probe = VpsProbe {
+        privilege,
+        context: ConnectionContext {
+            login_user: field("USER:"),
+            auth,
+            client_ip,
+            server_ip,
+            server_port,
+        },
+        os_id: if macos { "macOS".to_string() } else { field("OS_ID:") },
+        os_version: if macos { field("MAC_VERSION:") } else { field("OS_VERSION:") },
+        openssh_version: field("OPENSSH:"),
+        has_systemd: field("SYSTEMD:") == "1",
+        ssh_socket_active: field("SSH_SOCKET:") == "active",
+        selinux_enforcing: field("SELINUX:").eq_ignore_ascii_case("enforcing"),
+        firewall_engine,
+        os_family,
+        support: VpsSupport::default(),
+        caps: OsCaps { sshd_dropin: macos && sshd_write_target(sshd_main) == WriteTarget::DropIn, ..Default::default() },
+    };
+    probe.support = compute_support(&probe);
+    Ok(probe)
+}
+
+// $SSH_CONNECTION = "client_ip client_port server_ip server_port" -> (client_ip, server_ip, server_port)
+pub(crate) fn parse_ssh_connection(conn: &str) -> Result<(String, String, u16), String> {
     let parts: Vec<&str> = conn.split_whitespace().collect();
     let [client_ip, _, server_ip, port] = parts.as_slice() else {
         return Err(vps_err(ERR_UNSUPPORTED, "no_ssh_connection"));
@@ -1219,29 +1267,7 @@ pub fn parse_probe_output(raw: &str, auth: AuthUsed) -> Result<VpsProbe, String>
     let server_port = port
         .parse::<u16>()
         .map_err(|_| vps_err(ERR_UNSUPPORTED, "no_ssh_connection"))?;
-    let firewall_engine = match field("FW:").as_str() {
-        "ufw" => FirewallEngine::Ufw,
-        "firewalld" => FirewallEngine::Firewalld,
-        "iptables" => FirewallEngine::Iptables,
-        _ => FirewallEngine::None,
-    };
-    Ok(VpsProbe {
-        privilege,
-        context: ConnectionContext {
-            login_user: field("USER:"),
-            auth,
-            client_ip: client_ip.to_string(),
-            server_ip: server_ip.to_string(),
-            server_port,
-        },
-        os_id: field("OS_ID:"),
-        os_version: field("OS_VERSION:"),
-        openssh_version: field("OPENSSH:"),
-        has_systemd: field("SYSTEMD:") == "1",
-        ssh_socket_active: field("SSH_SOCKET:") == "active",
-        selinux_enforcing: field("SELINUX:").eq_ignore_ascii_case("enforcing"),
-        firewall_engine,
-    })
+    Ok((client_ip.to_string(), server_ip.to_string(), server_port))
 }
 
 pub async fn probe(
@@ -1250,6 +1276,16 @@ pub async fn probe(
     sudo_password: Option<String>,
 ) -> Result<VpsProbe, String> {
     let host = find_remote_host(host_id)?;
+    pool.get_or_connect(&host, None).await?;
+    let uname = pool
+        .exec_bytes_on_host(&host, "uname -s", None)
+        .await
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o).trim().to_string());
+    // Task 2 replaces this with the Windows probe.
+    if unix_family(uname.as_deref()).is_none() {
+        return Err(vps_err(ERR_UNSUPPORTED, "unsupported_os"));
+    }
     let stdin = privileged_stdin(sudo_password.as_deref(), None)?;
     let out = pool.exec_bytes_on_host(&host, PROBE_SCRIPT, Some(&stdin)).await?;
     let auth = pool
@@ -1602,9 +1638,13 @@ ss -tlnpH "sport = :$P" | grep -Eq 'sshd|systemd' || {{ echo SSHBOX_PORT_NOT_LIS
 }
 
 pub fn apply_preflight(probe: &VpsProbe, view: &SshdView, desired: &SshdSettings) -> Result<(), String> {
-    if !probe.has_systemd {
-        return Err(vps_err(ERR_UNSUPPORTED, "no_systemd"));
+    if probe.support.ssh.level != SupportLevel::Full {
+        return Err(vps_err(
+            ERR_UNSUPPORTED,
+            probe.support.ssh.reason.as_deref().unwrap_or("read_only_os"),
+        ));
     }
+    check_hidden_rows(&probe.support.ssh_rows, &view.settings, desired)?;
     if view.rollback_pending {
         return Err(vps_err(ERR_COMMAND_FAILED, "a previous change is still waiting for verification"));
     }
@@ -2740,6 +2780,7 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         let mut p = parse_probe_output(PROBE_UBUNTU, key_auth()).unwrap();
         p.context.login_user = ctx_user.to_string();
         p.has_systemd = has_systemd;
+        p.support = compute_support(&p);
         p
     }
 
@@ -2815,10 +2856,45 @@ SSH_CONNECTION:203.0.113.7 51000 198.51.100.2 2222\nSYSTEMD:1\nSSH_SOCKET:active
         assert_eq!(p.context.server_port, 22);
     }
 
+    // FreeBSD and friends must be refused: only Linux and macOS have probes.
     #[test]
-    fn probe_rejects_non_linux() {
-        let raw = PROBE_UBUNTU.replace("UNAME:Linux", "UNAME:Darwin");
-        assert!(parse_probe_output(&raw, key_auth()).unwrap_err().starts_with("UNSUPPORTED"));
+    fn probe_rejects_unknown_unix() {
+        let raw = PROBE_UBUNTU.replace("UNAME:Linux", "UNAME:FreeBSD");
+        assert!(parse_probe_output(&raw, key_auth()).unwrap_err().starts_with("UNSUPPORTED: unsupported_os"));
+    }
+
+    const PROBE_MAC: &str = "UNAME:Darwin\nUSER:me\nUID:501\nSUDO:none\nSSH_CONNECTION:203.0.113.7 51000 198.51.100.2 22\nSYSTEMD:0\nFW:none\nMAC_VERSION:15.1\n---SSHD_MAIN---\n";
+
+    // The drop-in decision on macOS decides which file we write; wrong means edits that never take effect.
+    #[test]
+    fn macos_probe_parses_version_and_dropin() {
+        let raw = format!("{PROBE_MAC}Include /etc/ssh/sshd_config.d/*\nPort 22\n");
+        let p = parse_probe_output(&raw, key_auth()).unwrap();
+        assert_eq!(p.os_family, OsFamily::Macos);
+        assert_eq!((p.os_id.as_str(), p.os_version.as_str()), ("macOS", "15.1"));
+        assert!(p.caps.sshd_dropin);
+    }
+
+    #[test]
+    fn macos_probe_without_include_has_no_dropin() {
+        let p = parse_probe_output(&format!("{PROBE_MAC}Port 22\n"), key_auth()).unwrap();
+        assert!(!p.caps.sshd_dropin);
+    }
+
+    #[test]
+    fn macos_probe_parses_ipv6_ssh_connection() {
+        let raw = PROBE_MAC.replace("203.0.113.7 51000 198.51.100.2 22", "2001:db8::7 51000 2001:db8::2 22");
+        let p = parse_probe_output(&raw, key_auth()).unwrap();
+        assert_eq!((p.context.client_ip.as_str(), p.context.server_ip.as_str(), p.context.server_port), ("2001:db8::7", "2001:db8::2", 22));
+    }
+
+    // Any tab the OS cannot fully write must block the apply, with the reason the UI shows.
+    #[test]
+    fn preflight_blocks_when_ssh_not_full() {
+        let view = SshdView { write_target: WriteTarget::DropIn, ..Default::default() };
+        let mut p = probe_for("deploy", true);
+        p.support.ssh = crate::vps_support::TabSupport { level: SupportLevel::ReadOnly, reason: Some("no_systemd".into()) };
+        assert_eq!(apply_preflight(&p, &view, &SshdSettings::default()), Err("UNSUPPORTED: no_systemd".to_string()));
     }
 
     #[test]

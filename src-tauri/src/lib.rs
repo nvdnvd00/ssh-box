@@ -8,6 +8,7 @@ pub mod telemetry;
 pub mod vault;
 pub mod vps_config;
 pub mod vps_guard;
+pub mod vps_support;
 
 use host_store::HostEntry;
 use local_pty::LocalPtyManager;

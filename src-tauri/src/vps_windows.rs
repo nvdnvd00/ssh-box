@@ -376,8 +376,11 @@ pub const WINDOWS_RULE_GROUP: &str = "ssh-box";
 
 // $ErrorActionPreference is Stop (bootstrap), so a failing cmdlet fails the read instead of showing a false "safe" state.
 // Only the process-name lookup is lenient: a process can exit between listing the socket and naming it.
+// The SSH interface's profile lookup is lenient too: unknown ('') only narrows which rules count.
 const WINDOWS_FIREWALL_READ_SCRIPT: &str = r#"$profiles = @(Get-NetFirewallProfile | ForEach-Object { [ordered]@{ name = [string]$_.Name; enabled = ([string]$_.Enabled -eq 'True'); defaultInbound = [string]$_.DefaultInboundAction } })
 $active = @(Get-NetConnectionProfile | ForEach-Object { [string]$_.NetworkCategory -replace 'Authenticated','' } | Select-Object -Unique)
+$sshProfile = ''
+if ($sshIp) { try { $ifx = @(Get-NetIPAddress -IPAddress $sshIp -ErrorAction Stop)[0].InterfaceIndex; $sshProfile = ([string]@(Get-NetConnectionProfile -InterfaceIndex $ifx -ErrorAction Stop)[0].NetworkCategory) -replace 'Authenticated','' } catch { $sshProfile = '' } }
 $ports = @{}; Get-NetFirewallPortFilter -All | ForEach-Object { $ports[$_.InstanceID] = $_ }
 $addrs = @{}; Get-NetFirewallAddressFilter -All | ForEach-Object { $addrs[$_.InstanceID] = $_ }
 $apps = @{}; Get-NetFirewallApplicationFilter -All | ForEach-Object { $apps[$_.InstanceID] = $_ }
@@ -385,7 +388,8 @@ $svcs = @{}; Get-NetFirewallServiceFilter -All | ForEach-Object { $svcs[$_.Insta
 $ifs = @{}; Get-NetFirewallInterfaceTypeFilter -All | ForEach-Object { $ifs[$_.InstanceID] = $_ }
 $rules = @(Get-NetFirewallRule -Direction Inbound -Enabled True | ForEach-Object {
   $p = $ports[$_.InstanceID]; $a = $addrs[$_.InstanceID]
-  if ($p -and $a -and (@($p.LocalPort) -join ',') -ne 'Any') {
+  # Port rules are listed. A block without a port filter is returned too: it is not listed, but it beats any allow.
+  if ($p -and $a -and (((@($p.LocalPort) -join ',') -ne 'Any') -or ([string]$_.Action -eq 'Block'))) {
     # No application filter read: '' (treated as scoped). Otherwise 'Any' or the program path with %SystemRoot% etc. expanded.
     $app = $apps[$_.InstanceID]; $prog = if ($app) { [Environment]::ExpandEnvironmentVariables([string]$app.Program) } else { '' }
     $scoped = ([string]$svcs[$_.InstanceID].Service -ne 'Any') -or ((@($a.LocalAddress) -join ',') -ne 'Any') -or ([string]$ifs[$_.InstanceID].InterfaceType -ne 'Any')
@@ -397,11 +401,13 @@ $sockets = @(
   Get-NetTCPConnection -State Listen | ForEach-Object { [ordered]@{ protocol = 'tcp'; addr = [string]$_.LocalAddress; port = [int]$_.LocalPort; pid = [int]$_.OwningProcess; process = [string]$names[[int]$_.OwningProcess]; path = [string]$paths[[int]$_.OwningProcess] } }
   Get-NetUDPEndpoint | ForEach-Object { [ordered]@{ protocol = 'udp'; addr = [string]$_.LocalAddress; port = [int]$_.LocalPort; pid = [int]$_.OwningProcess; process = [string]$names[[int]$_.OwningProcess]; path = [string]$paths[[int]$_.OwningProcess] } }
 )
-ConvertTo-Json -InputObject ([ordered]@{ profiles = $profiles; active = $active; rules = $rules; sockets = $sockets }) -Depth 5 -Compress
+ConvertTo-Json -InputObject ([ordered]@{ profiles = $profiles; active = $active; sshProfile = $sshProfile; rules = $rules; sockets = $sockets }) -Depth 5 -Compress
 "#;
 
-pub fn windows_firewall_read_script() -> String {
-    WINDOWS_FIREWALL_READ_SCRIPT.to_string()
+// server_ip names the interface the SSH session arrives on; anything but a plain address leaves its profile unknown.
+pub fn windows_firewall_read_script(server_ip: &str) -> String {
+    let ip = server_ip.trim().parse::<std::net::IpAddr>().map(|ip| ip.to_string()).unwrap_or_default();
+    format!("$sshIp = {}\n{WINDOWS_FIREWALL_READ_SCRIPT}", ps_quote(&ip))
 }
 
 #[derive(Deserialize)]
@@ -449,10 +455,14 @@ struct WinSocket {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WinFirewall {
     profiles: Vec<WinProfile>,
     #[serde(default)]
     active: Vec<String>,
+    // Profile of the interface that owns the SSH server address; "" when it could not be read.
+    #[serde(default)]
+    ssh_profile: String,
     #[serde(default)]
     rules: Vec<WinRule>,
     #[serde(default)]
@@ -476,12 +486,14 @@ pub fn parse_windows_firewall(json: &str) -> Result<FirewallSnapshot, String> {
     let in_use = |p: &&WinProfile| w.active.is_empty() || w.active.iter().any(|a| a.eq_ignore_ascii_case(&p.name));
     let enabled = w.profiles.iter().filter(in_use).any(|p| p.enabled);
     let blocks = w.profiles.iter().filter(in_use).any(|p| p.default_inbound.eq_ignore_ascii_case("block"));
+    // A rule carries (or blocks) this session only on the profile of the interface SSH arrives on: on a multi-NIC host
+    // another active profile says nothing about it. Unknown profile: only rules for every profile count.
+    let ssh_profile = w.ssh_profile.trim();
     let applies = |profile: &str| {
         let p = profile.trim();
-        w.active.is_empty()
-            || p.is_empty()
+        p.is_empty()
             || p.eq_ignore_ascii_case("any")
-            || p.split(',').any(|x| w.active.iter().any(|a| a.eq_ignore_ascii_case(x.trim())))
+            || (!ssh_profile.is_empty() && p.split(',').any(|x| x.trim().eq_ignore_ascii_case(ssh_profile)))
     };
     // A program-scoped rule (the stock OpenSSH one is limited to sshd.exe) applies only while exactly that file owns every
     // socket on its port: another sshd.exe (zip/MSI install, Cygwin) does not, and an unknown listener path never does.
@@ -493,8 +505,8 @@ pub fn parse_windows_firewall(json: &str) -> Result<FirewallSnapshot, String> {
         let mut on_port = w.sockets.iter().filter(|s| rule_port_matches(&r.local_port, protocol, s.port, &s.protocol)).peekable();
         !prog.is_empty() && on_port.peek().is_some() && on_port.all(|s| !s.path.is_empty() && s.path.eq_ignore_ascii_case(prog))
     };
-    // Every rule is listed; only plain port rules of an active profile take part in the exposure, the rest leave the port "unknown".
-    let mut rules = Vec::new();
+    // Every port rule is listed; only plain port rules of the SSH profile take part in the exposure, the rest leave the port "unknown".
+    let (mut rules, mut unlisted_blocks) = (Vec::new(), Vec::new());
     for r in &w.rules {
         let protocol = match r.protocol.to_ascii_lowercase().as_str() {
             "tcp" => "tcp",
@@ -525,10 +537,14 @@ pub fn parse_windows_firewall(json: &str) -> Result<FirewallSnapshot, String> {
                 raw_spec: r.display_name.clone(),
                 effective: !r.scoped && applies(&r.profile) && program_owns(r, protocol),
             };
-            rules.push(item);
+            if r.local_port.trim().eq_ignore_ascii_case("any") {
+                unlisted_blocks.push(item);
+            } else {
+                rules.push(item);
+            }
         }
     }
-    let counted: Vec<FirewallRuleItem> = rules.iter().filter(|r| r.effective).cloned().collect();
+    let counted: Vec<FirewallRuleItem> = rules.iter().chain(&unlisted_blocks).filter(|r| r.effective).cloned().collect();
     let listening_sockets = w
         .sockets
         .iter()
@@ -554,6 +570,7 @@ pub fn parse_windows_firewall(json: &str) -> Result<FirewallSnapshot, String> {
         ipv6_filtered: true,
         rules,
         listening_sockets,
+        unlisted_blocks,
     })
 }
 
@@ -610,6 +627,32 @@ pub fn windows_ensure_port(ctx: &ConnectionContext, rules: &[FirewallRuleItem]) 
     crate::vps_guard::ssh_allow_needed(ctx, &effective).then_some(ctx.server_port)
 }
 
+// Listed rules plus the unlisted any-port blocks: everything that decides whether this session still gets in.
+fn guard_rules(snap: &FirewallSnapshot) -> Vec<FirewallRuleItem> {
+    snap.rules.iter().chain(&snap.unlisted_blocks).cloned().collect()
+}
+
+// Enabling makes every saved block live, and a block beats the auto-allow: refuse while one covers this session.
+pub fn build_windows_set_state(ctx: &ConnectionContext, snap: &FirewallSnapshot, enable: bool) -> Result<String, String> {
+    if enable {
+        crate::vps_guard::check_firewall_enable_windows(ctx, &guard_rules(snap))?;
+    }
+    Ok(build_windows_firewall_state_script(enable, windows_ensure_port(ctx, &snap.rules)))
+}
+
+// Trust only the fresh rows (never the client's flags): find the rule by name, then guard and delete it.
+pub fn build_windows_delete(ctx: &ConnectionContext, snap: &FirewallSnapshot, raw_spec: &str) -> Result<String, String> {
+    let fresh: Vec<&FirewallRuleItem> = snap.rules.iter().filter(|r| r.raw_spec == raw_spec).collect();
+    let Some(target) = fresh.first() else {
+        return Err(vps_err(ERR_COMMAND_FAILED, "rule not found"));
+    };
+    if fresh.iter().any(|r| r.comment != WINDOWS_RULE_GROUP) {
+        return Err(vps_err(ERR_UNSUPPORTED, "windows_rule_not_managed"));
+    }
+    crate::vps_guard::check_firewall_delete_windows(ctx, &guard_rules(snap), target)?;
+    build_windows_delete_rule_script(target)
+}
+
 pub fn build_windows_firewall_state_script(enable: bool, ensure_port: Option<u16>) -> String {
     let mut s = String::new();
     if let (true, Some(p)) = (enable, ensure_port) {
@@ -623,15 +666,15 @@ pub fn build_windows_firewall_state_script(enable: bool, ensure_port: Option<u16
 }
 
 // Write, then the fresh snapshot in the same run (same marker as the Linux path).
-pub async fn run_windows_firewall_write(host_id: &str, pool: &SshPool, write: &str) -> Result<FirewallSnapshot, String> {
-    let script = format!("{write}Write-Output 'SSHBOX_SNAPSHOT_BEGIN'\n{}", windows_firewall_read_script());
+pub async fn run_windows_firewall_write(host_id: &str, pool: &SshPool, server_ip: &str, write: &str) -> Result<FirewallSnapshot, String> {
+    let script = format!("{write}Write-Output 'SSHBOX_SNAPSHOT_BEGIN'\n{}", windows_firewall_read_script(server_ip));
     let raw = run_windows_script(host_id, pool, &script, None).await?;
     parse_windows_firewall(raw.rsplit("SSHBOX_SNAPSHOT_BEGIN").next().unwrap_or(&raw))
 }
 
 pub async fn get_windows_firewall(host_id: &str, pool: &SshPool, probe: &VpsProbe) -> Result<FirewallSnapshot, String> {
     check_windows_readable(probe)?;
-    parse_windows_firewall(&run_windows_script(host_id, pool, &windows_firewall_read_script(), None).await?)
+    parse_windows_firewall(&run_windows_script(host_id, pool, &windows_firewall_read_script(&probe.context.server_ip), None).await?)
 }
 
 // The exec fails when the host has no powershell.exe (e.g. cmd.exe: "not recognized"): not a Windows we can manage.
@@ -866,7 +909,7 @@ mod tests {
         assert!(parse_windows_accounts("not json").unwrap_err().starts_with("COMMAND_FAILED"));
     }
 
-    const FW: &str = r#"{"profiles":[{"name":"Domain","enabled":false,"defaultInbound":"Block"},{"name":"Private","enabled":true,"defaultInbound":"Block"}],"active":["Private"],"rules":[{"displayName":"OpenSSH-Server-In-TCP","group":"ssh-box","program":"Any","action":"Allow","localPort":"22","protocol":"TCP","remoteAddress":"Any"},{"displayName":"Cho phép Đạt","group":"","program":"Any","action":"Block","localPort":"8080","protocol":"UDP","remoteAddress":"10.0.0.0/8"}],"sockets":[{"protocol":"tcp","addr":"::","port":22,"pid":1234,"process":"sshd","path":"C:\\Windows\\System32\\OpenSSH\\sshd.exe"},{"protocol":"tcp","addr":"127.0.0.1","port":5432,"pid":null,"process":"","path":""}]}"#;
+    const FW: &str = r#"{"profiles":[{"name":"Domain","enabled":false,"defaultInbound":"Block"},{"name":"Private","enabled":true,"defaultInbound":"Block"}],"active":["Private"],"sshProfile":"Private","rules":[{"displayName":"OpenSSH-Server-In-TCP","group":"ssh-box","program":"Any","action":"Allow","localPort":"22","protocol":"TCP","remoteAddress":"Any"},{"displayName":"Cho phép Đạt","group":"","program":"Any","action":"Block","localPort":"8080","protocol":"UDP","remoteAddress":"10.0.0.0/8"}],"sockets":[{"protocol":"tcp","addr":"::","port":22,"pid":1234,"process":"sshd","path":"C:\\Windows\\System32\\OpenSSH\\sshd.exe"},{"protocol":"tcp","addr":"127.0.0.1","port":5432,"pid":null,"process":"","path":""}]}"#;
 
     // Rule "Any" phải thành hai mục v4/v6, tên rule và nhóm phải qua được để Task 9 xoá theo tên.
     #[test]
@@ -925,7 +968,7 @@ mod tests {
     // Script đọc phải ghép bộ lọc một lần (PS 5.1 chậm) và không nuốt lỗi cả danh mục.
     #[test]
     fn windows_firewall_script_joins_filters_once_and_fails_loudly() {
-        let s = windows_firewall_read_script();
+        let s = windows_firewall_read_script("10.0.0.9");
         assert!(s.contains("Get-NetFirewallApplicationFilter -All") && s.contains("Get-NetFirewallInterfaceTypeFilter -All") && s.contains("profile = [string]$_.Profile"));
         assert!(s.contains("Get-NetFirewallPortFilter -All") && s.contains("Get-NetFirewallAddressFilter -All"));
         assert!(s.contains("Get-NetTCPConnection -State Listen") && s.contains("Get-NetUDPEndpoint"));
@@ -981,7 +1024,7 @@ mod tests {
         assert!(!counts(&s) && s.listening_sockets[0].exposure == "unknown");
         assert_eq!(windows_ensure_port(&ctx, &s.rules), Some(22));
         assert!(!counts(&with(inbox, "")), "an unreadable path (PID 4 System) never owns a port");
-        let script = windows_firewall_read_script();
+        let script = windows_firewall_read_script("10.0.0.9");
         assert!(script.contains("[Environment]::ExpandEnvironmentVariables(") && script.contains("$paths[[int]$_.Id] = [string]$_.Path"));
     }
 
@@ -990,7 +1033,7 @@ mod tests {
     fn windows_rule_without_application_filter_is_not_effective() {
         let s = parse_windows_firewall(&FW.replace(r#""group":"ssh-box","program":"Any","#, r#""group":"ssh-box","#)).unwrap();
         assert!(s.rules.iter().filter(|r| r.raw_spec == "OpenSSH-Server-In-TCP").all(|r| !r.effective));
-        assert!(windows_firewall_read_script().contains("$prog = if ($app) {"));
+        assert!(windows_firewall_read_script("10.0.0.9").contains("$prog = if ($app) {"));
     }
 
     // Mỗi địa chỉ nguồn phải thành mục riêng đúng họ v4/v6, nếu không guard khoá không thấy allow của máy khách IPv6.
@@ -1090,6 +1133,73 @@ mod tests {
         assert_eq!(windows_ensure_port(&ctx, &[r.clone()]), Some(22));
         r.effective = true;
         assert_eq!(windows_ensure_port(&ctx, &[r]), None);
+    }
+
+    fn admin_ctx() -> ConnectionContext {
+        parse_windows_probe(&raw("1", "admin", CONN), key_auth()).unwrap().context
+    }
+
+    // Firewall off, SSH arrives on the Private NIC, the stock Private-only allow, plus EXTRA rules.
+    const FW_OFF: &str = r#"{"profiles":[{"name":"Private","enabled":false,"defaultInbound":"Block"}],"active":["Private"],"sshProfile":"Private","rules":[{"displayName":"OpenSSH-Server-In-TCP","group":"","program":"Any","profile":"Private","action":"Allow","localPort":"22","protocol":"TCP","remoteAddress":"Any"}EXTRA],"sockets":[{"protocol":"tcp","addr":"0.0.0.0","port":22,"pid":1,"process":"sshd","path":"C:\\Windows\\System32\\OpenSSH\\sshd.exe"}]}"#;
+    const ANY_PORT_BLOCK: &str = r#",{"displayName":"block subnet","group":"tmp","program":"Any","profile":"Any","action":"Block","localPort":"Any","protocol":"Any","remoteAddress":"10.0.0.0/255.255.255.0"}"#;
+    const MY_ALLOW: &str = r#",{"displayName":"ssh-box: ALLOW 22/tcp from any","group":"ssh-box","program":"Any","profile":"Any","action":"Allow","localPort":"22","protocol":"TCP","remoteAddress":"Any"}"#;
+    fn fw_off(extra: &str) -> FirewallSnapshot {
+        parse_windows_firewall(&FW_OFF.replace("EXTRA", extra)).unwrap()
+    }
+
+    // A saved "block every port from my subnet" beats the auto-allow once the firewall is on: enabling would cut SSH.
+    #[test]
+    fn windows_enable_refused_when_any_port_block_covers_me() {
+        let snap = fw_off(ANY_PORT_BLOCK);
+        assert_eq!(build_windows_set_state(&admin_ctx(), &snap, true), Err("LOCKOUT_BLOCKED: windows_block_covers_me".to_string()));
+        assert!(build_windows_set_state(&admin_ctx(), &snap, false).is_ok(), "turning the firewall off never locks anyone out");
+        // Hidden from the UI list, yet the read script must still return port-less blocks.
+        assert!(!snap.rules.iter().any(|r| r.raw_spec == "block subnet"));
+        assert!(windows_firewall_read_script("10.0.0.9").contains("-or ([string]$_.Action -eq 'Block')"));
+    }
+
+    // A port-less block for another subnet does not touch this session, so enabling must still work.
+    #[test]
+    fn windows_enable_allowed_when_any_port_block_is_for_another_subnet() {
+        let snap = fw_off(&ANY_PORT_BLOCK.replace("10.0.0.0/255.255.255.0", "192.0.2.0/255.255.255.0"));
+        assert!(build_windows_set_state(&admin_ctx(), &snap, true).unwrap().contains("-Enabled True"));
+    }
+
+    // Block wins: with a port-less block on my subnet, deleting my ssh-box allow leaves no way in although the stock allow stays.
+    #[test]
+    fn windows_delete_counts_any_port_block_covering_me() {
+        let snap = fw_off(&format!("{MY_ALLOW}{ANY_PORT_BLOCK}"));
+        assert!(!snap.rules.iter().any(|r| r.raw_spec == "block subnet"));
+        assert_eq!(build_windows_delete(&admin_ctx(), &snap, "ssh-box: ALLOW 22/tcp from any"), Err("LOCKOUT_BLOCKED: only_ssh_rule".to_string()));
+        assert!(build_windows_delete(&admin_ctx(), &fw_off(MY_ALLOW), "ssh-box: ALLOW 22/tcp from any").is_ok());
+    }
+
+    // Multi-NIC host: SSH arrives on a Public NIC while another NIC is Private. The Private-only stock rule does not carry
+    // this session, so enabling must add the SSH allow first.
+    #[test]
+    fn windows_rule_counts_only_on_the_ssh_interface_profile() {
+        let public = FW_OFF.replace(r#""active":["Private"],"sshProfile":"Private""#, r#""active":["Private","Public"],"sshProfile":"Public""#).replace("EXTRA", "");
+        let snap = parse_windows_firewall(&public).unwrap();
+        assert!(snap.rules.iter().all(|r| !r.effective));
+        assert_eq!(windows_ensure_port(&admin_ctx(), &snap.rules), Some(22));
+        assert!(build_windows_set_state(&admin_ctx(), &snap, true).unwrap().contains("New-NetFirewallRule"));
+        let both = parse_windows_firewall(&public.replace(r#""profile":"Private""#, r#""profile":"Private, Public""#)).unwrap();
+        assert_eq!(windows_ensure_port(&admin_ctx(), &both.rules), None);
+        let private = parse_windows_firewall(&public.replace(r#""sshProfile":"Public""#, r#""sshProfile":"Private""#)).unwrap();
+        assert_eq!(windows_ensure_port(&admin_ctx(), &private.rules), None);
+    }
+
+    // When the SSH interface's profile cannot be read, only rules for every profile ("Any") may count.
+    #[test]
+    fn windows_unknown_ssh_profile_counts_only_any_profile_rules() {
+        let unknown = FW_OFF.replace(r#","sshProfile":"Private""#, "").replace("EXTRA", "");
+        assert!(parse_windows_firewall(&unknown).unwrap().rules.iter().all(|r| !r.effective));
+        let any = parse_windows_firewall(&unknown.replace(r#""profile":"Private""#, r#""profile":"Any""#)).unwrap();
+        assert!(any.rules.iter().all(|r| r.effective));
+        let s = windows_firewall_read_script("10.0.0.9");
+        assert!(s.starts_with("$sshIp = '10.0.0.9'\n"), "{s}");
+        assert!(s.contains("Get-NetIPAddress -IPAddress $sshIp") && s.contains("Get-NetConnectionProfile -InterfaceIndex") && s.contains("sshProfile = $sshProfile"));
+        assert!(windows_firewall_read_script("10.0.0.9'; calc").starts_with("$sshIp = ''\n"));
     }
 
     // Arming the 60s rollback before restarting sshd is what makes a bad config recoverable.

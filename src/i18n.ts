@@ -370,6 +370,8 @@ const VI_STRINGS: AppI18nStrings = {
     login_user: "Đây là user mà ứng dụng đang đăng nhập.",
     last_sudo_user: "Đây là user cuối cùng có quyền sudo.",
     key_in_use: "Đây là SSH key mà ứng dụng đang dùng để đăng nhập.",
+    windows_block_covers_me:
+      "Đang có rule chặn chính kết nối SSH của bạn. Bật firewall lúc này sẽ cắt kết nối, nên ứng dụng không bật.",
   },
   vpsUnsupportedReasons: {
     linux_only: "Cấu hình VPS không dùng cho máy local",
@@ -632,6 +634,8 @@ const EN_STRINGS: AppI18nStrings = {
     login_user: "This is the user the app signs in as.",
     last_sudo_user: "This is the last user with sudo.",
     key_in_use: "This is the SSH key the app signs in with.",
+    windows_block_covers_me:
+      "A rule blocks your own SSH connection. Turning the firewall on now would cut you off, so the app will not do it.",
   },
   vpsUnsupportedReasons: {
     linux_only: "Server Config is not available for the local machine",

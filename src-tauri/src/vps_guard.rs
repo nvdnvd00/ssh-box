@@ -114,6 +114,13 @@ pub fn check_firewall_delete(
     Ok(())
 }
 
+fn blocks_my_ssh(ctx: &ConnectionContext, r: &FirewallRuleItem) -> bool {
+    !is_allow(&r.action)
+        && r.v6 == ctx.client_ip.contains(':')
+        && rule_port_matches(&r.to_port, &r.protocol, ctx.server_port, "tcp")
+        && source_covers(&r.from_source, &ctx.client_ip)
+}
+
 // Windows Firewall: a block rule wins over any allow, so an allow only counts while no block covers the same ssh path.
 pub fn check_firewall_delete_windows(
     ctx: &ConnectionContext,
@@ -121,18 +128,20 @@ pub fn check_firewall_delete_windows(
     target: &FirewallRuleItem,
 ) -> Result<(), String> {
     let removed = |r: &FirewallRuleItem| r.raw_spec == target.raw_spec;
-    let blocks_me = |r: &FirewallRuleItem| {
-        !is_allow(&r.action)
-            && r.v6 == ctx.client_ip.contains(':')
-            && rule_port_matches(&r.to_port, &r.protocol, ctx.server_port, "tcp")
-            && source_covers(&r.from_source, &ctx.client_ip)
-    };
     // Only effective allows carry the client in; blocks count either way (conservative).
     let carries = |r: &FirewallRuleItem| r.effective && allows_my_ssh(ctx, r);
     let removes_mine = std::iter::once(target).chain(rules.iter().filter(|r| removed(r))).any(carries);
-    let still_open = rules.iter().any(|r| !removed(r) && carries(r)) && !rules.iter().any(|r| !removed(r) && blocks_me(r));
+    let still_open = rules.iter().any(|r| !removed(r) && carries(r)) && !rules.iter().any(|r| !removed(r) && blocks_my_ssh(ctx, r));
     if removes_mine && !still_open {
         return block("only_ssh_rule");
+    }
+    Ok(())
+}
+
+// Windows: enabling turns every saved block on, and the auto-allow cannot beat a block that covers this session.
+pub fn check_firewall_enable_windows(ctx: &ConnectionContext, rules: &[FirewallRuleItem]) -> Result<(), String> {
+    if rules.iter().any(|r| r.effective && blocks_my_ssh(ctx, r)) {
+        return block("windows_block_covers_me");
     }
     Ok(())
 }

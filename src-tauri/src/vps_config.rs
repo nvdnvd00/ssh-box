@@ -2477,6 +2477,7 @@ mod tests {
     use super::*;
 
     // cmd.exe and PowerShell have no `true`: with it every Windows change failed its new-connection check and rolled back.
+    #[cfg(unix)]
     #[test]
     fn verify_command_is_a_builtin_of_sh_cmd_and_powershell() {
         assert_eq!(VERIFY_COMMAND, "exit 0");

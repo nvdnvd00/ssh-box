@@ -104,16 +104,26 @@ pub fn parse_windows_probe(raw: &str, auth: AuthUsed) -> Result<VpsProbe, String
 }
 
 pub const WINDOWS_SSHD_CONFIG: &str = r"C:\ProgramData\ssh\sshd_config";
-const SSHD_EXE: &str = r#""$env:WINDIR\System32\OpenSSH\sshd.exe""#;
+// This OpenSSH build never exits on `sshd -t` of an invalid config, so every sshd.exe call is bounded and returns {Code, Out, Err}.
+const SSHD_HELPER: &str = r#"function sshbox_sshd([string]$argline) {
+  $psi = New-Object Diagnostics.ProcessStartInfo
+  $psi.FileName = "$env:WINDIR\System32\OpenSSH\sshd.exe"; $psi.Arguments = $argline
+  $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+  $p = [Diagnostics.Process]::Start($psi)
+  $o = $p.StandardOutput.ReadToEndAsync(); $e = $p.StandardError.ReadToEndAsync()
+  if (-not $p.WaitForExit(15000)) { try { $p.Kill() } catch { }; return [pscustomobject]@{ Code = -1; Out = ''; Err = 'sshd timed out after 15s' } }
+  [pscustomobject]@{ Code = $p.ExitCode; Out = $o.Result; Err = $e.Result }
+}
+"#;
 
 // PS 5.1 does not throw when a native command fails, so $LASTEXITCODE is checked and thrown by hand.
 pub fn windows_sshd_view_script(spec: &str) -> String {
     format!(
-        r#"$t = & {SSHD_EXE} -T -C {spec}
-if ($LASTEXITCODE -ne 0) {{ throw "sshd -T failed with exit code $LASTEXITCODE" }}
-$t
+        r#"{SSHD_HELPER}$r = sshbox_sshd ('-T -C "' + {spec} + '"')
+if ($r.Code -ne 0) {{ throw "sshd -T failed with exit code $($r.Code): $($r.Err)" }}
+$r.Out
 '{SSHD_PART}'
-Get-Content -Raw -LiteralPath '{WINDOWS_SSHD_CONFIG}'
+Get-Content -Raw -Encoding UTF8 -LiteralPath '{WINDOWS_SSHD_CONFIG}'
 '{SSHD_PART}'
 '{SSHD_PART}'
 if ((Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) -and (Get-ScheduledTask -TaskName sshbox-rollback -ErrorAction SilentlyContinue)) {{ 'active' }} else {{ 'inactive' }}
@@ -137,8 +147,11 @@ function sshbox_restore {{
     )
 }
 
+// The child's stderr must not abort the parent under EAP=Stop, so judge it by exit code.
 fn windows_run_rollback_cmd() -> String {
-    format!("& powershell.exe -NoProfile -ExecutionPolicy Bypass -File '{WINDOWS_ROLLBACK_SCRIPT}'")
+    format!(
+        "$ea = $ErrorActionPreference; $ErrorActionPreference = 'Continue'; & powershell.exe -NoProfile -ExecutionPolicy Bypass -File '{WINDOWS_ROLLBACK_SCRIPT}' 2>&1 | Out-Null; $rbrc = $LASTEXITCODE; $ErrorActionPreference = $ea; if ($rbrc -ne 0) {{ 'SSHBOX_ROLLBACK_FAILED' }}"
+    )
 }
 
 // Runs as SYSTEM 60s after arming (or by "Roll back now"). Unregistering is last: it may end the task running this script.
@@ -157,36 +170,42 @@ pub fn build_sshd_rollback_script_windows(new_port: Option<u16>) -> String {
     )
 }
 
-// The new config arrives in $SSHBOX_SECRET (LF, no BOM); BOM and line endings of the existing file are put back here.
+// The new config arrives in $SSHBOX_SECRET (LF, no BOM). BOM and line endings of the existing file are put back here (the only layer that does it).
+// Order matters: validate a side file first (sshd -t can hang on a bad config), arm the rollback, only then replace the live file.
 pub fn build_sshd_apply_script_windows(new_port: Option<u16>, port: u16) -> String {
     let fw = new_port.map_or(String::new(), |p| new_rule_cmd("allow", "any", &p.to_string(), "tcp", "tcp"));
     format!(
-        r#"{restore}$R = '{WINDOWS_ROLLBACK_SCRIPT}'
+        r#"{restore}{SSHD_HELPER}$R = '{WINDOWS_ROLLBACK_SCRIPT}'
+$N = "$F.sshbox.new"
 if (Get-ScheduledTask -TaskName {WINDOWS_ROLLBACK_TASK} -ErrorAction SilentlyContinue) {{ 'SSHBOX_ROLLBACK_PENDING'; throw 'a previous change is still waiting for verification' }}
 $old = @()
-if (Test-Path -LiteralPath $F) {{ $old = [IO.File]::ReadAllBytes($F); Copy-Item -LiteralPath $F -Destination "$F.sshbox.bak" -Force; Remove-Item -LiteralPath "$F.sshbox.absent" -Force -ErrorAction SilentlyContinue }}
-else {{ New-Item -ItemType File -Path "$F.sshbox.absent" -Force | Out-Null; Remove-Item -LiteralPath "$F.sshbox.bak" -Force -ErrorAction SilentlyContinue }}
+if (Test-Path -LiteralPath $F) {{ $old = [IO.File]::ReadAllBytes($F) }}
 $bom = $old.Length -ge 3 -and $old[0] -eq 0xEF -and $old[1] -eq 0xBB -and $old[2] -eq 0xBF
 $eol = if ([Text.Encoding]::UTF8.GetString($old).Contains("`r`n")) {{ "`r`n" }} else {{ "`n" }}
-$text = ($SSHBOX_SECRET.TrimStart([char]0xFEFF) -replace "
-?
-", $eol)
+$text = ($SSHBOX_SECRET.TrimStart([char]0xFEFF) -replace '\r?\n', $eol)
 if ($bom) {{ $text = [string][char]0xFEFF + $text }}
-[IO.File]::WriteAllText($F, $text, (New-Object Text.UTF8Encoding $false))
-$ea = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-$chk = & {SSHD_EXE} -t 2>&1 | Out-String; $rc = $LASTEXITCODE
-$ErrorActionPreference = $ea
-if ($rc -ne 0) {{ sshbox_restore; 'SSHBOX_SSHD_INVALID'; $chk; throw "sshd -t failed with exit code $rc" }}
-[IO.File]::WriteAllText($R, @'
+[IO.File]::WriteAllText($N, $text, (New-Object Text.UTF8Encoding $false))
+$v = sshbox_sshd ('-t -f "' + $N + '"')
+if ($v.Code -ne 0) {{ Remove-Item -LiteralPath $N -Force -ErrorAction SilentlyContinue; 'SSHBOX_SSHD_INVALID'; ($v.Err -split "`r?`n")[0]; throw "sshd -t failed with exit code $($v.Code)" }}
+try {{
+  if (Test-Path -LiteralPath $F) {{ Copy-Item -LiteralPath $F -Destination "$F.sshbox.bak" -Force; Remove-Item -LiteralPath "$F.sshbox.absent" -Force -ErrorAction SilentlyContinue }}
+  else {{ New-Item -ItemType File -Path "$F.sshbox.absent" -Force | Out-Null; Remove-Item -LiteralPath "$F.sshbox.bak" -Force -ErrorAction SilentlyContinue }}
+  [IO.File]::WriteAllText($R, @'
 {rollback}'@)
-$act = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -ExecutionPolicy Bypass -File "{WINDOWS_ROLLBACK_SCRIPT}"'
-$trg = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(60)
-$set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Register-ScheduledTask -TaskName {WINDOWS_ROLLBACK_TASK} -Action $act -Trigger $trg -Settings $set -User SYSTEM -RunLevel Highest -Force | Out-Null
+  $act = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -ExecutionPolicy Bypass -File "{WINDOWS_ROLLBACK_SCRIPT}"'
+  $trg = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(60)
+  $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+  Register-ScheduledTask -TaskName {WINDOWS_ROLLBACK_TASK} -Action $act -Trigger $trg -Settings $set -User SYSTEM -RunLevel Highest -Force | Out-Null
+}} catch {{
+  sshbox_restore; Remove-Item -LiteralPath $N, $R -Force -ErrorAction SilentlyContinue
+  Unregister-ScheduledTask -TaskName {WINDOWS_ROLLBACK_TASK} -Confirm:$false -ErrorAction SilentlyContinue
+  throw
+}}
 try {{
   $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
   "NOW:$now"
   "ROLLBACK_AT:$($now + 60)"
+  Move-Item -LiteralPath $N -Destination $F -Force
   {fw}Restart-Service sshd
   $up = $false
   for ($i = 0; $i -lt 10 -and -not $up; $i++) {{ Start-Sleep -Milliseconds 500; $up = [bool](Get-NetTCPConnection -State Listen -LocalPort {port} -ErrorAction SilentlyContinue) }}
@@ -212,7 +231,7 @@ Remove-Item -LiteralPath "$F.sshbox.bak", "$F.sshbox.absent", '{WINDOWS_ROLLBACK
 
 pub fn windows_rollback_now_script() -> String {
     format!(
-        "if (Test-Path -LiteralPath '{WINDOWS_ROLLBACK_SCRIPT}') {{ {} }}\nUnregister-ScheduledTask -TaskName {WINDOWS_ROLLBACK_TASK} -Confirm:$false -ErrorAction SilentlyContinue\n",
+        "if (Test-Path -LiteralPath '{WINDOWS_ROLLBACK_SCRIPT}') {{ {}; if ($rbrc -ne 0) {{ throw 'the rollback script failed' }} }}\nUnregister-ScheduledTask -TaskName {WINDOWS_ROLLBACK_TASK} -Confirm:$false -ErrorAction SilentlyContinue\n",
         windows_run_rollback_cmd()
     )
 }
@@ -239,16 +258,14 @@ pub async fn get_windows_sshd_view(host_id: &str, pool: &SshPool, probe: &VpsPro
     parse_windows_sshd_view(&run_windows_script(host_id, pool, &windows_sshd_view_script(&spec), None).await?)
 }
 
-pub const WINDOWS_ACCOUNTS_READ_SCRIPT: &str = r#"$sshd = "$env:WINDIR\System32\OpenSSH\sshd.exe"
-$admins = @(Get-LocalGroupMember -SID S-1-5-32-544 -ErrorAction SilentlyContinue | ForEach-Object { $_.Name.Split('\')[-1] })
+const WINDOWS_ACCOUNTS_BODY: &str = r#"$admins = @(Get-LocalGroupMember -SID S-1-5-32-544 -ErrorAction SilentlyContinue | ForEach-Object { $_.Name.Split('\')[-1] })
 $rows = foreach ($u in Get-LocalUser) {
   $isAdmin = $admins -contains $u.Name
   $file = "C:\Users\$($u.Name)\.ssh\authorized_keys"
   if ($isAdmin) {
-    try {
-      $eff = & $sshd -T -C "user=$($u.Name),host=localhost,addr=127.0.0.1" 2>$null | Where-Object { $_ -match '^authorizedkeysfile ' }
-      if ($eff -match 'administrators_authorized_keys') { $file = 'C:\ProgramData\ssh\administrators_authorized_keys' }
-    } catch { }
+    $r = sshbox_sshd ('-T -C "user=' + $u.Name + ',host=localhost,addr=127.0.0.1"')
+    if ($r.Code -ne 0) { throw "sshd -T failed for $($u.Name): $($r.Err)" }
+    if (@($r.Out -split "`r?`n") -match '^authorizedkeysfile .*administrators_authorized_keys') { $file = 'C:\ProgramData\ssh\administrators_authorized_keys' }
   }
   $keys = @()
   try { $keys = @(Get-Content -LiteralPath $file -ErrorAction Stop) } catch { }
@@ -256,6 +273,10 @@ $rows = foreach ($u in Get-LocalUser) {
 }
 ConvertTo-Json -InputObject @($rows) -Depth 4 -Compress
 "#;
+
+pub fn windows_accounts_read_script() -> String {
+    format!("{SSHD_HELPER}{WINDOWS_ACCOUNTS_BODY}")
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -301,7 +322,7 @@ pub fn parse_windows_accounts(json: &str) -> Result<AccessKeysSnapshot, String> 
 }
 
 pub async fn get_windows_accounts(host_id: &str, pool: &SshPool) -> Result<AccessKeysSnapshot, String> {
-    parse_windows_accounts(&run_windows_script(host_id, pool, WINDOWS_ACCOUNTS_READ_SCRIPT, None).await?)
+    parse_windows_accounts(&run_windows_script(host_id, pool, &windows_accounts_read_script(), None).await?)
 }
 
 pub const WINDOWS_RULE_GROUP: &str = "ssh-box";
@@ -683,8 +704,8 @@ mod tests {
     #[test]
     fn windows_view_script_checks_exit_code_and_quotes_spec() {
         let s = windows_sshd_view_script("user=o'x,host=h");
-        assert!(s.contains("-T -C 'user=o''x,host=h'"));
-        assert!(s.contains("$LASTEXITCODE -ne 0") && s.contains("throw"));
+        assert!(s.contains("+ 'user=o''x,host=h' +"));
+        assert!(s.contains("$r.Code -ne 0") && s.contains("throw") && s.contains("-Encoding UTF8"));
         assert_eq!(s.matches("---SSHBOX-PART---").count(), 3);
         assert!(s.contains(WINDOWS_SSHD_CONFIG) && s.contains("sshbox-rollback"));
     }
@@ -692,7 +713,7 @@ mod tests {
     // The accounts script must keep one-element arrays as arrays and survive an unreadable keys file.
     #[test]
     fn windows_accounts_script_is_array_safe_and_per_file_guarded() {
-        let s = WINDOWS_ACCOUNTS_READ_SCRIPT;
+        let s = windows_accounts_read_script();
         assert!(s.contains("ConvertTo-Json -InputObject @($rows) -Depth 4"));
         assert!(s.contains("catch { }") && s.contains("administrators_authorized_keys"));
     }
@@ -909,16 +930,56 @@ mod tests {
         assert!(s.contains("NOW:") && s.contains("ROLLBACK_AT:") && s.contains("SSHBOX_ROLLBACK_PENDING"));
     }
 
-    // PowerShell 5.1 ignores a failing native exit code: an invalid config must be restored and reported, not left in place.
+    // This sshd hangs on `-t` of a bad config: the candidate is validated as a side file, before backup, arming or touching the live file.
     #[test]
-    fn windows_apply_checks_exit_code_and_restores_on_invalid() {
+    fn windows_apply_validates_side_file_before_touching_live_config() {
         let s = build_sshd_apply_script_windows(None, 22);
-        let at = s.find("$rc -ne 0").unwrap();
-        let tail = &s[at..];
-        assert!(s.contains("$LASTEXITCODE") && s.contains("sshd.exe\" -t"));
-        assert!(tail.find("sshbox_restore").unwrap() < tail.find("SSHBOX_SSHD_INVALID").unwrap());
-        assert!(tail.find("SSHBOX_SSHD_INVALID").unwrap() < tail.find("throw").unwrap());
-        assert!(!s.contains("ALLOW"), "no port change, no firewall rule");
+        let at = |n: &str| s.find(n).unwrap_or_else(|| panic!("missing {n}"));
+        let validate = at("sshbox_sshd ('-t -f \"' + $N");
+        assert!(at("WriteAllText($N") < validate);
+        for later in ["Copy-Item -LiteralPath $F", "Register-ScheduledTask -TaskName", "Move-Item -LiteralPath $N"] {
+            assert!(validate < at(later), "{later}");
+        }
+        assert!(at("Register-ScheduledTask -TaskName") < at("Move-Item -LiteralPath $N"));
+        let bad = &s[at("$v.Code -ne 0")..];
+        assert!(bad.find("Remove-Item").unwrap() < bad.find("SSHBOX_SSHD_INVALID").unwrap());
+        assert!(bad.find("SSHBOX_SSHD_INVALID").unwrap() < bad.find("throw").unwrap());
+    }
+
+    // A hung sshd.exe must never hang the app: no Windows script may call sshd.exe except through the bounded helper.
+    #[test]
+    fn windows_scripts_only_call_sshd_through_the_timeout_helper() {
+        let scripts = [
+            windows_sshd_view_script("user=a"),
+            windows_accounts_read_script(),
+            build_sshd_apply_script_windows(Some(2222), 2222),
+        ];
+        for s in &scripts {
+            assert!(s.contains("WaitForExit(15000)") && s.contains(".Kill()"));
+            assert!(!s.contains("& $sshd") && !s.contains("& \"$env:WINDIR"), "{s}");
+            assert_eq!(s.matches("sshd.exe").count(), 1, "only the helper names sshd.exe");
+        }
+    }
+
+    // A failure between backup and arming must restore and clean up; a failure after arming runs the rollback.
+    #[test]
+    fn windows_apply_cleans_up_when_arming_fails_and_rolls_back_after() {
+        let s = build_sshd_apply_script_windows(None, 22);
+        let c = s.find("sshbox_restore; Remove-Item -LiteralPath $N, $R").unwrap();
+        assert!(c < s.find("Move-Item -LiteralPath $N").unwrap());
+        assert!(s.contains("-StartWhenAvailable"));
+        let tail = &s[s.find("Move-Item -LiteralPath $N").unwrap()..];
+        assert!(tail.contains("sshbox-rollback.ps1' 2>&1 | Out-Null; $rbrc = $LASTEXITCODE"));
+        assert!(tail.contains("$ErrorActionPreference = 'Continue'"));
+    }
+
+    // Blank lines are real config: the EOL rewrite must be the regex \r?\n, not two literal newlines.
+    #[test]
+    fn windows_apply_eol_rewrite_emits_exact_regex() {
+        let s = build_sshd_apply_script_windows(None, 22);
+        assert!(s.contains(r"-replace '\r?\n', $eol"), "{s}");
+        assert!(s.contains("Contains(\"`r`n\")"));
+        assert!(!s.contains("-replace \"\n"));
     }
 
     // Config text must travel via stdin, never the command line or the script body.

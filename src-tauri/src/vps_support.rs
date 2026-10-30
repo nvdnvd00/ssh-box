@@ -56,13 +56,17 @@ pub struct OsCaps {
 }
 
 // Flipped only once the Windows write path is verified on a real host (Task 10).
-pub const WINDOWS_SSH_WRITE_VERIFIED: bool = true;
+pub const WINDOWS_SSH_WRITE_VERIFIED: bool = false;
 
 fn tab(level: SupportLevel, reason: Option<&str>) -> TabSupport {
     TabSupport { level, reason: reason.map(str::to_string) }
 }
 
 pub fn compute_support(p: &VpsProbe) -> VpsSupport {
+    compute_support_with(p, WINDOWS_SSH_WRITE_VERIFIED)
+}
+
+fn compute_support_with(p: &VpsProbe, windows_ssh_write: bool) -> VpsSupport {
     use SupportLevel::*;
     let all_rows = SshRows { port: true, permit_root_login: true, allow_deny_users: true };
     match p.os_family {
@@ -88,7 +92,7 @@ pub fn compute_support(p: &VpsProbe) -> VpsSupport {
             ssh: match (p.privilege == PrivilegeLevel::Admin, p.caps.sshd_running) {
                 (false, _) => tab(ReadOnly, Some("windows_not_admin")),
                 (_, false) => tab(ReadOnly, Some("windows_no_sshd")),
-                _ if WINDOWS_SSH_WRITE_VERIFIED && p.caps.has_scheduled_tasks => tab(Full, None),
+                _ if windows_ssh_write && p.caps.has_scheduled_tasks => tab(Full, None),
                 _ => tab(ReadOnly, Some("windows_ssh_read_only")),
             },
             ssh_rows: SshRows { permit_root_login: false, allow_deny_users: false, ..all_rows },
@@ -160,18 +164,21 @@ mod tests {
         assert_eq!(compute_support(&linux(true, "firewalld")).firewall.level, SupportLevel::Full);
     }
 
-    // Windows ssh is writable only with admin + running sshd + scheduled tasks (the rollback needs them); password is coupled to keyboard-interactive.
+    // Windows ssh stays read-only until the VM matrix flips the flag; with it, Full needs admin + sshd + scheduled tasks, and password is coupled.
     #[test]
     fn windows_ssh_is_full_only_with_rollback_prerequisites() {
         let mut p = linux(true, "ufw");
         p.os_family = OsFamily::Windows;
         p.privilege = PrivilegeLevel::Admin;
         p.caps.sshd_running = true;
-        assert_eq!(compute_support(&p).ssh.reason.as_deref(), Some("windows_ssh_read_only"));
         p.caps.has_scheduled_tasks = true;
-        let s = compute_support(&p);
+        assert!(!WINDOWS_SSH_WRITE_VERIFIED);
+        assert_eq!(compute_support(&p).ssh, tab(SupportLevel::ReadOnly, Some("windows_ssh_read_only")));
+        let s = compute_support_with(&p, true);
         assert_eq!((s.ssh, s.access.level, s.firewall.level), (tab(SupportLevel::Full, None), SupportLevel::ReadOnly, SupportLevel::Hidden));
         assert!(!s.ssh_rows.permit_root_login && !s.ssh_rows.allow_deny_users && s.ssh_rows.port && s.password_coupled);
+        p.caps.has_scheduled_tasks = false;
+        assert_eq!(compute_support_with(&p, true).ssh.level, SupportLevel::ReadOnly);
     }
 
     // The notice must name the real blocker first: no admin, then no sshd, then the generic read-only note.

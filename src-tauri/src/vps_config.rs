@@ -1564,17 +1564,6 @@ pub fn render_sshd_config(base_raw: &str, managed: &[(&'static str, Option<Strin
     out
 }
 
-// Notepad saves sshd_config with a BOM and CRLF; keep both so the file stays as the admin left it.
-pub fn render_sshd_config_preserving(base_raw: &str, managed: &[(&'static str, Option<String>)]) -> String {
-    let (bom, base) = match base_raw.strip_prefix('\u{feff}') {
-        Some(rest) => ("\u{feff}", rest),
-        None => ("", base_raw),
-    };
-    let out = render_sshd_config(base, managed);
-    let out = if base.contains("\r\n") { out.replace('\n', "\r\n") } else { out };
-    format!("{bom}{out}")
-}
-
 pub(crate) fn rollback_pending_cmd(os: OsFamily) -> String {
     match os {
         OsFamily::Macos => format!("launchctl print system/{MACOS_ROLLBACK_LABEL} >/dev/null 2>&1 && echo active || true"),
@@ -1812,9 +1801,6 @@ pub fn plan_sshd_apply(probe: &VpsProbe, view: &SshdView, desired: &SshdSettings
     }
     let (file, content) = match view.write_target {
         WriteTarget::DropIn => (SSHD_DROPIN, render_dropin(&view.dropin_raw, &changes)),
-        WriteTarget::MainFile if probe.os_family == OsFamily::Windows => {
-            (SSHD_MAIN_CONFIG, render_sshd_config_preserving(&view.main_raw, &changes))
-        }
         WriteTarget::MainFile => (SSHD_MAIN_CONFIG, render_sshd_config(&view.main_raw, &changes)),
     };
     Ok(ApplyPlan {
@@ -3992,17 +3978,5 @@ SHADOW:dave:!!:19000:0:99999:7:::\n";
         assert!(locked("bob"), "'!' before a password hash");
         // useradd leaves '!' (Debian/Ubuntu) or '!!' (RHEL): no password, but SSH keys still work.
         assert!(!locked("carol") && !locked("dave"));
-    }
-
-    // Notepad saves with BOM + CRLF; directives placed after "Match Group administrators" would only apply to admins.
-    #[test]
-    fn windows_render_keeps_bom_and_crlf_and_inserts_before_match() {
-        let base = "\u{feff}# cfg\r\nPort 22\r\nMatch Group administrators\r\n       AuthorizedKeysFile x\r\n";
-        let out = render_sshd_config_preserving(base, &[("maxauthtries", Some("MaxAuthTries 3".into()))]);
-        assert!(out.starts_with('\u{feff}') && !out.trim_start_matches('\u{feff}').contains('\u{feff}'));
-        assert!(!out.replace("\r\n", "").contains('\n'), "{out:?}");
-        assert!(out.find("MaxAuthTries 3").unwrap() < out.find("Match Group").unwrap());
-        // LF input without BOM is untouched, so Linux keeps its bytes.
-        assert_eq!(render_sshd_config_preserving("Port 22\n", &[]), render_sshd_config("Port 22\n", &[]));
     }
 }

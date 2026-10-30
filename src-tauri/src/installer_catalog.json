@@ -121,7 +121,7 @@
   "recommended": true,
   "descriptionVi": "Quản lý mã nguồn",
   "descriptionEn": "Version control",
-  "bin": null,
+  "bin": "git",
   "methods": [
    {
     "os": "linux",
@@ -191,7 +191,7 @@
   "recommended": false,
   "descriptionVi": "Chạy ứng dụng trong container",
   "descriptionEn": "Container runtime",
-  "bin": null,
+  "bin": "docker",
   "methods": [
    {
     "os": "linux",
@@ -267,7 +267,7 @@
   "recommended": false,
   "descriptionVi": "Máy chủ web",
   "descriptionEn": "Web server",
-  "bin": null,
+  "bin": "nginx",
   "methods": [
    {
     "os": "linux",
@@ -325,7 +325,7 @@
   "recommended": false,
   "descriptionVi": "VPN mạng riêng giữa các máy",
   "descriptionEn": "Mesh VPN",
-  "bin": null,
+  "bin": "tailscale",
   "methods": [
    {
     "os": "linux",
@@ -360,7 +360,7 @@
   "recommended": true,
   "descriptionVi": "Tải dữ liệu qua dòng lệnh",
   "descriptionEn": "Command-line transfers",
-  "bin": null,
+  "bin": "curl",
   "methods": [
    {
     "os": "linux",
@@ -395,7 +395,7 @@
   "recommended": false,
   "descriptionVi": "Tải tệp qua dòng lệnh",
   "descriptionEn": "Command-line downloader",
-  "bin": null,
+  "bin": "wget",
   "methods": [
    {
     "os": "linux",
@@ -430,7 +430,7 @@
   "recommended": true,
   "descriptionVi": "Xem tiến trình và tài nguyên",
   "descriptionEn": "Process viewer",
-  "bin": null,
+  "bin": "htop",
   "methods": [
    {
     "os": "linux",
@@ -459,7 +459,7 @@
   "recommended": false,
   "descriptionVi": "Nhiều cửa sổ terminal trong một phiên",
   "descriptionEn": "Terminal multiplexer",
-  "bin": null,
+  "bin": "tmux",
   "methods": [
    {
     "os": "linux",
@@ -488,7 +488,7 @@
   "recommended": false,
   "descriptionVi": "Xử lý JSON trên dòng lệnh",
   "descriptionEn": "JSON processor",
-  "bin": null,
+  "bin": "jq",
   "methods": [
    {
     "os": "linux",

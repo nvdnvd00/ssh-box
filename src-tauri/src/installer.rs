@@ -111,9 +111,9 @@ fn os_methods(t: &CatalogTool, os: HostOs) -> impl Iterator<Item = &Method> {
     t.methods.iter().filter(move |m| m.os == os)
 }
 
-// Name used for the "installed outside a manager" check: the binary, else the first package.
+// Name used for the "installed outside a manager" check: the binary, else the tool id.
 fn bin_key(t: &CatalogTool, os: HostOs) -> Option<&str> {
-    t.bin.as_deref().or_else(|| os_methods(t, os).next().map(|m| m.package.as_str()))
+    Some(t.bin.as_deref().unwrap_or(&t.id))
 }
 
 pub fn scan_script(os: HostOs) -> String {
@@ -121,24 +121,24 @@ pub fn scan_script(os: HostOs) -> String {
     let mut s = String::new();
     if os == HostOs::Windows {
         for m in managers_for(os) {
-            s += &format!("\"MGR:{m}:\" + [int][bool](Get-Command {} -ErrorAction SilentlyContinue)\n", ps_quote(m));
+            s += &format!("{} + [int][bool](Get-Command {} -ErrorAction SilentlyContinue)\n", ps_quote(&format!("MGR:{m}:")), ps_quote(m));
         }
         let ids: Vec<String> = tools()
             .flat_map(|t| os_methods(t, os).filter(|m| m.manager == "winget").map(|m| ps_quote(&m.package)))
             .collect();
         s += &format!(
-            "$w = winget list --source winget 2>$null | Out-String\nforeach ($id in @({})) {{ if ($w -match [regex]::Escape($id)) {{ \"PKG:winget:$id\" }} }}\n",
+            "$w = winget list --source winget 2>$null | Out-String\nforeach ($id in @({})) {{ if ($w -match [regex]::Escape($id)) {{ ('PKG:winget:' + $id) }} }}\n",
             ids.join(",")
         );
-        s += "npm ls -g --depth=0 --parseable 2>$null | ForEach-Object { if ($_ -match 'node_modules[\\\\/](.+)$') { \"PKG:npm:\" + $Matches[1] } }\n";
+        s += "npm ls -g --depth=0 --parseable 2>$null | ForEach-Object { if ($_ -match 'node_modules[\\\\/](.+)$') { 'PKG:npm:' + ($Matches[1] -replace '\\\\','/') } }\n";
         for t in tools() {
             if let Some(k) = bin_key(t, os) {
-                s += &format!("\"BIN:{k}:\" + [int][bool](Get-Command {} -ErrorAction SilentlyContinue)\n", ps_quote(k));
+                s += &format!("{} + [int][bool](Get-Command {} -ErrorAction SilentlyContinue)\n", ps_quote(&format!("BIN:{k}:")), ps_quote(k));
             }
             if let Some(v) = os_methods(t, os).find_map(|m| m.service.as_deref()) {
                 s += &format!(
-                    "$s = Get-Service -Name {q} -ErrorAction SilentlyContinue\nif ($s) {{ \"SVC:{v}:\" + [int]($s.StartType -eq 'Automatic') + \":\" + [int]($s.Status -eq 'Running') }}\n",
-                    q = ps_quote(v)
+                    "$s = Get-Service -Name {q} -ErrorAction SilentlyContinue\nif ($s) {{ {l} + [int]($s.StartType -eq 'Automatic') + ':' + [int]($s.Status -eq 'Running') }}\n",
+                    q = ps_quote(v), l = ps_quote(&format!("SVC:{v}:"))
                 );
             }
         }
@@ -300,6 +300,19 @@ mod tests {
         let t = scan_tool(&s, "tailscale");
         assert!(t.install.is_none());
         assert_eq!(t.blocked_by.as_deref(), Some("brew"));
+    }
+
+    #[test]
+    fn windows_npm_paths_normalized_and_matched() {
+        assert!(scan_script(HostOs::Windows).contains("-replace '\\\\','/'"));
+        let s = parse_scan(HostOs::Windows, "MGR:npm:1\nPKG:npm:@anthropic-ai/claude-code\n");
+        assert_eq!(scan_tool(&s, "claude-code").status, ToolStatus::Installed { via: vec!["npm".into()] });
+    }
+
+    #[test]
+    fn windows_external_via_bin() {
+        let s = parse_scan(HostOs::Windows, "BIN:tailscale:1\n");
+        assert_eq!(scan_tool(&s, "tailscale").status, ToolStatus::External);
     }
 
     #[test]

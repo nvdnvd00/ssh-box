@@ -486,4 +486,14 @@ mod tests {
         // Không có block thì allow còn lại vẫn là đường vào.
         assert!(check_firewall_delete_windows(&c, &rules[..2], &rules[0]).is_ok());
     }
+
+    // Máy khách IPv6 chỉ có một allow cho /64 của nó: xoá luật đó là tự khoá, nên phải bị chặn.
+    #[test]
+    fn windows_delete_blocks_only_ipv6_allow() {
+        let mut c = deploy_key();
+        c.client_ip = "2001:db8::7".to_string();
+        let mut r = rule(1, "ALLOW", "2222/tcp", "2001:db8::/64");
+        r.v6 = true;
+        assert!(blocked(check_firewall_delete_windows(&c, std::slice::from_ref(&r), &r)));
+    }
 }

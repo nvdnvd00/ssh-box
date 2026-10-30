@@ -96,7 +96,7 @@ pub fn compute_support(p: &VpsProbe) -> VpsSupport {
             firewall: match (p.caps.has_net_security, p.privilege == PrivilegeLevel::Admin) {
                 (false, _) => tab(Hidden, None),
                 (_, false) => tab(ReadOnly, Some("windows_not_admin")),
-                _ => tab(ReadOnly, Some("firewall_read_only")),
+                _ => tab(ReadOnly, Some("windows_firewall_read_only")),
             },
             access: tab(ReadOnly, Some("read_only_os")),
             password_coupled: false,
@@ -228,7 +228,7 @@ mod tests {
         p.privilege = PrivilegeLevel::Admin;
         assert_eq!(compute_support(&p).firewall.level, SupportLevel::Hidden);
         p.caps.has_net_security = true;
-        assert_eq!(compute_support(&p).firewall, tab(SupportLevel::ReadOnly, Some("firewall_read_only")));
+        assert_eq!(compute_support(&p).firewall, tab(SupportLevel::ReadOnly, Some("windows_firewall_read_only")));
         p.privilege = PrivilegeLevel::None;
         assert_eq!(compute_support(&p).firewall, tab(SupportLevel::ReadOnly, Some("windows_not_admin")));
     }

@@ -328,8 +328,9 @@ pub fn compute_socket_exposure_windows(
     // No rule for the port says nothing about the default: never claim "blocked" from silence.
     match (block_any, allow_any, allow_src, block_src) {
         (true, ..) => "blocked",
-        (_, true, _, false) => "exposed",
-        (_, true, _, true) | (_, false, true, _) => "restricted",
+        // An allow-from-anywhere stays open to everyone except the one blocked source.
+        (_, true, ..) => "exposed",
+        (_, false, true, _) => "restricted",
         _ => "unknown",
     }
     .to_string()

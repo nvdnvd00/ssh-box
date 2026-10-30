@@ -217,10 +217,14 @@ const WINDOWS_FIREWALL_READ_SCRIPT: &str = r#"$profiles = @(Get-NetFirewallProfi
 $active = @(Get-NetConnectionProfile | ForEach-Object { [string]$_.NetworkCategory -replace 'Authenticated','' } | Select-Object -Unique)
 $ports = @{}; Get-NetFirewallPortFilter -All | ForEach-Object { $ports[$_.InstanceID] = $_ }
 $addrs = @{}; Get-NetFirewallAddressFilter -All | ForEach-Object { $addrs[$_.InstanceID] = $_ }
+$apps = @{}; Get-NetFirewallApplicationFilter -All | ForEach-Object { $apps[$_.InstanceID] = $_ }
+$svcs = @{}; Get-NetFirewallServiceFilter -All | ForEach-Object { $svcs[$_.InstanceID] = $_ }
+$ifs = @{}; Get-NetFirewallInterfaceTypeFilter -All | ForEach-Object { $ifs[$_.InstanceID] = $_ }
 $rules = @(Get-NetFirewallRule -Direction Inbound -Enabled True | ForEach-Object {
   $p = $ports[$_.InstanceID]; $a = $addrs[$_.InstanceID]
   if ($p -and $a -and (@($p.LocalPort) -join ',') -ne 'Any') {
-    [ordered]@{ displayName = [string]$_.DisplayName; group = [string]$_.Group; action = [string]$_.Action; localPort = (@($p.LocalPort) -join ','); protocol = [string]$p.Protocol; remoteAddress = (@($a.RemoteAddress) -join ',') }
+    $scoped = ([string]$apps[$_.InstanceID].Program -ne 'Any') -or ([string]$svcs[$_.InstanceID].Service -ne 'Any') -or ((@($a.LocalAddress) -join ',') -ne 'Any') -or ([string]$ifs[$_.InstanceID].InterfaceType -ne 'Any')
+    [ordered]@{ displayName = [string]$_.DisplayName; group = [string]$_.Group; profile = [string]$_.Profile; scoped = [bool]$scoped; action = [string]$_.Action; localPort = (@($p.LocalPort) -join ','); protocol = [string]$p.Protocol; remoteAddress = (@($a.RemoteAddress) -join ',') }
   }
 })
 $names = @{}; Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $names[[int]$_.Id] = $_.ProcessName }
@@ -250,6 +254,11 @@ struct WinRule {
     display_name: String,
     #[serde(default)]
     group: String,
+    #[serde(default)]
+    profile: String,
+    // Program, service, local-address or interface-type scoped: not a plain port rule.
+    #[serde(default)]
+    scoped: bool,
     action: String,
     local_port: String,
     #[serde(default)]
@@ -282,30 +291,52 @@ struct WinFirewall {
 pub fn parse_windows_firewall(json: &str) -> Result<FirewallSnapshot, String> {
     let w: WinFirewall = serde_json::from_str(json.trim())
         .map_err(|e| vps_err(ERR_COMMAND_FAILED, format!("cannot read the firewall: {e}")))?;
-    // ponytail: a rule's own Profile attribute is ignored; a rule scoped to an inactive profile still counts.
     // Without any detectable active profile, all profiles count rather than none.
     let in_use = |p: &&WinProfile| w.active.is_empty() || w.active.iter().any(|a| a.eq_ignore_ascii_case(&p.name));
     let enabled = w.profiles.iter().filter(in_use).any(|p| p.enabled);
     let blocks = w.profiles.iter().filter(in_use).any(|p| p.default_inbound.eq_ignore_ascii_case("block"));
-    let mut rules = Vec::new();
+    let applies = |profile: &str| {
+        let p = profile.trim();
+        w.active.is_empty()
+            || p.is_empty()
+            || p.eq_ignore_ascii_case("any")
+            || p.split(',').any(|x| w.active.iter().any(|a| a.eq_ignore_ascii_case(x.trim())))
+    };
+    // Every rule is listed; only plain port rules of an active profile take part in the exposure, the rest leave the port "unknown".
+    let (mut rules, mut counted) = (Vec::new(), Vec::new());
     for r in &w.rules {
-        let anywhere = is_anywhere_source(&r.remote_address);
         let protocol = match r.protocol.to_ascii_lowercase().as_str() {
             "tcp" => "tcp",
             "udp" => "udp",
             _ => "any",
         };
-        for v6 in if anywhere { vec![false, true] } else { vec![false] } {
-            rules.push(FirewallRuleItem {
+        // One item per address (as firewalld twins) so the lockout guard sees single addresses/CIDRs and the right family.
+        let mut sources: Vec<(String, bool)> = Vec::new();
+        for tok in r.remote_address.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+            if is_anywhere_source(tok) {
+                sources.extend([("Anywhere".to_string(), false), ("Anywhere".to_string(), true)]);
+            } else {
+                sources.push((tok.to_string(), tok.contains(':')));
+            }
+        }
+        if sources.is_empty() {
+            sources.extend([("Anywhere".to_string(), false), ("Anywhere".to_string(), true)]);
+        }
+        for (from_source, v6) in sources {
+            let item = FirewallRuleItem {
                 index: rules.len() as u32 + 1,
                 to_port: r.local_port.clone(),
                 protocol: protocol.to_string(),
                 action: if r.action.eq_ignore_ascii_case("allow") { "ALLOW" } else { "DENY" }.to_string(),
-                from_source: if anywhere { "Anywhere".to_string() } else { r.remote_address.clone() },
+                from_source,
                 v6,
                 comment: r.group.clone(),
                 raw_spec: r.display_name.clone(),
-            });
+            };
+            if !r.scoped && applies(&r.profile) {
+                counted.push(item.clone());
+            }
+            rules.push(item);
         }
     }
     let listening_sockets = w
@@ -321,7 +352,7 @@ pub fn parse_windows_firewall(json: &str) -> Result<FirewallSnapshot, String> {
                 pid: s.pid,
                 exposure: String::new(),
             };
-            item.exposure = compute_socket_exposure_windows(&item, enabled, &rules);
+            item.exposure = compute_socket_exposure_windows(&item, enabled, &counted);
             item
         })
         .collect();
@@ -581,6 +612,7 @@ mod tests {
     #[test]
     fn windows_firewall_script_joins_filters_once_and_fails_loudly() {
         let s = windows_firewall_read_script();
+        assert!(s.contains("Get-NetFirewallApplicationFilter -All") && s.contains("Get-NetFirewallInterfaceTypeFilter -All") && s.contains("profile = [string]$_.Profile"));
         assert!(s.contains("Get-NetFirewallPortFilter -All") && s.contains("Get-NetFirewallAddressFilter -All"));
         assert!(s.contains("Get-NetTCPConnection -State Listen") && s.contains("Get-NetUDPEndpoint"));
         assert!(s.contains("ConvertTo-Json") && s.contains("-Compress"));
@@ -592,5 +624,39 @@ mod tests {
     #[test]
     fn windows_firewall_parse_error_is_command_failed() {
         assert!(parse_windows_firewall("not json").unwrap_err().starts_with("COMMAND_FAILED"));
+    }
+
+    // Luật Block của profile Public không chặn cổng khi máy đang dùng Private; không được báo "blocked".
+    #[test]
+    fn windows_rule_of_inactive_profile_does_not_count() {
+        let j = FW.replace(r#""remoteAddress":"Any"}"#, r#""remoteAddress":"Any"},{"displayName":"B","group":"","profile":"Public","action":"Block","localPort":"22","protocol":"TCP","remoteAddress":"Any"}"#);
+        assert_eq!(parse_windows_firewall(&j).unwrap().listening_sockets[0].exposure, "exposed");
+        let j = j.replace(r#""profile":"Public""#, r#""profile":"Private""#);
+        assert_eq!(parse_windows_firewall(&j).unwrap().listening_sockets[0].exposure, "blocked");
+    }
+
+    // Luật gắn với chương trình không phải luật cổng thuần; không được tạo "blocked" mà cổng suy biến về unknown.
+    #[test]
+    fn windows_program_scoped_rule_degrades_to_unknown() {
+        let j = FW.replace(r#""displayName":"OpenSSH-Server-In-TCP""#, r#""displayName":"OpenSSH-Server-In-TCP","scoped":true"#).replace(r#""action":"Allow""#, r#""action":"Block""#);
+        let s = parse_windows_firewall(&j).unwrap();
+        assert_eq!(s.listening_sockets[0].exposure, "unknown");
+        assert!(s.rules.iter().any(|r| r.raw_spec == "OpenSSH-Server-In-TCP"));
+    }
+
+    // Mỗi địa chỉ nguồn phải thành mục riêng đúng họ v4/v6, nếu không guard khoá không thấy allow của máy khách IPv6.
+    #[test]
+    fn windows_remote_addresses_split_per_address_and_family() {
+        let j = FW.replace(r#""remoteAddress":"10.0.0.0/8""#, r#""remoteAddress":"10.0.0.0/8,2001:db8::/64,LocalSubnet""#);
+        let s = parse_windows_firewall(&j).unwrap();
+        let got: Vec<_> = s.rules.iter().filter(|r| r.raw_spec == "Cho phép Đạt").map(|r| (r.from_source.as_str(), r.v6)).collect();
+        assert_eq!(got, vec![("10.0.0.0/8", false), ("2001:db8::/64", true), ("LocalSubnet", false)]);
+    }
+
+    // Allow từ mọi nơi cộng block một nguồn: mọi người trừ nguồn đó vẫn vào được, nên phải là exposed.
+    #[test]
+    fn windows_allow_any_with_one_blocked_source_is_exposed() {
+        let rules = [wrule("ALLOW", "80", "Anywhere"), wrule("DENY", "80", "198.51.100.9")];
+        assert_eq!(compute_socket_exposure_windows(&sock(80), true, &rules), "exposed");
     }
 }

@@ -56,7 +56,7 @@ pub struct OsCaps {
 }
 
 // Flipped only once the Windows write path is verified on a real host (Task 10).
-pub const WINDOWS_SSH_WRITE_VERIFIED: bool = false;
+pub const WINDOWS_SSH_WRITE_VERIFIED: bool = true;
 
 fn tab(level: SupportLevel, reason: Option<&str>) -> TabSupport {
     TabSupport { level, reason: reason.map(str::to_string) }
@@ -98,7 +98,8 @@ pub fn compute_support(p: &VpsProbe) -> VpsSupport {
                 _ => tab(Full, None),
             },
             access: tab(ReadOnly, Some("read_only_os")),
-            password_coupled: false,
+            // Windows sshd keeps offering keyboard-interactive when only PasswordAuthentication is off.
+            password_coupled: true,
         },
     }
 }
@@ -159,17 +160,18 @@ mod tests {
         assert_eq!(compute_support(&linux(true, "firewalld")).firewall.level, SupportLevel::Full);
     }
 
-    // Until the Windows write path is verified, no Windows tab may expose a write path; firewall stays hidden.
+    // Windows ssh is writable only with admin + running sshd + scheduled tasks (the rollback needs them); password is coupled to keyboard-interactive.
     #[test]
-    fn windows_has_no_write_path_yet() {
+    fn windows_ssh_is_full_only_with_rollback_prerequisites() {
         let mut p = linux(true, "ufw");
         p.os_family = OsFamily::Windows;
         p.privilege = PrivilegeLevel::Admin;
         p.caps.sshd_running = true;
+        assert_eq!(compute_support(&p).ssh.reason.as_deref(), Some("windows_ssh_read_only"));
         p.caps.has_scheduled_tasks = true;
         let s = compute_support(&p);
-        assert_eq!((s.ssh.level, s.access.level, s.firewall.level), (SupportLevel::ReadOnly, SupportLevel::ReadOnly, SupportLevel::Hidden));
-        assert!(!s.ssh_rows.permit_root_login && !s.ssh_rows.allow_deny_users && s.ssh_rows.port);
+        assert_eq!((s.ssh, s.access.level, s.firewall.level), (tab(SupportLevel::Full, None), SupportLevel::ReadOnly, SupportLevel::Hidden));
+        assert!(!s.ssh_rows.permit_root_login && !s.ssh_rows.allow_deny_users && s.ssh_rows.port && s.password_coupled);
     }
 
     // The notice must name the real blocker first: no admin, then no sshd, then the generic read-only note.

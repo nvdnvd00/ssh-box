@@ -1564,17 +1564,30 @@ pub fn render_sshd_config(base_raw: &str, managed: &[(&'static str, Option<Strin
     out
 }
 
+// Notepad saves sshd_config with a BOM and CRLF; keep both so the file stays as the admin left it.
+pub fn render_sshd_config_preserving(base_raw: &str, managed: &[(&'static str, Option<String>)]) -> String {
+    let (bom, base) = match base_raw.strip_prefix('\u{feff}') {
+        Some(rest) => ("\u{feff}", rest),
+        None => ("", base_raw),
+    };
+    let out = render_sshd_config(base, managed);
+    let out = if base.contains("\r\n") { out.replace('\n', "\r\n") } else { out };
+    format!("{bom}{out}")
+}
+
 pub(crate) fn rollback_pending_cmd(os: OsFamily) -> String {
     match os {
         OsFamily::Macos => format!("launchctl print system/{MACOS_ROLLBACK_LABEL} >/dev/null 2>&1 && echo active || true"),
-        _ => "systemctl is-active sshbox-rollback.timer 2>/dev/null || true".to_string(),
+        OsFamily::Linux => "systemctl is-active sshbox-rollback.timer 2>/dev/null || true".to_string(),
+        OsFamily::Windows => unreachable!("Windows reads the pending rollback in its own view script"),
     }
 }
 
 fn stop_rollback_timer_cmd(os: OsFamily) -> String {
     match os {
         OsFamily::Macos => format!("launchctl bootout system/{MACOS_ROLLBACK_LABEL} 2>/dev/null || true; rm -f {MACOS_ROLLBACK_PLIST}"),
-        _ => "systemctl stop sshbox-rollback.timer 2>/dev/null || true".to_string(),
+        OsFamily::Linux => "systemctl stop sshbox-rollback.timer 2>/dev/null || true".to_string(),
+        OsFamily::Windows => unreachable!("Windows has its own cleanup scripts"),
     }
 }
 
@@ -1741,7 +1754,11 @@ pub fn apply_preflight(probe: &VpsProbe, view: &SshdView, desired: &SshdSettings
     if view.rollback_pending {
         return Err(vps_err(ERR_COMMAND_FAILED, "a previous change is still waiting for verification"));
     }
-    crate::vps_guard::check_sshd(&probe.context, desired)
+    match probe.os_family {
+        // AllowUsers / DenyUsers / PermitRootLogin are hidden on Windows, so only the auth rules apply.
+        OsFamily::Windows => crate::vps_guard::check_sshd_auth(&probe.context, desired),
+        OsFamily::Linux | OsFamily::Macos => crate::vps_guard::check_sshd(&probe.context, desired),
+    }
 }
 
 pub fn parse_apply_started(raw: &str, new_port: Option<u16>) -> Result<SshdApplyStarted, String> {
@@ -1795,6 +1812,9 @@ pub fn plan_sshd_apply(probe: &VpsProbe, view: &SshdView, desired: &SshdSettings
     }
     let (file, content) = match view.write_target {
         WriteTarget::DropIn => (SSHD_DROPIN, render_dropin(&view.dropin_raw, &changes)),
+        WriteTarget::MainFile if probe.os_family == OsFamily::Windows => {
+            (SSHD_MAIN_CONFIG, render_sshd_config_preserving(&view.main_raw, &changes))
+        }
         WriteTarget::MainFile => (SSHD_MAIN_CONFIG, render_sshd_config(&view.main_raw, &changes)),
     };
     Ok(ApplyPlan {
@@ -1821,10 +1841,25 @@ pub async fn apply_sshd_settings(
     let plan = plan_sshd_apply(&probe, &view, &desired)?;
     let script = match probe.os_family {
         OsFamily::Macos => build_sshd_apply_script_macos(plan.file, SSHD_ROLLBACK_SCRIPT, MACOS_ROLLBACK_PLIST),
-        _ => build_sshd_apply_script(plan.file, SSHD_ROLLBACK_SCRIPT, &plan.reload),
+        OsFamily::Linux => build_sshd_apply_script(plan.file, SSHD_ROLLBACK_SCRIPT, &plan.reload),
+        OsFamily::Windows => crate::vps_windows::build_sshd_apply_script_windows(plan.reload.new_port, plan.reload.port),
     };
-    let raw = run_privileged_script(host_id, pool, sudo_password, &script, Some(&plan.content)).await?;
+    let raw = run_sshd_script(host_id, pool, sudo_password, probe.os_family, &script, Some(&plan.content)).await?;
     parse_apply_started(&raw, plan.reload.new_port)
+}
+
+async fn run_sshd_script(
+    host_id: &str,
+    pool: &SshPool,
+    sudo_password: Option<String>,
+    os: OsFamily,
+    script: &str,
+    secret: Option<&str>,
+) -> Result<String, String> {
+    match os {
+        OsFamily::Windows => crate::vps_windows::run_windows_script(host_id, pool, script, secret).await,
+        OsFamily::Linux | OsFamily::Macos => run_privileged_script(host_id, pool, sudo_password, script, secret).await,
+    }
 }
 
 // Opens a brand-new SSH connection on `new_port`; the live session proves nothing (spec §4.1).
@@ -1857,6 +1892,9 @@ pub async fn verify_new_connection(
 
 // Keeps the change. Fails if the rollback already ran (timer fired or "Roll back now").
 fn sshd_cleanup_script(rollback: &str, files: [&str; 2], os: OsFamily) -> String {
+    if os == OsFamily::Windows {
+        return crate::vps_windows::windows_cleanup_script();
+    }
     let r = shell_single_quote(rollback);
     let markers: Vec<String> = files
         .iter()
@@ -1871,6 +1909,9 @@ fn sshd_cleanup_script(rollback: &str, files: [&str; 2], os: OsFamily) -> String
 }
 
 fn sshd_rollback_now_script(os: OsFamily) -> String {
+    if os == OsFamily::Windows {
+        return crate::vps_windows::windows_rollback_now_script();
+    }
     format!(
         "if [ -e {r} ]; then /bin/sh {r}; fi\n{}\n",
         stop_rollback_timer_cmd(os),
@@ -1893,11 +1934,11 @@ pub async fn finish_sshd_apply(
         .ok_or_else(|| vps_err(ERR_COMMAND_FAILED, "no SSH session for this host"))?;
     // Unchanged port: verify where the app already connects (may differ from sshd's port behind NAT).
     if let Err(e) = verify_new_connection(pool, &host, new_port.unwrap_or(host.port), &expected_fp).await {
-        run_privileged_script(host_id, pool, sudo_password, &sshd_rollback_now_script(os), None).await?;
+        run_sshd_script(host_id, pool, sudo_password, os, &sshd_rollback_now_script(os), None).await?;
         return Err(e);
     }
     let cleanup = sshd_cleanup_script(SSHD_ROLLBACK_SCRIPT, [SSHD_DROPIN, SSHD_MAIN_CONFIG], os);
-    run_privileged_script(host_id, pool, sudo_password.clone(), &cleanup, None)
+    run_sshd_script(host_id, pool, sudo_password.clone(), os, &cleanup, None)
         .await
         .map_err(|_| vps_err(ERR_VERIFY_FAILED, "the change was rolled back before it could be kept"))?;
     get_sshd_view(host_id, pool, sudo_password).await
@@ -1909,7 +1950,7 @@ pub async fn revert_sshd_settings(
     sudo_password: Option<String>,
 ) -> Result<SshdView, String> {
     let os = probe(host_id, pool, sudo_password.clone()).await?.os_family;
-    run_privileged_script(host_id, pool, sudo_password.clone(), &sshd_rollback_now_script(os), None).await?;
+    run_sshd_script(host_id, pool, sudo_password.clone(), os, &sshd_rollback_now_script(os), None).await?;
     get_sshd_view(host_id, pool, sudo_password).await
 }
 
@@ -3951,5 +3992,17 @@ SHADOW:dave:!!:19000:0:99999:7:::\n";
         assert!(locked("bob"), "'!' before a password hash");
         // useradd leaves '!' (Debian/Ubuntu) or '!!' (RHEL): no password, but SSH keys still work.
         assert!(!locked("carol") && !locked("dave"));
+    }
+
+    // Notepad saves with BOM + CRLF; directives placed after "Match Group administrators" would only apply to admins.
+    #[test]
+    fn windows_render_keeps_bom_and_crlf_and_inserts_before_match() {
+        let base = "\u{feff}# cfg\r\nPort 22\r\nMatch Group administrators\r\n       AuthorizedKeysFile x\r\n";
+        let out = render_sshd_config_preserving(base, &[("maxauthtries", Some("MaxAuthTries 3".into()))]);
+        assert!(out.starts_with('\u{feff}') && !out.trim_start_matches('\u{feff}').contains('\u{feff}'));
+        assert!(!out.replace("\r\n", "").contains('\n'), "{out:?}");
+        assert!(out.find("MaxAuthTries 3").unwrap() < out.find("Match Group").unwrap());
+        // LF input without BOM is untouched, so Linux keeps its bytes.
+        assert_eq!(render_sshd_config_preserving("Port 22\n", &[]), render_sshd_config("Port 22\n", &[]));
     }
 }

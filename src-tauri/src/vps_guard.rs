@@ -42,7 +42,8 @@ fn user_pattern_matches(pattern: &str, ctx: &ConnectionContext) -> bool {
         })
 }
 
-pub fn check_sshd(ctx: &ConnectionContext, next: &SshdSettings) -> Result<(), String> {
+// The rules that hold on every OS; Windows hides the user and root rows, so it stops here.
+pub fn check_sshd_auth(ctx: &ConnectionContext, next: &SshdSettings) -> Result<(), String> {
     if !next.password_authentication && !next.pubkey_authentication {
         return block("both_auth_off");
     }
@@ -58,6 +59,11 @@ pub fn check_sshd(ctx: &ConnectionContext, next: &SshdSettings) -> Result<(), St
         }
         _ => {}
     }
+    Ok(())
+}
+
+pub fn check_sshd(ctx: &ConnectionContext, next: &SshdSettings) -> Result<(), String> {
+    check_sshd_auth(ctx, next)?;
     if ctx.login_user == "root" {
         match next.permit_root_login.as_str() {
             "no" | "forced-commands-only" => return block("root_in_use"),
@@ -522,5 +528,14 @@ mod tests {
         let mut c = deploy_key();
         c.client_ip = "2001:db8::7".to_string();
         assert!(blocked(check_firewall_delete_windows(&c, &rules, &rules[0])));
+    }
+
+    // Windows hides AllowUsers; a leftover DOMAIN\\bob entry must not block an unrelated change, while the auth rules still do.
+    #[test]
+    fn windows_guard_ignores_hidden_allow_users() {
+        let next = SshdSettings { allow_users: vec!["DOMAIN\\bob".into()], max_auth_tries: 3, ..sshd() };
+        assert_eq!(check_sshd_auth(&deploy_key(), &next), Ok(()));
+        assert!(blocked(check_sshd(&deploy_key(), &next)));
+        assert!(blocked(check_sshd_auth(&deploy_key(), &SshdSettings { pubkey_authentication: false, ..sshd() })));
     }
 }

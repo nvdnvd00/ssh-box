@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { RefreshCw, Server } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import { HostEntry, HostOs, PrivilegeLevel, ResourcesStoreData, VpsProbe, VpsStudioTab } from "../types";
 import { AppSettingsConfig } from "../themes";
 import { getI18n } from "../i18n";
@@ -42,10 +42,10 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
 }) => {
   const t = getI18n(appSettings?.language);
   const pickInitial = () =>
-    hosts.some((h) => h.id === activeHostId) ? activeHostId : (hosts[0]?.id ?? "");
+    activeHostId === "local" || hosts.some((h) => h.id === activeHostId) ? activeHostId : (hosts[0]?.id ?? "local");
   const [selectedHostId, setSelectedHostId] = useState<string>(pickInitial);
   useEffect(() => {
-    if (activeHostId && hosts.some((h) => h.id === activeHostId)) setSelectedHostId(activeHostId);
+    if (activeHostId === "local" || hosts.some((h) => h.id === activeHostId)) setSelectedHostId(activeHostId);
   }, [activeHostId, hosts]);
 
   const [activeStudio, setActiveStudio] = useState<VpsStudioTab>("ssh");
@@ -141,15 +141,6 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
   const tabs = probe ? allTabs.filter((tab) => tab.id === "installer" || probe.support[tab.id].level !== "hidden") : [];
   const studio = tabs.some((tab) => tab.id === activeStudio) ? activeStudio : tabs[0]?.id;
 
-  if (hosts.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full p-8 text-center gap-3">
-        <Server className="w-8 h-8 text-muted-foreground" />
-        <p className="text-sm text-muted-foreground">{t.vpsShellNoHosts}</p>
-      </div>
-    );
-  }
-
   return (
     <div className="flex flex-col h-full min-w-0">
       <div className="border-b border-border/70 px-4 py-3 flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -158,7 +149,7 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
           className="w-full sm:w-64"
           value={selectedHostId}
           placeholder={t.vpsShellSelectHost}
-          options={hosts.map((h) => ({ value: h.id, label: h.alias || h.hostname }))}
+          options={[{ value: "local", label: t.vpsSudoLocalLabel }, ...hosts.map((h) => ({ value: h.id, label: h.alias || h.hostname }))]}
           onChange={(id) => {
             setSelectedHostId(id);
             onSelectHost?.(id);

@@ -141,7 +141,7 @@ pub fn scan_script(os: HostOs) -> String {
             .flat_map(|t| os_methods(t, os).filter(|m| m.manager == "winget").map(|m| ps_quote(&m.package)))
             .collect();
         s += &format!(
-            "if (Get-Command winget -ErrorAction SilentlyContinue) {{ $w = winget list --source winget --accept-source-agreements --disable-interactivity 2>$null | Out-String\nforeach ($id in @({})) {{ if ($w -match ('(?m)(^|\\s)' + [regex]::Escape($id) + '(\\s|$)')) {{ ('PKG:winget:' + $id) }} }} }}\n",
+            "{WG_FN}if (Get-Command winget -ErrorAction SilentlyContinue) {{ $w = Wg list --source winget --accept-source-agreements --disable-interactivity 2>$null | Out-String\nforeach ($id in @({})) {{ if ($w -match ('(?m)(^|\\s)' + [regex]::Escape($id) + '(\\s|$)')) {{ ('PKG:winget:' + $id) }} }} }}\n",
             ids.join(",")
         );
         s += "if (Get-Command npm -ErrorAction SilentlyContinue) { npm ls -g --depth=0 --parseable 2>$null | ForEach-Object { if ($_ -match 'node_modules[\\\\/](.+)$') { 'PKG:npm:' + ($Matches[1] -replace '\\\\','/') } } }\n";
@@ -253,6 +253,8 @@ pub enum InstallAction {
 
 // Native commands don't throw under $ErrorActionPreference='Stop'; the bootstrap's catch turns this into SSHBOX_EXIT_CODE:1.
 const PS_CHK: &str = "; if ($LASTEXITCODE -ne 0) { throw \"exit $LASTEXITCODE\" }";
+// ponytail: 0x8a15000f ("source data missing") in SSH sessions: the winget source package isn't registered for the user; fetch Microsoft's source.msix and retry once.
+const WG_FN: &str = "function Wg { winget @args; if ($LASTEXITCODE -eq -1978335217) { $ProgressPreference='SilentlyContinue'; Add-AppxPackage -Path 'https://cdn.winget.microsoft.com/cache/source.msix' -ErrorAction Stop; winget @args } }\n";
 const WINGET_FLAGS: &str = "--source winget --silent --disable-interactivity --accept-package-agreements --accept-source-agreements";
 
 fn checked<'a>(os: HostOs, manager: &str, name: &'a str) -> Result<&'a str, String> {
@@ -281,8 +283,8 @@ pub fn action_script(os: HostOs, a: &InstallAction) -> Result<String, String> {
                 ("snap", false) => format!("snap remove {q}"),
                 ("brew", true) => format!("NONINTERACTIVE=1 brew install {q}"),
                 ("brew", false) => format!("NONINTERACTIVE=1 brew uninstall {q}"),
-                ("winget", true) => format!("winget install --id {pq} -e {WINGET_FLAGS}{PS_CHK}"),
-                ("winget", false) => format!("winget uninstall --id {pq} -e --source winget --silent --disable-interactivity{PS_CHK}"),
+                ("winget", true) => format!("{WG_FN}Wg install --id {pq} -e {WINGET_FLAGS}{PS_CHK}"),
+                ("winget", false) => format!("{WG_FN}Wg uninstall --id {pq} -e --source winget --silent --disable-interactivity{PS_CHK}"),
                 ("npm", true) => if os == HostOs::Windows { format!("npm install -g {pq}{PS_CHK}") } else { format!("npm install -g {q}") },
                 ("npm", _) => if os == HostOs::Windows { format!("npm uninstall -g {pq}{PS_CHK}") } else { format!("npm uninstall -g {q}") },
                 _ => return Err(format!("unsupported manager {manager}")),
@@ -306,7 +308,7 @@ pub fn action_script(os: HostOs, a: &InstallAction) -> Result<String, String> {
             ("snap", HostOs::Linux) => Ok("DEBIAN_FRONTEND=noninteractive apt-get install -y snapd".into()),
             ("npm", HostOs::Linux) => Ok("if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs npm; else dnf install -y nodejs npm; fi".into()),
             ("npm", HostOs::Macos) => Ok("brew install node".into()),
-            ("npm", HostOs::Windows) => Ok(format!("winget install --id OpenJS.NodeJS.LTS -e {WINGET_FLAGS}{PS_CHK}")),
+            ("npm", HostOs::Windows) => Ok(format!("{WG_FN}Wg install --id OpenJS.NodeJS.LTS -e {WINGET_FLAGS}{PS_CHK}")),
             ("winget", HostOs::Windows) => Err("WINGET_MANUAL".into()),
             _ => Err(format!("cannot install manager {manager} on this OS")),
         },
@@ -348,7 +350,7 @@ pub fn search_script(os: HostOs, present: &[String], query: &str) -> Result<Stri
             ("snap", _) => format!("snap find {q} 2>/dev/null | awk 'NR>1{{n=$1; $1=$2=$3=$4=\"\"; sub(/^ +/,\"\"); print \"HIT:snap:\" n \":\" $0}}' | head -n 20\n"),
             ("brew", _) => format!("brew search {q} 2>/dev/null | grep -v '^==>' | head -n 20 | sed 's/^/HIT:brew:/; s/$/:/'\n"),
             ("winget", _) => format!(
-                "if (Get-Command winget -ErrorAction SilentlyContinue) {{ winget search --source winget --accept-source-agreements --disable-interactivity {} | Out-String -Stream | ForEach-Object {{ if ($_ -match '^(.+?)\\s{{2,}}([A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+)\\s') {{ 'HIT:winget:' + $Matches[2] + ':' + $Matches[1].Trim() }} }} | Select-Object -First 20 }}\n",
+                "{WG_FN}if (Get-Command winget -ErrorAction SilentlyContinue) {{ Wg search --source winget --accept-source-agreements --disable-interactivity {} | Out-String -Stream | ForEach-Object {{ if ($_ -match '^(.+?)\\s{{2,}}([A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+)\\s') {{ 'HIT:winget:' + $Matches[2] + ':' + $Matches[1].Trim() }} }} | Select-Object -First 20 }}\n",
                 ps_quote(query)
             ),
             // npm search --parseable: name<TAB>description<TAB>...
@@ -695,7 +697,7 @@ mod tests {
     fn windows_scan_guarded_and_actions_check_exit_code() {
         let scan = scan_script(HostOs::Windows);
         assert!(scan.contains("if (Get-Command npm -ErrorAction SilentlyContinue) { npm ls"), "{scan}");
-        assert!(scan.contains("if (Get-Command winget -ErrorAction SilentlyContinue) { $w = winget list"), "{scan}");
+        assert!(scan.contains("if (Get-Command winget -ErrorAction SilentlyContinue) { $w = Wg list"), "{scan}");
         for (m, a) in [("winget", "install"), ("winget", "uninstall"), ("npm", "install"), ("npm", "uninstall")] {
             let s = action_script(HostOs::Windows, &act(a, m, "x.y")).unwrap();
             assert!(s.contains("$LASTEXITCODE -ne 0"), "{s}");
@@ -706,18 +708,38 @@ mod tests {
     }
 
     #[test]
+    fn winget_calls_go_through_self_repairing_wg() {
+        let w = HostOs::Windows;
+        let scripts = [
+            scan_script(w),
+            search_script(w, &["winget".into()], "git").unwrap(),
+            action_script(w, &act("install", "winget", "A.B")).unwrap(),
+            action_script(w, &act("uninstall", "winget", "A.B")).unwrap(),
+            action_script(w, &InstallAction::InstallManager { manager: "npm".into() }).unwrap(),
+        ];
+        for s in scripts {
+            assert!(s.contains("function Wg {") && s.contains("-eq -1978335217") && s.contains("https://cdn.winget.microsoft.com/cache/source.msix"), "{s}");
+            let rest = s.replacen(WG_FN, "", 1);
+            for sub in ["list", "search", "install", "uninstall"] {
+                assert!(!rest.contains(&format!("winget {sub}")), "bare winget {sub}: {s}");
+            }
+            assert!(rest.contains("Wg "), "{s}");
+        }
+    }
+
+    #[test]
     fn winget_flags_present() {
         let s = action_script(HostOs::Windows, &act("install", "winget", "Tailscale.Tailscale")).unwrap();
         let u = action_script(HostOs::Windows, &act("uninstall", "winget", "Tailscale.Tailscale")).unwrap();
         assert!(s.contains("--disable-interactivity") && u.contains("--disable-interactivity"));
         assert!(s.contains("--accept-package-agreements") && s.contains("--accept-source-agreements") && s.contains("'Tailscale.Tailscale'"));
         let scan = scan_script(HostOs::Windows);
-        assert!(scan.contains("winget list --source winget --accept-source-agreements --disable-interactivity"));
+        assert!(scan.contains("Wg list --source winget --accept-source-agreements --disable-interactivity"));
         // whole-token: 'Git.Git' must not match 'Git.Git.LFS' or 'XGit.Git'
         assert!(scan.contains(r"-match ('(?m)(^|\s)' + [regex]::Escape($id) + '(\s|$)')"), "{scan}");
         assert!(u.contains("--source winget"), "{u}");
         let q = search_script(HostOs::Windows, &["winget".into()], "git").unwrap();
-        assert!(q.contains("winget search --source winget --accept-source-agreements --disable-interactivity"));
+        assert!(q.contains("Wg search --source winget --accept-source-agreements --disable-interactivity"));
         assert_eq!(action_script(HostOs::Windows, &InstallAction::InstallManager { manager: "winget".into() }), Err("WINGET_MANUAL".into()));
     }
 

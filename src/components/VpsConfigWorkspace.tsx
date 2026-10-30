@@ -113,7 +113,7 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
     admin: t.vpsPrivAdmin,
     none: t.vpsPrivNone,
   };
-  const allTabs: { id: VpsStudioTab; label: string }[] = [
+  const allTabs: { id: Exclude<VpsStudioTab, "installer">; label: string }[] = [
     { id: "ssh", label: t.vpsTabSsh },
     { id: "firewall", label: t.vpsTabFirewall },
     { id: "access", label: t.vpsTabAccess },

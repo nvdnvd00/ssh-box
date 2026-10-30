@@ -217,6 +217,26 @@ export interface AppI18nStrings {
   vpsTabSsh: string;
   vpsTabFirewall: string;
   vpsTabAccess: string;
+  vpsTabInstaller: string;
+  vpsErrTimeout: string;
+  instTabMissing: string;
+  instTabInstalled: string;
+  instTabAttention: string;
+  instCat: Record<string, string>;
+  instRecommended: string;
+  instInstall: string;
+  instUninstall: string;
+  instEnable: string;
+  instInstallSelected: (n: number) => string;
+  instNeedsManager: (m: string) => string;
+  instUninstallConfirm: (name: string, m: string) => string;
+  instExternal: string;
+  instNotRunning: string;
+  instSearchPlaceholder: string;
+  instSearchSkipped: (list: string) => string;
+  instStatus: Record<"waiting" | "running" | "done" | "failed", string>;
+  instWindowsPopupNote: string;
+  instWingetManual: string;
   vpsPrivRoot: string;
   vpsPrivSudoNoPassword: string;
   vpsPrivSudoPassword: string;
@@ -396,6 +416,26 @@ const VI_STRINGS: AppI18nStrings = {
   vpsTabSsh: "SSH",
   vpsTabFirewall: "Tường lửa",
   vpsTabAccess: "Người dùng & khoá SSH",
+  vpsTabInstaller: "Cài công cụ",
+  vpsErrTimeout: "Máy chủ phản hồi quá lâu nên đã dừng:",
+  instTabMissing: "Chưa cài",
+  instTabInstalled: "Đã cài",
+  instTabAttention: "Cần chú ý",
+  instCat: { managers: "Trình quản lý gói", security: "Bảo mật", apps: "Chạy ứng dụng", ai: "AI", network: "Mạng", utils: "Tiện ích" },
+  instRecommended: "nên cài",
+  instInstall: "Cài",
+  instUninstall: "Gỡ",
+  instEnable: "Bật",
+  instInstallSelected: (n) => `Cài ${n} mục đã chọn`,
+  instNeedsManager: (m) => `Cần cài ${m} trước`,
+  instUninstallConfirm: (name, m) => `Gỡ ${name} bằng ${m}?`,
+  instExternal: "Đã cài (ngoài trình quản lý gói)",
+  instNotRunning: "Đã cài · chưa bật",
+  instSearchPlaceholder: "Tìm gói trong …",
+  instSearchSkipped: (list) => `Bỏ qua (chưa có trình quản lý): ${list}`,
+  instStatus: { waiting: "Đang chờ", running: "Đang chạy", done: "Xong", failed: "Lỗi" },
+  instWindowsPopupNote: "Windows có thể hiện hộp thoại xin quyền quản trị; hãy bấm đồng ý trên máy chủ.",
+  instWingetManual: "winget không cài được từ xa. Hãy cài \"App Installer\" từ Microsoft Store trên máy chủ rồi quét lại.",
   vpsPrivRoot: "Root",
   vpsPrivSudoNoPassword: "Sudo không cần mật khẩu",
   vpsPrivSudoPassword: "Sudo đã mở khoá",
@@ -657,6 +697,26 @@ const EN_STRINGS: AppI18nStrings = {
   vpsTabSsh: "SSH",
   vpsTabFirewall: "Firewall",
   vpsTabAccess: "Users & Keys",
+  vpsTabInstaller: "Tools",
+  vpsErrTimeout: "The server took too long and the task was stopped:",
+  instTabMissing: "Not installed",
+  instTabInstalled: "Installed",
+  instTabAttention: "Needs attention",
+  instCat: { managers: "Package managers", security: "Security", apps: "Run apps", ai: "AI", network: "Network", utils: "Utilities" },
+  instRecommended: "recommended",
+  instInstall: "Install",
+  instUninstall: "Remove",
+  instEnable: "Enable",
+  instInstallSelected: (n) => `Install ${n} selected`,
+  instNeedsManager: (m) => `Install ${m} first`,
+  instUninstallConfirm: (name, m) => `Remove ${name} using ${m}?`,
+  instExternal: "Installed (outside a package manager)",
+  instNotRunning: "Installed · not enabled",
+  instSearchPlaceholder: "Search packages in …",
+  instSearchSkipped: (list) => `Skipped (no package manager): ${list}`,
+  instStatus: { waiting: "Waiting", running: "Running", done: "Done", failed: "Failed" },
+  instWindowsPopupNote: "Windows may show an administrator prompt; approve it on the server.",
+  instWingetManual: "winget cannot be installed remotely. Install \"App Installer\" from the Microsoft Store on the server, then rescan.",
   vpsPrivRoot: "Root",
   vpsPrivSudoNoPassword: "Sudo, no password",
   vpsPrivSudoPassword: "Sudo unlocked",

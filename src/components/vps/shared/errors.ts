@@ -6,7 +6,9 @@ export type VpsErrorCode =
   | "LOCKOUT_BLOCKED"
   | "COMMAND_FAILED"
   | "VERIFY_FAILED"
-  | "UNSUPPORTED";
+  | "UNSUPPORTED"
+  | "TIMEOUT"
+  | "WINGET_MANUAL";
 
 const CODES: VpsErrorCode[] = [
   "SUDO_REQUIRED",
@@ -15,6 +17,8 @@ const CODES: VpsErrorCode[] = [
   "COMMAND_FAILED",
   "VERIFY_FAILED",
   "UNSUPPORTED",
+  "TIMEOUT",
+  "WINGET_MANUAL",
 ];
 
 // Backend errors are "CODE: detail" (src-tauri/src/vps_config.rs vps_err).
@@ -42,6 +46,10 @@ export function vpsErrorText(t: AppI18nStrings, err: unknown): string {
       return `${t.vpsErrCommandFailed} ${detail}`;
     case "VERIFY_FAILED":
       return `${t.vpsErrVerifyFailed} ${detail}`;
+    case "TIMEOUT":
+      return `${t.vpsErrTimeout} ${detail}`;
+    case "WINGET_MANUAL":
+      return t.instWingetManual;
     default:
       return detail;
   }

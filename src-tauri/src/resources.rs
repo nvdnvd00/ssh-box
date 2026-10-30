@@ -380,6 +380,12 @@ pub fn generate_ssh_key_at(
         .to_openssh(ssh_key::LineEnding::LF)
         .map_err(|e| format!("Failed to serialize private key: {e}"))?;
 
+    // Vault first: if it fails, no key file is left behind without a store entry.
+    let has_passphrase = !pass_str.is_empty();
+    if has_passphrase {
+        vault::set_secret(&format!("sshkey:{id}"), pass_str)?;
+    }
+
     std::fs::write(&priv_path, priv_openssh.as_str()).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
@@ -387,11 +393,6 @@ pub fn generate_ssh_key_at(
         let _ = std::fs::set_permissions(&priv_path, std::fs::Permissions::from_mode(0o600));
     }
     std::fs::write(&pub_path, format!("{public_key}\n")).map_err(|e| e.to_string())?;
-
-    let has_passphrase = !pass_str.is_empty();
-    if has_passphrase {
-        let _ = vault::set_secret(&format!("sshkey:{id}"), pass_str);
-    }
 
     let item = SshKeyItem {
         id,
@@ -567,7 +568,7 @@ pub fn upsert_proxy_profile_at(
     }
     if let Some(pw) = password {
         if !pw.trim().is_empty() {
-            let _ = vault::set_secret(&format!("proxy:{}", profile.id), pw.trim());
+            vault::set_secret(&format!("proxy:{}", profile.id), pw.trim())?;
             profile.has_password = true;
         }
     }
@@ -1233,6 +1234,9 @@ mod tests {
     #[test]
     fn export_and_import_machines_with_separate_identity_and_ssh_key_options_and_passphrase() {
         // Mock keyring: secrets land in a vault file under the temp app dir, never the real Keychain.
+        let _vault = crate::vault::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
         let src_dir =
             std::env::temp_dir().join(format!("ssh-box-export-src-{}", uuid::Uuid::new_v4()));
@@ -1454,5 +1458,64 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&src_dir);
         let _ = std::fs::remove_dir_all(&dst_dir);
+    }
+
+    #[test]
+    fn failed_vault_write_is_reported_and_saves_nothing() {
+        let _vault = crate::vault::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+        let tmp_dir =
+            std::env::temp_dir().join(format!("ssh-box-vault-fail-{}", uuid::Uuid::new_v4()));
+        crate::host_store::set_app_data_dir(tmp_dir.clone());
+        let store_path = tmp_dir.join("resources.json");
+        let keys_dir = tmp_dir.join("keys");
+
+        // A directory where the vault file belongs makes every vault write fail.
+        let vault_path = crate::host_store::app_config_dir().join("vault.json");
+        assert!(
+            vault_path.starts_with(std::env::temp_dir()),
+            "never touch a real vault"
+        );
+        let _ = std::fs::remove_file(&vault_path);
+        std::fs::create_dir_all(&vault_path).unwrap();
+
+        let key = generate_ssh_key_at(
+            &store_path,
+            &keys_dir,
+            "k".into(),
+            "".into(),
+            "ed25519".into(),
+            Some("key-pass".into()),
+        );
+        let key_files = std::fs::read_dir(&keys_dir).map(|d| d.count()).unwrap_or(0);
+        let proxy = upsert_proxy_profile_at(
+            &store_path,
+            ConnectionProxyProfile {
+                id: "proxy:p".into(),
+                name: "p".into(),
+                remark: "".into(),
+                proxy_type: "socks5".into(),
+                host: "127.0.0.1".into(),
+                port: 1080,
+                authentication_method: "usernamePassword".into(),
+                username: "u".into(),
+                has_password: false,
+                created_date: 0,
+            },
+            Some("proxy-pw".into()),
+        );
+        std::fs::remove_dir(&vault_path).unwrap();
+
+        // Saving a key or proxy whose secret was lost would show "has password" and then fail
+        // to connect, so the save must fail; a key file without its store entry would be orphaned.
+        assert!(key.is_err());
+        assert_eq!(key_files, 0);
+        assert!(proxy.is_err());
+        let store = load_resources_at(&store_path);
+        assert!(store.ssh_keys.is_empty());
+        assert!(store.proxy_profiles.is_empty());
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

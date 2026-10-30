@@ -110,7 +110,9 @@ async fn export_machines_bundle(
     passphrase: Option<String>,
     file_name: String,
 ) -> Result<bool, String> {
+    use std::io::Write;
     use tauri_plugin_dialog::DialogExt;
+    use tauri_plugin_fs::FsExt;
     let bundle = resources::export_machines_bundle_at(
         &resources::default_resources_path(),
         hosts,
@@ -127,11 +129,15 @@ async fn export_machines_bundle(
     else {
         return Ok(false);
     };
-    let path = picked
-        .into_path()
-        .map_err(|e| format!("Cannot save to this location: {e}"))?;
     let json = serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| e.to_string())?;
+    // fs().open also takes the content:// URI the Android dialog returns.
+    let mut opts = tauri_plugin_fs::OpenOptions::new();
+    opts.read(false).write(true).create(true).truncate(true);
+    let mut file = app
+        .fs()
+        .open(picked, opts)
+        .map_err(|e| format!("Cannot save to this location: {e}"))?;
+    file.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
     Ok(true)
 }
 
@@ -1039,6 +1045,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .setup(|app| {
             use tauri::Manager;
             if let Ok(app_dir) = app.path().app_data_dir() {

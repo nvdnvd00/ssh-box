@@ -551,8 +551,8 @@ mod tests {
     // From real JSON: the only IPv6 allow for the client's /64; deleting it must be blocked (parser and guard together).
     #[test]
     fn windows_delete_from_parsed_json_blocks_only_ipv6_allow() {
-        let j = r#"{"profiles":[{"name":"Private","enabled":true,"defaultInbound":"Block"}],"active":["Private"],"rules":[{"displayName":"ssh6","group":"","program":"Any","profile":"Any","scoped":false,"action":"Allow","localPort":"2222","protocol":"TCP","remoteAddress":"2001:db8::/64"}],"sockets":[]}"#;
-        let rules = crate::vps_windows::parse_windows_firewall(j).unwrap().rules;
+        let j = r#"{"profiles":[{"name":"Private","enabled":true,"defaultInbound":"Block"}],"active":["Private"],"rules":[{"displayName":"ssh6","service":"Any","group":"","program":"Any","profile":"Any","scoped":false,"action":"Allow","localPort":"2222","protocol":"TCP","remoteAddress":"2001:db8::/64"}],"sockets":[]}"#;
+        let rules = crate::vps_windows::parse_windows_firewall(j, 22).unwrap().rules;
         let mut c = deploy_key();
         c.client_ip = "2001:db8::7".to_string();
         assert!(blocked(check_firewall_delete_windows(&c, &rules, &rules[0])));

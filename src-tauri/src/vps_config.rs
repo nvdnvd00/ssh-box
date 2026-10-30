@@ -938,7 +938,7 @@ pub async fn add_firewall_rule(
     crate::vps_guard::check_firewall_add(&probe.context, &action, &source, &port)?;
     if probe.firewall_engine == FirewallEngine::Windows {
         let script = crate::vps_windows::build_windows_add_rule_script(&action, &source, &port, &proto)?;
-        return crate::vps_windows::run_windows_firewall_write(host_id, pool, &probe.context.server_ip, &script).await;
+        return crate::vps_windows::run_windows_firewall_write(host_id, pool, &probe.context, &script).await;
     }
     let script = match probe.firewall_engine {
         FirewallEngine::Firewalld => build_firewalld_add_rule_script(&action, &source, &port, &proto)?,
@@ -958,7 +958,7 @@ pub async fn delete_firewall_rule(
     let current = get_firewall_snapshot(host_id, pool, sudo_password.clone()).await?;
     if probe.firewall_engine == FirewallEngine::Windows {
         let script = crate::vps_windows::build_windows_delete(&probe.context, &current, &rule.raw_spec)?;
-        return crate::vps_windows::run_windows_firewall_write(host_id, pool, &probe.context.server_ip, &script).await;
+        return crate::vps_windows::run_windows_firewall_write(host_id, pool, &probe.context, &script).await;
     }
     crate::vps_guard::check_firewall_delete(&probe.context, &current.rules, &rule)?;
     let script = match probe.firewall_engine {
@@ -979,7 +979,7 @@ pub async fn set_firewall_state(
     let current = get_firewall_snapshot(host_id, pool, sudo_password.clone()).await?;
     if probe.firewall_engine == FirewallEngine::Windows {
         let script = crate::vps_windows::build_windows_set_state(&probe.context, &current, enable)?;
-        return crate::vps_windows::run_windows_firewall_write(host_id, pool, &probe.context.server_ip, &script).await;
+        return crate::vps_windows::run_windows_firewall_write(host_id, pool, &probe.context, &script).await;
     }
     let ensure = crate::vps_guard::ssh_allow_needed(&probe.context, &current.rules).then_some(probe.context.server_port);
     let script = build_set_firewall_state_script(probe.firewall_engine, enable, ensure)?;

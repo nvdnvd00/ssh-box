@@ -256,6 +256,10 @@ pub fn parse_windows_sshd_view(raw: &str) -> Result<SshdView, String> {
     let mut view = parse_sshd_view(&raw.replace("\r\n", "\n"))?;
     // No drop-in directory is managed on Windows.
     view.write_target = WriteTarget::MainFile;
+    // Out-String adds its own newline after the file text; it is not part of the file.
+    if let Some(text) = view.main_raw.strip_suffix('\n') {
+        view.main_raw = text.to_string();
+    }
     Ok(view)
 }
 
@@ -760,6 +764,16 @@ mod tests {
         assert!(!v.rollback_pending && v.main_raw.contains("Match Group administrators"));
         let inc = SSHD_RAW.replace("Port 22\r\n", "Include sshd_config.d/*.conf\r\n");
         assert_eq!(parse_windows_sshd_view(&inc).unwrap().write_target, WriteTarget::MainFile);
+    }
+
+    // Out-String ends the file text with its own newline; kept, every apply grew sshd_config by one trailing blank line.
+    #[test]
+    fn windows_view_drops_the_out_string_newline() {
+        let raw = SSHD_RAW.replace("administrators_authorized_keys\r\n---", "administrators_authorized_keys\r\n\r\n---");
+        let v = parse_windows_sshd_view(&raw).unwrap();
+        assert!(v.main_raw.ends_with("administrators_authorized_keys\n"), "{:?}", v.main_raw);
+        let applied = crate::vps_config::render_sshd_config(&v.main_raw, &[("maxauthtries", Some("MaxAuthTries 5".into()))]);
+        assert!(applied.ends_with("administrators_authorized_keys\n"), "{applied:?}");
     }
 
     // sshd -T cannot read host keys without admin; running it would only produce a confusing error box.

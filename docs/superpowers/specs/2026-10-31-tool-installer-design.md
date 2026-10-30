@@ -133,6 +133,6 @@ Exact catalog entries per OS, timeout values, how local sudo password is asked, 
 | Windows 11 — UTM VM, admin user with spaces, over SSH (run in parallel with Server Config tests) | scan → search jq → install jq (winget) → enable Spooler → uninstall jq → scan | scan OK (winget present, npm absent); Spooler enable OK; winget install/search fail with `0x8a15000f Data required by the source is missing` — **now reported as a failure** (before fix 6ab47cb: scan died on missing npm and the failed install reported success) |
 | UI in the running app | — | not yet opened |
 
-Known limit: winget's source data is often missing in an SSH (non-interactive) session on a fresh Windows, so remote winget installs fail until someone runs winget once in that user's desktop session. The app surfaces the error; no workaround built.
+Windows winget over SSH (fix 9104145): on a fresh Windows the winget source package is often not registered for the SSH user, so every winget call fails with 0x8a15000f (exit -1978335217); `winget source reset` does not help. Every winget call goes through a `Wg` wrapper that, on that exit code, runs `Add-AppxPackage https://cdn.winget.microsoft.com/cache/source.msix` and retries once. Verified on the VM after removing the source package: scan → search jq (hits) → install jq → Installed via winget (jqlang.jq) → uninstall → NotInstalled, all exit 0.
 
 Note: macOS ships `/usr/bin/jq`, so jq shows "installed (outside package managers)" before a brew install. That is correct per §7, and it means the brew install is reached only through search.

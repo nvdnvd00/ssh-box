@@ -122,3 +122,15 @@ Builds on the unmerged `feat/server-config-multi-os` work (OS detection, Windows
 ## 13. Left to the builder
 
 Exact catalog entries per OS, timeout values, how local sudo password is asked, debounce/caps for search, icon choices.
+
+## Appendix: verification results (2026-10-31)
+
+| Target | Steps | Result |
+|---|---|---|
+| Linux — throwaway ubuntu:24.04 container (root, real systemd) | scan → Refresh → install fail2ban, jq → install npm (manager) → enable fail2ban → search → uninstall jq → scan | all pass; statuses flip as expected; no prompt hangs |
+| Linux — same, non-root user with sudo password | install jq twice via `sudo -k -S` (second with cached creds) | pass; password never in output (old `sudo -S` leaked it) |
+| macOS 27.0.1 — disposable UTM VM, user `sshbox`, over SSH, no Homebrew at start | scan → install brew (manager) → scan → install jq → scan → uninstall jq → scan | all exit 0; brew false→true; jq External (system `/usr/bin/jq`) → Installed via brew → External |
+| Windows | — | not yet run (PowerShell scripts unexecuted) |
+| UI in the running app | — | not yet opened |
+
+Note: macOS ships `/usr/bin/jq`, so jq shows "installed (outside package managers)" before a brew install. That is correct per §7, and it means the brew install is reached only through search.

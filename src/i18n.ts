@@ -183,6 +183,7 @@ export interface AppI18nStrings {
   vpsFwSource: string;
   vpsFwMyIp: string;
   vpsFwPort: string;
+  vpsFwPortOnly: string;
   vpsFwProto: string;
   vpsFwAny: string;
   vpsFwAdd: string;
@@ -463,6 +464,7 @@ const VI_STRINGS: AppI18nStrings = {
   vpsFwSource: "Nguồn (IP hoặc dải IP, để trống là mọi nơi)",
   vpsFwMyIp: "IP của tôi",
   vpsFwPort: "Cổng (để trống là mọi cổng)",
+  vpsFwPortOnly: "Cổng",
   vpsFwProto: "Giao thức",
   vpsFwAny: "Tất cả",
   vpsFwAdd: "Thêm",
@@ -728,6 +730,7 @@ const EN_STRINGS: AppI18nStrings = {
   vpsFwSource: "Source (IP or range, empty = anywhere)",
   vpsFwMyIp: "My IP",
   vpsFwPort: "Port (empty = all ports)",
+  vpsFwPortOnly: "Port",
   vpsFwProto: "Protocol",
   vpsFwAny: "Any",
   vpsFwAdd: "Add",

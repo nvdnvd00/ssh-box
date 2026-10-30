@@ -149,7 +149,119 @@ export type TabResources =
   | "portForwarding"
   | "snippets"
   | "docker"
-  | "sftp";
+  | "sftp"
+  | "vpsConfig";
+
+export type VpsStudioTab = "ssh" | "firewall" | "access";
+
+export type AuthUsed = { kind: "password" } | { kind: "key"; publicKeyBody: string };
+export type PrivilegeLevel = "root" | "sudoNoPassword" | "sudoPassword" | "none";
+export type FirewallEngine = "ufw" | "firewalld" | "iptables" | "none";
+
+export interface ConnectionContext {
+  loginUser: string;
+  auth: AuthUsed;
+  clientIp: string;
+  serverIp: string;
+  serverPort: number;
+}
+
+export interface VpsProbe {
+  privilege: PrivilegeLevel;
+  context: ConnectionContext;
+  osId: string;
+  osVersion: string;
+  opensshVersion: string;
+  hasSystemd: boolean;
+  sshSocketActive: boolean;
+  selinuxEnforcing: boolean;
+  firewallEngine: FirewallEngine;
+}
+
+export interface SshdSettings {
+  port: number;
+  permitRootLogin: string;
+  passwordAuthentication: boolean;
+  pubkeyAuthentication: boolean;
+  allowUsers: string[];
+  denyUsers: string[];
+  maxAuthTries: number;
+  maxSessions: number;
+  loginGraceTime: number;
+  clientAliveInterval: number;
+  clientAliveCountMax: number;
+}
+
+export type WriteTarget = "dropIn" | "mainFile";
+
+export interface SshdView {
+  settings: SshdSettings;
+  writeTarget: WriteTarget;
+  rollbackPending: boolean;
+}
+
+export interface SshdApplyStarted {
+  rollbackAt: number;
+  serverNow: number;
+  newPort: number | null;
+}
+
+export interface ListeningSocketItem {
+  protocol: string;
+  bindAddr: string;
+  port: number;
+  isPublic: boolean;
+  processName: string;
+  pid?: number | null;
+  exposure: string;
+}
+
+export interface FirewallRuleItem {
+  index: number;
+  toPort: string;
+  protocol: string;
+  action: string;
+  fromSource: string;
+  v6: boolean;
+  comment: string;
+  rawSpec: string;
+}
+
+export interface FirewallSnapshot {
+  engine: string;
+  enabled: boolean;
+  defaultIncoming: string;
+  defaultOutgoing: string;
+  ipv6Filtered: boolean;
+  rules: FirewallRuleItem[];
+  listeningSockets: ListeningSocketItem[];
+}
+
+export interface RemoteAuthorizedKey {
+  index: number;
+  keyType: string;
+  publicKeyBody: string;
+  comment: string;
+  shortPreview: string;
+  rawLine: string;
+}
+
+export interface LinuxAccountItem {
+  username: string;
+  uid: number;
+  gid: number;
+  homeDir: string;
+  shell: string;
+  locked: boolean;
+  groups: string[];
+  hasSudo: boolean;
+  nopasswdSudo: boolean;
+  authorizedKeys: RemoteAuthorizedKey[];
+}
+
+export interface AccessKeysSnapshot {
+  accounts: LinuxAccountItem[];
+}
 
 export interface KnownHostEntry {
   id: string;

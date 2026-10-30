@@ -6,6 +6,8 @@ pub mod sftp;
 pub mod ssh_pool;
 pub mod telemetry;
 pub mod vault;
+pub mod vps_config;
+pub mod vps_guard;
 
 use host_store::HostEntry;
 use local_pty::LocalPtyManager;
@@ -23,6 +25,9 @@ use tauri::ipc::Channel;
 use tauri::State;
 use telemetry::{DockerFullSnapshot, ServerMetrics};
 use tokio::sync::mpsc;
+use vps_config::{
+    AccessKeysSnapshot, FirewallRuleItem, FirewallSnapshot, SshdApplyStarted, SshdSettings, SshdView, SudoMode, VpsProbe,
+};
 
 pub struct AppState {
     pub local_pty: LocalPtyManager,
@@ -817,6 +822,161 @@ fn save_session_log(
     Ok(full_path.to_string_lossy().to_string())
 }
 
+#[tauri::command]
+async fn vps_probe(
+    state: State<'_, AppState>,
+    host_id: String,
+    sudo_password: Option<String>,
+) -> Result<VpsProbe, String> {
+    vps_config::probe(&host_id, &state.ssh_pool, sudo_password).await
+}
+
+#[tauri::command]
+async fn vps_get_sshd_settings(
+    state: State<'_, AppState>,
+    host_id: String,
+    sudo_password: Option<String>,
+) -> Result<SshdView, String> {
+    vps_config::get_sshd_view(&host_id, &state.ssh_pool, sudo_password).await
+}
+
+#[tauri::command]
+async fn vps_apply_sshd_settings(
+    state: State<'_, AppState>,
+    host_id: String,
+    desired: SshdSettings,
+    sudo_password: Option<String>,
+) -> Result<SshdApplyStarted, String> {
+    vps_config::apply_sshd_settings(&host_id, &state.ssh_pool, sudo_password, desired).await
+}
+
+#[tauri::command]
+async fn vps_finish_sshd_apply(
+    state: State<'_, AppState>,
+    host_id: String,
+    new_port: Option<u16>,
+    sudo_password: Option<String>,
+) -> Result<SshdView, String> {
+    vps_config::finish_sshd_apply(&host_id, &state.ssh_pool, sudo_password, new_port).await
+}
+
+#[tauri::command]
+async fn vps_revert_sshd_settings(
+    state: State<'_, AppState>,
+    host_id: String,
+    sudo_password: Option<String>,
+) -> Result<SshdView, String> {
+    vps_config::revert_sshd_settings(&host_id, &state.ssh_pool, sudo_password).await
+}
+
+#[tauri::command]
+async fn vps_get_firewall_snapshot(
+    state: State<'_, AppState>,
+    host_id: String,
+    sudo_password: Option<String>,
+) -> Result<FirewallSnapshot, String> {
+    vps_config::get_firewall_snapshot(&host_id, &state.ssh_pool, sudo_password).await
+}
+
+#[tauri::command]
+async fn vps_add_firewall_rule(
+    state: State<'_, AppState>,
+    host_id: String,
+    action: String,
+    source: String,
+    port: String,
+    proto: String,
+    sudo_password: Option<String>,
+) -> Result<FirewallSnapshot, String> {
+    vps_config::add_firewall_rule(&host_id, &state.ssh_pool, sudo_password, action, source, port, proto).await
+}
+
+#[tauri::command]
+async fn vps_delete_firewall_rule(
+    state: State<'_, AppState>,
+    host_id: String,
+    rule: FirewallRuleItem,
+    sudo_password: Option<String>,
+) -> Result<FirewallSnapshot, String> {
+    vps_config::delete_firewall_rule(&host_id, &state.ssh_pool, sudo_password, rule).await
+}
+
+#[tauri::command]
+async fn vps_set_firewall_state(
+    state: State<'_, AppState>,
+    host_id: String,
+    enable: bool,
+    sudo_password: Option<String>,
+) -> Result<FirewallSnapshot, String> {
+    vps_config::set_firewall_state(&host_id, &state.ssh_pool, sudo_password, enable).await
+}
+
+#[tauri::command]
+async fn vps_get_access_keys_snapshot(
+    state: State<'_, AppState>,
+    host_id: String,
+    sudo_password: Option<String>,
+) -> Result<AccessKeysSnapshot, String> {
+    vps_config::get_access_keys_snapshot(&host_id, &state.ssh_pool, sudo_password).await
+}
+
+#[tauri::command]
+async fn vps_authorize_ssh_key(
+    state: State<'_, AppState>,
+    host_id: String,
+    username: String,
+    key_line: String,
+    sudo_password: Option<String>,
+) -> Result<AccessKeysSnapshot, String> {
+    vps_config::authorize_ssh_key(&host_id, &state.ssh_pool, sudo_password, username, key_line).await
+}
+
+#[tauri::command]
+async fn vps_revoke_ssh_key(
+    state: State<'_, AppState>,
+    host_id: String,
+    username: String,
+    key_body: String,
+    sudo_password: Option<String>,
+) -> Result<AccessKeysSnapshot, String> {
+    vps_config::revoke_ssh_key(&host_id, &state.ssh_pool, sudo_password, username, key_body).await
+}
+
+#[tauri::command]
+async fn vps_create_linux_user(
+    state: State<'_, AppState>,
+    host_id: String,
+    username: String,
+    sudo: SudoMode,
+    password: Option<String>,
+    sudo_password: Option<String>,
+) -> Result<AccessKeysSnapshot, String> {
+    vps_config::create_linux_user(&host_id, &state.ssh_pool, sudo_password, username, sudo, password).await
+}
+
+#[tauri::command]
+async fn vps_set_user_lock(
+    state: State<'_, AppState>,
+    host_id: String,
+    username: String,
+    lock: bool,
+    sudo_password: Option<String>,
+) -> Result<AccessKeysSnapshot, String> {
+    vps_config::set_user_lock(&host_id, &state.ssh_pool, sudo_password, username, lock).await
+}
+
+#[tauri::command]
+async fn vps_set_user_sudo(
+    state: State<'_, AppState>,
+    host_id: String,
+    username: String,
+    sudo: SudoMode,
+    password: Option<String>,
+    sudo_password: Option<String>,
+) -> Result<AccessKeysSnapshot, String> {
+    vps_config::set_user_sudo(&host_id, &state.ssh_pool, sudo_password, username, sudo, password).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -883,6 +1043,21 @@ pub fn run() {
             clear_known_hosts,
             export_ssh_key_to_host,
             save_session_log,
+            vps_probe,
+            vps_get_sshd_settings,
+            vps_apply_sshd_settings,
+            vps_finish_sshd_apply,
+            vps_revert_sshd_settings,
+            vps_get_firewall_snapshot,
+            vps_add_firewall_rule,
+            vps_delete_firewall_rule,
+            vps_set_firewall_state,
+            vps_get_access_keys_snapshot,
+            vps_authorize_ssh_key,
+            vps_revoke_ssh_key,
+            vps_create_linux_user,
+            vps_set_user_lock,
+            vps_set_user_sudo,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -526,7 +526,9 @@ pub fn parse_windows_firewall(json: &str, server_port: u16) -> Result<FirewallSn
         !prog.is_empty() && on_port.peek().is_some() && on_port.all(|s| !s.path.is_empty() && s.path.eq_ignore_ascii_case(prog))
     };
     // Every port rule is listed; only plain port rules of the SSH profile take part in the exposure, the rest leave the port "unknown".
-    let (mut rules, mut unlisted_blocks) = (Vec::new(), Vec::new());
+    // `counted` feeds the port display: the guard's conservative extras (blocks of any profile while the SSH profile is
+    // unknown) stay out of it, so a port never reads safer than it is.
+    let (mut rules, mut unlisted_blocks, mut counted) = (Vec::new(), Vec::new(), Vec::new());
     for r in &w.rules {
         // ICMPv4/ICMPv6/protocol-number rules (only port-less blocks reach here) never touch a TCP/UDP port: skip them.
         let protocol = match r.protocol.to_ascii_lowercase().as_str() {
@@ -565,6 +567,9 @@ pub fn parse_windows_firewall(json: &str, server_port: u16) -> Result<FirewallSn
                 raw_spec: r.display_name.clone(),
                 effective: !r.scoped && !service_scoped && !(allow && allows_off) && applies(&r.profile, !allow) && program_owns(r, protocol),
             };
+            if item.effective && (allow || applies(&r.profile, false)) {
+                counted.push(item.clone());
+            }
             if r.local_port.trim().eq_ignore_ascii_case("any") {
                 unlisted_blocks.push(item);
             } else {
@@ -572,7 +577,6 @@ pub fn parse_windows_firewall(json: &str, server_port: u16) -> Result<FirewallSn
             }
         }
     }
-    let counted: Vec<FirewallRuleItem> = rules.iter().chain(&unlisted_blocks).filter(|r| r.effective).cloned().collect();
     let listening_sockets = w
         .sockets
         .iter()
@@ -1335,6 +1339,17 @@ mod tests {
         assert_eq!(build_windows_set_state(&admin_ctx(), &snap, true), Err("LOCKOUT_BLOCKED: windows_block_covers_me".to_string()));
         assert!(snap.rules.iter().all(|r| !r.effective), "the Private-only allow still does not count");
         assert!(build_windows_set_state(&admin_ctx(), &fw_off(blk), true).is_ok(), "known Private SSH NIC: the Public block is elsewhere");
+    }
+
+    // The wider "a block of any profile" rule is for the guard only: with the SSH profile unknown, a Public-only block must not
+    // show port 22 "blocked" while an allow for every profile may well let it in (never show a port safer than it is).
+    #[test]
+    fn windows_unknown_ssh_profile_block_does_not_hide_exposure() {
+        let blk = r#",{"displayName":"pub block 22","service":"Any","group":"tmp","program":"Any","profile":"Public","action":"Block","localPort":"22","protocol":"TCP","remoteAddress":"Any"}"#;
+        let j = FW_OFF.replace(r#","sshProfile":"Private""#, "").replace(r#""enabled":false"#, r#""enabled":true"#).replace("EXTRA", &format!("{MY_ALLOW}{blk}"));
+        let snap = parse_windows_firewall(&j, 22).unwrap();
+        assert_eq!(snap.listening_sockets[0].exposure, "exposed");
+        assert_eq!(build_windows_set_state(&admin_ctx(), &snap, true), Err("LOCKOUT_BLOCKED: windows_block_covers_me".to_string()));
     }
 
     // Arming the 60s rollback before restarting sshd is what makes a bad config recoverable.

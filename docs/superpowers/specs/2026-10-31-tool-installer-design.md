@@ -88,7 +88,7 @@ Service state: `systemctl is-enabled/is-active`, `launchctl`/`brew services list
 - Linux/macOS: reuse `run_privileged_script` (sudo-aware) from `vps_config.rs`; brew and npm-global-under-user run **without** sudo.
 - Windows: reuse `run_windows_script` (stdin-fed PowerShell). Usernames with spaces must be quoted (§8.1 of the multi-OS spec).
 - Local: reuse `run_host_or_local_cmd` from `telemetry.rs`. Local sudo needs a password prompt → builder decides (simplest: ask for password once per run in a dialog, never stored).
-- Local Windows (decided by user: in v1): run PowerShell locally without elevation; winget installers that need admin raise their own UAC prompt. Actions that need admin themselves (Start-Service/enable, uninstall of machine-wide packages) launch an elevated PowerShell (`Start-Process -Verb RunAs`, output via temp file) — one UAC prompt. Some installers ignore `--silent` and may show a window mid-batch; show a note. Test on an own disposable Windows VM.
+- Local Windows (decided by user: in v1): run PowerShell locally without elevation; winget installers that need admin raise their own UAC prompt. Actions that need admin themselves (Start-Service/enable, uninstall of machine-wide packages) launch an elevated PowerShell (`Start-Process -Verb RunAs`, output via temp file) — one UAC prompt. Some installers ignore `--silent` and may show a window mid-batch; show a note. Test on the Windows VM (see §11).
 - Non-interactive always: `DEBIAN_FRONTEND=noninteractive apt-get -y`, `brew` with `NONINTERACTIVE=1`, `winget --accept-source-agreements --accept-package-agreements --silent`.
 - Every command gets a timeout (lesson from sshd -t hangs). Install timeout generous (e.g. 10 min), probe short.
 - Package names come only from the catalog or search results and are shell-quoted (`ps_quote` on Windows); never interpolate raw user text.
@@ -113,7 +113,7 @@ Searches only managers present on the machine, in parallel per manager, results 
 ## 11. Testing
 
 - Rust unit tests: probe-output parsers per manager, catalog method selection, command building/quoting (incl. names with spaces).
-- Real runs only on **disposable VMs / temp environments**, never real servers, and **not** the UTM VMs used by the multi-OS session (macOS 192.168.64.5, Windows 192.168.65.2) — create own disposable ones.
+- Real runs only on **disposable VMs / temp environments**, never real servers, and **not** the UTM VMs used by the multi-OS session (macOS 192.168.64.5, Windows 192.168.65.2) — until that session is done. Once it finishes, the user allows reusing the UTM Windows VM for installer tests (decided by user); check that session has finished before touching it.
 
 ## 12. Dependencies
 

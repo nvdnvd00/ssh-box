@@ -114,11 +114,30 @@ pub fn check_firewall_delete(
     Ok(())
 }
 
+// Windows only. The source decides the family (source_covers and the range check compare families), so a keyword item,
+// tagged v4 by the parser, still counts for an IPv6 client.
 fn blocks_my_ssh(ctx: &ConnectionContext, r: &FirewallRuleItem) -> bool {
     !is_allow(&r.action)
-        && r.v6 == ctx.client_ip.contains(':')
         && rule_port_matches(&r.to_port, &r.protocol, ctx.server_port, "tcp")
-        && source_covers(&r.from_source, &ctx.client_ip)
+        && block_source_covers(&r.from_source, &ctx.client_ip)
+}
+
+// Blocks only (never allows): an "a-b" range is matched within its family; a keyword (LocalSubnet, Internet, DNS…)
+// or any source we cannot parse may hold the client, so it covers (conservative).
+fn block_source_covers(source: &str, ip: &str) -> bool {
+    let s = source.trim();
+    if let Some((a, b)) = s.split_once('-') {
+        return match (a.trim().parse::<IpAddr>(), b.trim().parse::<IpAddr>(), ip.trim().parse::<IpAddr>()) {
+            (Ok(a), Ok(b), Ok(i)) if a.is_ipv4() == i.is_ipv4() && b.is_ipv4() == i.is_ipv4() => a <= i && i <= b,
+            (Ok(a), Ok(b), Ok(_)) if a.is_ipv4() == b.is_ipv4() => false,
+            _ => true,
+        };
+    }
+    let parsed = match s.split_once('/') {
+        Some((n, p)) => n.trim().parse::<IpAddr>().is_ok() && p.trim().parse::<u32>().is_ok(),
+        None => s.parse::<IpAddr>().is_ok(),
+    };
+    !parsed || source_covers(s, ip)
 }
 
 // Windows Firewall: a block rule wins over any allow, so an allow only counts while no block covers the same ssh path.
@@ -537,6 +556,35 @@ mod tests {
         let mut c = deploy_key();
         c.client_ip = "2001:db8::7".to_string();
         assert!(blocked(check_firewall_delete_windows(&c, &rules, &rules[0])));
+    }
+
+    // A Windows block on a range covering the client, or on a keyword/odd source we cannot resolve (LocalSubnet…), beats the
+    // auto-allow: enabling must be refused. A range that misses the client, or of the other family, must not refuse it.
+    #[test]
+    fn windows_enable_counts_range_and_keyword_blocks() {
+        let deny = |from: &str| FirewallRuleItem { v6: from.contains(':'), ..rule(1, "DENY", "2222/tcp", from) };
+        let c = deploy_key();
+        for from in ["203.0.113.1-203.0.113.50", "LocalSubnet", "Internet", "DefaultGateway", "10.0.0.0/255.0.255.0"] {
+            assert!(blocked(check_firewall_enable_windows(&c, &[deny(from)])), "{from}");
+        }
+        for from in ["203.0.113.8-203.0.113.50", "2001:db8::1-2001:db8::ff"] {
+            assert!(check_firewall_enable_windows(&c, &[deny(from)]).is_ok(), "{from}");
+        }
+        let c6 = ConnectionContext { client_ip: "2001:db8::7".to_string(), ..deploy_key() };
+        assert!(blocked(check_firewall_enable_windows(&c6, &[deny("2001:db8::1-2001:db8::ff")])));
+        assert!(blocked(check_firewall_enable_windows(&c6, &[deny("LocalSubnet")])), "a keyword item is v4-tagged yet may hold a v6 client");
+        assert!(check_firewall_enable_windows(&c6, &[deny("203.0.113.1-203.0.113.50")]).is_ok());
+    }
+
+    // Allows are never widened: an allow on LocalSubnet or a range is no known way in, so deleting the real allow stays refused.
+    #[test]
+    fn windows_keyword_or_range_allow_is_not_my_way_in() {
+        let c = deploy_key();
+        let real = rule(1, "ALLOW", "2222/tcp", "203.0.113.7");
+        for from in ["LocalSubnet", "203.0.113.1-203.0.113.50"] {
+            let other = FirewallRuleItem { raw_spec: from.into(), ..rule(2, "ALLOW", "2222/tcp", from) };
+            assert!(blocked(check_firewall_delete_windows(&c, &[real.clone(), other], &real)), "{from}");
+        }
     }
 
     // Windows hides AllowUsers; a leftover DOMAIN\\bob entry must not block an unrelated change, while the auth rules still do.

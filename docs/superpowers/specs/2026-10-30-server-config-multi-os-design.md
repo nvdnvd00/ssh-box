@@ -70,7 +70,7 @@ Mỗi tab, và khi cần thì từng dòng cài đặt, trên mỗi hệ máy c�
 ### 3.1. Phiên bản chưa thử: theo khả năng của máy (quyết định của người dùng)
 Mức hỗ trợ **không** dựa trên danh sách các bản đã thử trên máy ảo. Probe kiểm tra những thứ mà từng luồng ghi cần. Thiếu thứ nào thì ô tương ứng về mức Chỉ xem, kèm lý do. Tối thiểu cần kiểm tra:
 - **macOS, SSH ghi:** có dòng `Include /etc/ssh/sshd_config.d/*` đứng trước mọi directive (macOS 13 trở lên). Không có thì tab SSH ở mức Chỉ xem, không dùng nhánh sửa file chính trên macOS *(quyết định của Claude: bớt một luồng phải thử; macOS 12 trở xuống đã hết được Apple hỗ trợ)*. Cần có thêm các lệnh mà cơ chế hẹn giờ hoàn tác dùng tới.
-- **Windows, SSH ghi:** có `sshd.exe` và dịch vụ `sshd` đang chạy; OpenSSH đủ mới để hiểu mọi directive mà luồng ghi dùng (người làm tự xác định phiên bản tối thiểu, dưới mức đó thì Chỉ xem); có module `ScheduledTasks`.
+- **Windows, SSH ghi:** có `sshd.exe` và dịch vụ `sshd` đang chạy; có module `ScheduledTasks`. Không chặn theo phiên bản OpenSSH: mọi directive luồng ghi dùng đều có từ OpenSSH 7.7p1 (bản đi kèm Windows 10 1809), và `KbdInteractiveAuthentication` / `ChallengeResponseAuthentication` là hai tên của cùng một directive. Nếu một bản cũ không hiểu directive nào đó, bước kiểm tra cấu hình (`sshd -t` có giới hạn thời gian) sẽ từ chối trước khi file thật bị thay. *(quyết định của Claude)*
 - **Windows, Firewall ghi:** có module `NetSecurity`.
 
 Lý do chấp nhận được: mọi thay đổi SSH luôn qua bước kết nối thử mới, thất bại thì tự hoàn tác, nên một bản chưa thử có hành vi lạ vẫn quay về cấu hình cũ. Mô tả MR phải ghi trung thực những bản nào đã được thử thật.
@@ -155,7 +155,7 @@ Windows mà tài khoản đăng nhập không có quyền quản trị: mọi ta
 - **Thêm rule:** allow hoặc block, theo cổng, giao thức, nguồn, vào nhóm rule `ssh-box`.
 - **Xoá rule:** chỉ xoá được rule thuộc nhóm `ssh-box`. Các rule khác, kể cả rule `OpenSSH-Server-In-TCP` của Windows, chỉ được xem.
 - **Bật/tắt:** áp dụng cho cả 3 profile cùng lúc. Khi bật, dòng "tự thêm rule cho phép `server_port`" ở spec gốc §4.3 vẫn áp dụng.
-- **Mức phơi ra ngoài của cổng:** Windows hay cho phép kết nối theo chương trình hoặc dịch vụ, không ghi cổng. App không đối chiếu các rule loại này, vì việc đó chậm và phức tạp. Vì vậy, khi firewall đang bật mà không có rule theo cổng nào khớp, cổng hiện trạng thái **"Không xác định"** (màu `neutral`) chứ không hiện "bị chặn". Thêm giá trị này vào kiểu trạng thái và chuỗi i18n. Bộ chặn tự khoá không bị ảnh hưởng: bỏ qua các rule theo chương trình chỉ khiến nó thận trọng hơn. *(quyết định của Claude)*
+- **Mức phơi ra ngoài của cổng:** Windows hay cho phép kết nối theo chương trình hoặc dịch vụ, không ghi cổng. Rule có lọc theo dịch vụ, địa chỉ cục bộ hoặc loại card mạng không được tính. Rule có lọc theo **chương trình** chỉ được tính khi đúng file thực thi đó (so đường dẫn đầy đủ, không phân biệt hoa thường, đã mở biến môi trường như `%SystemRoot%`) đang giữ **mọi** socket trên cổng; tiến trình không đọc được đường dẫn thì không bao giờ khớp. Khi firewall đang bật mà không có rule nào được tính khớp với cổng, cổng hiện trạng thái **"Không xác định"** (màu `neutral`) chứ không hiện "bị chặn". *(quyết định của Claude, sửa sau khi thử trên Windows thật: rule `OpenSSH-Server-In-TCP` mặc định của Windows chính là rule theo chương trình; nếu bỏ qua nó, mỗi lần bật firewall app sẽ tự mở SSH cho cả profile Public)*
 - **Khác biệt quan trọng cho bộ chặn và cách tính mức phơi ra ngoài:** ở Windows Firewall, rule **block luôn thắng rule allow**, bất kể thứ tự. Không có quy tắc "rule khớp đầu tiên thắng" như `ufw`. `check_firewall_add`, `check_firewall_delete` và `compute_socket_exposure` phải dùng luật này khi engine là `windows`.
 
 **Users & Keys (chỉ xem)**
@@ -249,7 +249,7 @@ Mỗi bước mở thêm ô nào thì sửa bảng mức hỗ trợ và test c�
 8. Firewall được bảo vệ bằng bộ chặn như Linux, không cần hẹn giờ hoàn tác (§3).
 9. Trên macOS (và Windows nếu cần), dòng "Đăng nhập bằng mật khẩu" điều khiển cả `KbdInteractiveAuthentication` (§6.1).
 10. Tài khoản Windows không phải admin: hiện thông báo kèm những gì đọc được, không tự parse `sshd_config` (§4).
-11. Cổng trên Windows không khớp rule theo cổng nào thì hiện "Không xác định" (§6.2).
+11. Cổng trên Windows không khớp rule nào được tính thì hiện "Không xác định"; rule theo chương trình chỉ được tính khi đúng file thực thi đó giữ cổng (§6.2).
 12. macOS không có dòng `Include` thì tab SSH ở mức Chỉ xem (§3.1).
 
 ### 8.1. Kết quả thử nghiệm (2026-10-31)
@@ -271,3 +271,4 @@ Phát hiện thêm, cần xử lý ở các task Windows:
 - Với tài khoản thường, `(Get-CimInstance Win32_OperatingSystem).Caption` trả về rỗng; cần chuỗi dự phòng khi hiện tên hệ.
 - Rule mặc định `OpenSSH-Server-In-TCP` của Windows chỉ áp dụng cho profile **Private**. Mạng ảo mới được xếp vào Public nên cổng 22 bị chặn tới khi đổi profile, đúng trường hợp "rule có nhưng không có hiệu lực".
 - PowerShell in tiến trình "Preparing modules for first use" ra stderr dạng CLIXML; không ảnh hưởng vì bộ chạy chỉ đọc stdout khi thoát mã 0.
+13. Windows: không chặn theo phiên bản OpenSSH; dựa vào bước `sshd -t` có giới hạn thời gian để từ chối cấu hình bản cũ không hiểu (§3.1).

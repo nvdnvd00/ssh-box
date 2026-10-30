@@ -552,6 +552,7 @@ fn parse_socket_line(line: &str) -> Option<ListeningSocketItem> {
 pub fn parse_firewall_snapshot(raw: &str) -> FirewallSnapshot {
     let mut snap = FirewallSnapshot::default();
     let mut section = "";
+    let mut firewalld_text = String::new();
     let mut ipt_idx = 1u32;
 
     for line in raw.lines() {
@@ -567,6 +568,10 @@ pub fn parse_firewall_snapshot(raw: &str) -> FirewallSnapshot {
             }
             "---IPTABLES---" => {
                 section = "iptables";
+                continue;
+            }
+            "---FIREWALLD---" => {
+                section = "firewalld";
                 continue;
             }
             "---SOCKETS---" => {
@@ -619,6 +624,10 @@ pub fn parse_firewall_snapshot(raw: &str) -> FirewallSnapshot {
                     }
                 }
             }
+            "firewalld" => {
+                firewalld_text.push_str(line);
+                firewalld_text.push('\n');
+            }
             "sockets" => {
                 if let Some(mut sock) = parse_socket_line(trimmed) {
                     let exists = snap.listening_sockets.iter().any(|s| {
@@ -642,6 +651,7 @@ pub fn parse_firewall_snapshot(raw: &str) -> FirewallSnapshot {
         }
     }
 
+    snap.rules.extend(parse_firewalld_list_all(&firewalld_text));
     for sock in &mut snap.listening_sockets {
         sock.exposure = compute_socket_exposure(
             sock,
@@ -885,13 +895,149 @@ pub async fn set_firewall_state(
     run_firewall_write(host_id, pool, sudo_password, probe.firewall_engine, &script).await
 }
 
-// firewalld writes arrive in Task 10.
-pub fn build_firewalld_add_rule_script(_action: &str, _source: &str, _port: &str, _proto: &str) -> Result<String, String> {
-    Err(vps_err(ERR_UNSUPPORTED, "firewall_read_only"))
+fn firewalld_attr<'a>(rule: &'a str, name: &str) -> Option<&'a str> {
+    let key = format!("{name}=\"");
+    let start = rule.find(&key)? + key.len();
+    rule[start..].split('"').next()
 }
 
-pub fn build_firewalld_delete_rule_script(_rule: &FirewallRuleItem) -> String {
-    "echo SSHBOX_RULE_NOT_FOUND; exit 3\n".to_string()
+// Parses `firewall-cmd --list-all`. Order follows firewalld's chains: negative-priority rich
+// rules, then rich drop/reject, then accepts (services, ports, rich accept), then positive priority.
+pub fn parse_firewalld_list_all(raw: &str) -> Vec<FirewallRuleItem> {
+    let known_service = |name: &str| match name {
+        "ssh" => Some("22/tcp"),
+        "http" => Some("80/tcp"),
+        "https" => Some("443/tcp"),
+        _ => None,
+    };
+    type Keyed = Vec<((u8, i32), FirewallRuleItem)>;
+    let mut keyed: Keyed = Vec::new();
+    // Services and ports have no family, so they apply to IPv4 and IPv6.
+    fn push_both(keyed: &mut Keyed, to: String, raw_spec: String) {
+        for v6 in [false, true] {
+            let protocol = to.rsplit_once('/').map(|(_, p)| p.to_string()).unwrap_or_else(|| "any".to_string());
+            keyed.push(((2, 0), FirewallRuleItem {
+                index: 0, to_port: to.clone(), protocol, action: "ALLOW".to_string(),
+                from_source: "Anywhere".to_string(), v6, comment: String::new(), raw_spec: raw_spec.clone(),
+            }));
+        }
+    }
+    let mut in_rich = false;
+    for line in raw.lines() {
+        let t = line.trim();
+        if let Some(v) = t.strip_prefix("services:") {
+            for svc in v.split_whitespace() {
+                push_both(&mut keyed, known_service(svc).unwrap_or(svc).to_string(), format!("service:{svc}"));
+            }
+        } else if let Some(v) = t.strip_prefix("ports:") {
+            for port in v.split_whitespace() {
+                push_both(&mut keyed, port.replace('-', ":"), format!("port:{port}"));
+            }
+        } else if t.starts_with("rich rules:") {
+            in_rich = true;
+        } else if in_rich && t.starts_with("rule ") {
+            let priority: i32 = firewalld_attr(t, "priority").and_then(|p| p.parse().ok()).unwrap_or(0);
+            let deny = t.ends_with(" drop") || t.ends_with(" reject") || t.contains(" reject type=");
+            let to_port = match (firewalld_attr(t, "port"), firewalld_attr(t, "protocol")) {
+                (Some(p), Some(proto)) => format!("{}/{proto}", p.replace('-', ":")),
+                (Some(p), None) => p.replace('-', ":"),
+                _ => "Anywhere".to_string(),
+            };
+            let protocol = firewalld_attr(t, "protocol").unwrap_or("any").to_string();
+            let source = firewalld_attr(t, "address").unwrap_or("Anywhere").to_string();
+            let families: Vec<bool> = match firewalld_attr(t, "family") {
+                Some("ipv6") => vec![true],
+                Some("ipv4") => vec![false],
+                _ => vec![false, true],
+            };
+            let key = match (priority, deny) {
+                (p, _) if p < 0 => (0, p),
+                (p, _) if p > 0 => (3, p),
+                (_, true) => (1, 0),
+                (_, false) => (2, 0),
+            };
+            for v6 in families {
+                keyed.push((key, FirewallRuleItem {
+                    index: 0, to_port: to_port.clone(), protocol: protocol.clone(),
+                    action: if deny { "DENY" } else { "ALLOW" }.to_string(),
+                    from_source: source.clone(), v6, comment: String::new(), raw_spec: t.to_string(),
+                }));
+            }
+        } else if !t.is_empty() && t.contains(':') {
+            in_rich = false;
+        }
+    }
+    keyed.sort_by_key(|(k, _)| *k);
+    keyed
+        .into_iter()
+        .enumerate()
+        .map(|(i, (_, mut r))| {
+            r.index = i as u32 + 1;
+            r
+        })
+        .collect()
+}
+
+fn firewalld_rule_body(a: &UfwRuleArgs, port: Option<&str>, proto: Option<&str>) -> String {
+    let mut body = String::from("rule");
+    if matches!(a.action, "deny" | "reject") {
+        body.push_str(" priority=\"-100\"");
+    }
+    if a.source != "any" {
+        let family = if a.source.contains(':') { "ipv6" } else { "ipv4" };
+        body.push_str(&format!(" family=\"{family}\" source address=\"{}\"", a.source));
+    }
+    if let (Some(p), Some(pr)) = (port, proto) {
+        body.push_str(&format!(" port port=\"{p}\" protocol=\"{pr}\""));
+    }
+    body.push_str(match a.action {
+        "deny" => " drop",
+        "reject" => " reject",
+        _ => " accept",
+    });
+    body
+}
+
+pub fn build_firewalld_add_rule_script(action: &str, source: &str, port: &str, proto: &str) -> Result<String, String> {
+    let a = validate_rule_args(action, source, port, proto)?;
+    let protos: Vec<&str> = if a.proto == "any" { vec!["tcp", "udp"] } else { vec![a.proto] };
+    let ports: Vec<String> = a.port.split(',').map(|p| p.replace(':', "-")).collect();
+    let mut cmds: Vec<String> = Vec::new();
+    if a.port == "any" {
+        if a.source == "any" && !matches!(a.action, "deny" | "reject") {
+            return Err(vps_err(ERR_COMMAND_FAILED, "allowing every port from anywhere is not supported"));
+        }
+        cmds.push(format!("--add-rich-rule={}", shell_single_quote(&firewalld_rule_body(&a, None, None))));
+    } else {
+        for p in &ports {
+            for pr in &protos {
+                if a.source == "any" && !matches!(a.action, "deny" | "reject") {
+                    cmds.push(format!("--add-port={p}/{pr}"));
+                } else {
+                    cmds.push(format!("--add-rich-rule={}", shell_single_quote(&firewalld_rule_body(&a, Some(p), Some(pr)))));
+                }
+            }
+        }
+    }
+    let mut script: String = cmds.iter().map(|c| format!("firewall-cmd --permanent {c}\n")).collect();
+    script.push_str("firewall-cmd --reload\n");
+    Ok(script)
+}
+
+// raw_spec is "service:<name>", "port:<p>/<proto>" or the exact rich rule text.
+pub fn build_firewalld_delete_rule_script(rule: &FirewallRuleItem) -> String {
+    let (kind, value) = if let Some(svc) = rule.raw_spec.strip_prefix("service:") {
+        ("service", svc.to_string())
+    } else if let Some(port) = rule.raw_spec.strip_prefix("port:") {
+        ("port", port.to_string())
+    } else {
+        ("rich-rule", rule.raw_spec.clone())
+    };
+    let v = shell_single_quote(&value);
+    format!(
+        "if ! firewall-cmd --permanent --query-{kind}={v} >/dev/null 2>&1; then echo SSHBOX_RULE_NOT_FOUND; exit 3; fi\n\
+firewall-cmd --permanent --remove-{kind}={v}\nfirewall-cmd --reload\n"
+    )
 }
 
 pub fn shell_single_quote(s: &str) -> String {
@@ -2938,6 +3084,94 @@ fi"#;
         let raw = "---META---\nENGINE:ufw\nENABLED:1\nDEFAULT_INCOMING:deny\nIPV6:0\n---UFW---\n";
         assert!(!parse_firewall_snapshot(raw).ipv6_filtered);
         assert!(parse_firewall_snapshot(&raw.replace("IPV6:0", "IPV6:1")).ipv6_filtered);
+    }
+
+    const FIREWALLD_LIST_ALL: &str = "public (active)
+  target: default
+  services: dhcpv6-client ssh
+  ports: 2222/tcp 8000-8010/udp
+  rich rules: 
+	rule family=\"ipv4\" source address=\"203.0.113.42\" port port=\"5432\" protocol=\"tcp\" accept
+	rule priority=\"-100\" family=\"ipv4\" source address=\"198.51.100.0/24\" drop
+";
+
+    #[test]
+    fn parses_firewalld_ports_services_and_rich_rules() {
+        let rules = parse_firewalld_list_all(FIREWALLD_LIST_ALL);
+        let v4: Vec<&FirewallRuleItem> = rules.iter().filter(|r| !r.v6).collect();
+        // Negative-priority rich rules run first, then denies, then allows (firewalld chain order).
+        assert_eq!(v4[0].action, "DENY");
+        assert_eq!(v4[0].from_source, "198.51.100.0/24");
+        let pg = v4.iter().find(|r| r.to_port == "5432/tcp").unwrap();
+        assert_eq!((pg.action.as_str(), pg.from_source.as_str()), ("ALLOW", "203.0.113.42"));
+        assert!(pg.raw_spec.starts_with("rule family=\"ipv4\" source address=\"203.0.113.42\""));
+        let ssh = v4.iter().find(|r| r.raw_spec == "service:ssh").unwrap();
+        assert_eq!((ssh.to_port.as_str(), ssh.from_source.as_str()), ("22/tcp", "Anywhere"));
+        assert!(v4.iter().any(|r| r.raw_spec == "port:2222/tcp" && r.to_port == "2222/tcp"));
+        assert!(v4.iter().any(|r| r.raw_spec == "port:8000-8010/udp" && r.to_port == "8000:8010/udp"));
+        // Services and ports apply to both families; ipv4-only rich rules do not.
+        assert!(rules.iter().any(|r| r.v6 && r.raw_spec == "service:ssh"));
+        assert!(!rules.iter().any(|r| r.v6 && r.from_source == "203.0.113.42"));
+    }
+
+    const FAKE_FIREWALLD: &str = r#"case "$*" in *--query-*) exit "${FAKE_QUERY:-0}";; esac"#;
+
+    // Runtime-only changes vanish on reload/reboot; every change is --permanent then reloaded.
+    #[cfg(unix)]
+    #[test]
+    fn firewalld_rules_are_permanent_then_reloaded() {
+        let scripts = [
+            build_firewalld_add_rule_script("allow", "any", "8080", "tcp").unwrap(),
+            build_firewalld_add_rule_script("allow", "203.0.113.42", "5432", "tcp").unwrap(),
+            build_firewalld_add_rule_script("deny", "198.51.100.9", "any", "any").unwrap(),
+            build_firewalld_delete_rule_script(&fw_rule(1, "ALLOW", "2222/tcp", "Anywhere", false)),
+        ];
+        for script in scripts {
+            let (out, log) = run_with_fakes(&script, &[("firewall-cmd", FAKE_FIREWALLD)]);
+            let calls: Vec<&str> = log.lines().filter(|l| !l.contains("--query-")).collect();
+            assert!(!calls.is_empty(), "{out}");
+            assert_eq!(calls.last().unwrap().trim(), "firewall-cmd --reload", "{log}");
+            assert!(calls[..calls.len() - 1].iter().all(|c| c.contains("--permanent")), "{log}");
+        }
+        let (_, log) = run_with_fakes(&build_firewalld_add_rule_script("allow", "any", "8080", "tcp").unwrap(), &[("firewall-cmd", "")]);
+        assert!(log.contains("--add-port=8080/tcp"), "{log}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn firewalld_deny_uses_negative_priority() {
+        let script = build_firewalld_add_rule_script("deny", "2001:db8::/32", "22", "tcp").unwrap();
+        let (_, log) = run_with_fakes(&script, &[("firewall-cmd", "")]);
+        assert!(
+            log.contains(r#"--add-rich-rule=rule priority="-100" family="ipv6" source address="2001:db8::/32" port port="22" protocol="tcp" drop"#),
+            "{log}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn firewalld_delete_uses_exact_rich_rule() {
+        let mut rich = fw_rule(1, "ALLOW", "5432/tcp", "203.0.113.42", false);
+        rich.raw_spec = r#"rule family="ipv4" source address="203.0.113.42" port port="5432" protocol="tcp" accept"#.to_string();
+        let (_, log) = run_with_fakes(&build_firewalld_delete_rule_script(&rich), &[("firewall-cmd", FAKE_FIREWALLD)]);
+        assert!(log.contains(&format!("--permanent --remove-rich-rule={}", rich.raw_spec)), "{log}");
+        let mut svc = fw_rule(2, "ALLOW", "22/tcp", "Anywhere", false);
+        svc.raw_spec = "service:ssh".to_string();
+        let (_, log) = run_with_fakes(&build_firewalld_delete_rule_script(&svc), &[("firewall-cmd", FAKE_FIREWALLD)]);
+        assert!(log.contains("--permanent --remove-service=ssh"), "{log}");
+        let script = format!("FAKE_QUERY=1\nexport FAKE_QUERY\n{}", build_firewalld_delete_rule_script(&svc));
+        let (out, log) = run_with_fakes(&script, &[("firewall-cmd", FAKE_FIREWALLD)]);
+        assert!(out.contains("SSHBOX_RULE_NOT_FOUND") && !log.contains("--remove"), "{out}\n{log}");
+    }
+
+    // The SSH port must be in the permanent config before firewalld starts with its default zone.
+    #[cfg(unix)]
+    #[test]
+    fn firewalld_enable_opens_ssh_port_before_start() {
+        let script = build_set_firewall_state_script(FirewallEngine::Firewalld, true, Some(2222)).unwrap();
+        let (_, log) = run_with_fakes(&script, &[("firewall-offline-cmd", ""), ("systemctl", "")]);
+        let open = log.find("firewall-offline-cmd --add-port=2222/tcp").expect(&log);
+        assert!(open < log.find("systemctl enable --now firewalld").expect(&log), "{log}");
     }
 
     #[test]

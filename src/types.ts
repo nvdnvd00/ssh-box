@@ -188,42 +188,32 @@ export interface VpsProbe {
   firewallEngine: FirewallEngine;
 }
 
-export interface SshdConfigSnapshot {
+export interface SshdSettings {
   port: number;
   permitRootLogin: string;
   passwordAuthentication: boolean;
   pubkeyAuthentication: boolean;
-  permitEmptyPasswords: boolean;
+  allowUsers: string[];
+  denyUsers: string[];
   maxAuthTries: number;
+  maxSessions: number;
   loginGraceTime: number;
   clientAliveInterval: number;
   clientAliveCountMax: number;
-  allowUsers: string[];
-  x11Forwarding: boolean;
-  allowTcpForwarding: boolean;
-  allowAgentForwarding: boolean;
-  addressFamily: string;
-  authorizedKeysCount: number;
-  securityScore: number;
-  rawConfig: string;
+}
+
+export type WriteTarget = "dropIn" | "mainFile";
+
+export interface SshdView {
+  settings: SshdSettings;
+  writeTarget: WriteTarget;
   rollbackPending: boolean;
 }
 
-export interface SshdConfigUpdate {
-  port: number;
-  permitRootLogin: string;
-  passwordAuthentication: boolean;
-  pubkeyAuthentication: boolean;
-  permitEmptyPasswords: boolean;
-  maxAuthTries: number;
-  loginGraceTime: number;
-  clientAliveInterval: number;
-  clientAliveCountMax: number;
-  allowUsers: string[];
-  x11Forwarding: boolean;
-  allowTcpForwarding: boolean;
-  allowAgentForwarding: boolean;
-  addressFamily: string;
+export interface SshdApplyStarted {
+  rollbackAt: number;
+  serverNow: number;
+  newPort: number;
 }
 
 export interface ListeningSocketItem {

@@ -8,6 +8,8 @@ import { SelectField } from "./SelectField";
 import { StatusBadge, StatusTone } from "./vps/shared/StatusBadge";
 import { vpsErrorText } from "./vps/shared/errors";
 import { VpsCtx } from "./vps/shared/useVpsResource";
+import { Notice } from "./vps/shared/Notice";
+import { SshHardeningStudio } from "./vps/SshHardeningStudio";
 
 interface VpsConfigWorkspaceProps {
   hosts: HostEntry[];
@@ -31,6 +33,7 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
   activeHostId,
   appSettings,
   onSelectHost,
+  onSaveHost,
 }) => {
   const t = getI18n(appSettings?.language);
   const pickInitial = () =>
@@ -74,7 +77,6 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
     if (!host || isLocal) return;
     runProbe(host.id, sudoPasswords[host.id]).catch((e) => setProbeError(vpsErrorText(t, e)));
     // Re-probe only when the host changes; unlocking sudo probes explicitly.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [host?.id, isLocal]);
 
   const unlockSudo = async (e: React.FormEvent) => {
@@ -183,14 +185,15 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
 
       <div className="flex-1 overflow-y-auto select-text">
         <div className="max-w-4xl mx-auto w-full p-4 sm:p-6 space-y-4">
-          {isLocal && <Banner tone="warn">{t.vpsUnsupportedReasons.linux_only}</Banner>}
-          {!isLocal && probeError && <Banner tone="danger">{probeError}</Banner>}
+          {isLocal && <Notice tone="warn">{t.vpsUnsupportedReasons.linux_only}</Notice>}
+          {!isLocal && probeError && <Notice tone="danger">{probeError}</Notice>}
           {!isLocal && probing && !probe && <p className="text-sm text-muted-foreground">{t.vpsShellProbing}</p>}
-          {!isLocal && probe && host && !probeError && (
-            // ponytail: placeholder until Tasks 8/11/13 mount the rebuilt studios with {vps, probe, host, onSaveHost}.
-            <p className="text-sm text-muted-foreground" data-studio={activeStudio} data-host={vps.hostId}>
-              {t.vpsStudioPending}
-            </p>
+          {!isLocal && probe && host && !probeError && activeStudio === "ssh" && (
+            <SshHardeningStudio key={host.id} vps={vps} probe={probe} host={host} onSaveHost={onSaveHost} />
+          )}
+          {!isLocal && probe && host && !probeError && activeStudio !== "ssh" && (
+            // ponytail: placeholder until Tasks 11/13 mount the rebuilt Firewall and Users & Keys studios.
+            <p className="text-sm text-muted-foreground">{t.vpsStudioPending}</p>
           )}
         </div>
       </div>
@@ -245,13 +248,4 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
     </div>
   );
 };
-
-const BANNER_TONE: Record<"warn" | "danger", string> = {
-  warn: "border-warning/40 bg-warning/10 text-warning",
-  danger: "border-danger/40 bg-danger/10 text-danger",
-};
-
-const Banner: React.FC<{ tone: "warn" | "danger"; children: React.ReactNode }> = ({ tone, children }) => (
-  <div className={`rounded-xl border px-4 py-3 text-sm ${BANNER_TONE[tone]}`}>{children}</div>
-);
 

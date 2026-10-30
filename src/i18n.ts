@@ -129,6 +129,41 @@ export interface AppI18nStrings {
   vpsErrUnsupported: string;
   vpsLockoutReasons: Record<string, string>;
   vpsUnsupportedReasons: Record<string, string>;
+  vpsSshStatusTitle: string;
+  vpsSshCheckPassword: string;
+  vpsSshCheckRoot: string;
+  vpsSshCheckMaxAuth: string;
+  vpsSshGroupLogin: string;
+  vpsSshGroupWho: string;
+  vpsSshGroupLimits: string;
+  vpsSshPort: string;
+  vpsSshPortHint: string;
+  vpsSshPassword: string;
+  vpsSshPubkey: string;
+  vpsSshRoot: string;
+  vpsSshRootYes: string;
+  vpsSshRootKeyOnly: string;
+  vpsSshRootForced: string;
+  vpsSshRootNo: string;
+  vpsSshAllowUsers: string;
+  vpsSshDenyUsers: string;
+  vpsSshUsersHint: string;
+  vpsSshMaxAuthTries: string;
+  vpsSshMaxSessions: string;
+  vpsSshLoginGrace: string;
+  vpsSshAliveInterval: string;
+  vpsSshAliveCount: string;
+  vpsSshWriteDropIn: string;
+  vpsSshWriteMain: string;
+  vpsSshPending: string;
+  vpsSshProgressTitle: string;
+  vpsSshRollbackIn: string;
+  vpsSshDone: string;
+  vpsSshPortSaved: string;
+  vpsSshRolledBack: string;
+  vpsSshClose: string;
+  vpsSshInvalid: string;
+  vpsSshSteps: string[];
   vpsShellSelectHost: string;
   vpsShellNoHosts: string;
   vpsShellProbing: string;
@@ -309,6 +344,41 @@ const VI_STRINGS: AppI18nStrings = {
   vpsSudoOpen: "Nhập mật khẩu sudo",
   vpsSudoUnlock: "Mở khoá",
   vpsStudioPending: "Phần này đang được làm lại.",
+  vpsSshStatusTitle: "Tình trạng",
+  vpsSshCheckPassword: "Tắt đăng nhập bằng mật khẩu",
+  vpsSshCheckRoot: "Không cho root đăng nhập bằng mật khẩu",
+  vpsSshCheckMaxAuth: "Giới hạn số lần thử đăng nhập (tối đa 4)",
+  vpsSshGroupLogin: "Đăng nhập",
+  vpsSshGroupWho: "Ai được vào",
+  vpsSshGroupLimits: "Giới hạn phiên",
+  vpsSshPort: "Cổng SSH",
+  vpsSshPortHint: "Cổng mới được thử bằng một kết nối mới trước khi lưu vào ứng dụng.",
+  vpsSshPassword: "Đăng nhập bằng mật khẩu",
+  vpsSshPubkey: "Đăng nhập bằng SSH key",
+  vpsSshRoot: "Đăng nhập bằng root",
+  vpsSshRootYes: "Cho phép",
+  vpsSshRootKeyOnly: "Chỉ bằng SSH key",
+  vpsSshRootForced: "Chỉ chạy lệnh cố định",
+  vpsSshRootNo: "Không cho phép",
+  vpsSshAllowUsers: "Chỉ cho các user này",
+  vpsSshDenyUsers: "Chặn các user này",
+  vpsSshUsersHint: "Cách nhau bằng dấu cách. Để trống là không giới hạn.",
+  vpsSshMaxAuthTries: "Số lần thử đăng nhập tối đa",
+  vpsSshMaxSessions: "Số phiên tối đa mỗi kết nối",
+  vpsSshLoginGrace: "Thời gian chờ đăng nhập (giây)",
+  vpsSshAliveInterval: "Kiểm tra kết nối mỗi (giây, 0 là tắt)",
+  vpsSshAliveCount: "Số lần kiểm tra không phản hồi trước khi ngắt",
+  vpsSshWriteDropIn: "Thay đổi được ghi vào /etc/ssh/sshd_config.d/00-sshbox.conf",
+  vpsSshWriteMain: "Thay đổi được ghi vào /etc/ssh/sshd_config",
+  vpsSshPending: "Một thay đổi trước đó đang chờ xác minh hoặc hoàn tác.",
+  vpsSshProgressTitle: "Đang áp dụng thay đổi SSH",
+  vpsSshRollbackIn: "Tự hoàn tác sau {s} giây nếu không xác minh được",
+  vpsSshDone: "Đã áp dụng và xác minh bằng một kết nối mới.",
+  vpsSshPortSaved: "Ứng dụng đã lưu cổng mới {p} cho máy này.",
+  vpsSshRolledBack: "Đã hoàn tác về cấu hình trước.",
+  vpsSshClose: "Đóng",
+  vpsSshInvalid: "Có giá trị không hợp lệ.",
+  vpsSshSteps: ["Kiểm tra bộ chặn tự khoá", "Sao lưu", "Ghi cấu hình", "Kiểm tra cú pháp (sshd -t)", "Hẹn giờ hoàn tác 60 giây", "Nạp lại SSH", "Kiểm tra cổng", "Kết nối thử từ ứng dụng", "Giữ thay đổi"],
 };
 
 const EN_STRINGS: AppI18nStrings = {
@@ -474,6 +544,41 @@ const EN_STRINGS: AppI18nStrings = {
   vpsSudoOpen: "Enter sudo password",
   vpsSudoUnlock: "Unlock",
   vpsStudioPending: "This section is being rebuilt.",
+  vpsSshStatusTitle: "Status",
+  vpsSshCheckPassword: "Password login is off",
+  vpsSshCheckRoot: "Root cannot sign in with a password",
+  vpsSshCheckMaxAuth: "Login attempts are limited (4 or fewer)",
+  vpsSshGroupLogin: "Login",
+  vpsSshGroupWho: "Who can sign in",
+  vpsSshGroupLimits: "Session limits",
+  vpsSshPort: "SSH port",
+  vpsSshPortHint: "The new port is tested with a new connection before the app saves it.",
+  vpsSshPassword: "Password login",
+  vpsSshPubkey: "SSH key login",
+  vpsSshRoot: "Root login",
+  vpsSshRootYes: "Allowed",
+  vpsSshRootKeyOnly: "SSH key only",
+  vpsSshRootForced: "Forced commands only",
+  vpsSshRootNo: "Not allowed",
+  vpsSshAllowUsers: "Only these users",
+  vpsSshDenyUsers: "Block these users",
+  vpsSshUsersHint: "Separate with spaces. Leave empty for no limit.",
+  vpsSshMaxAuthTries: "Max login attempts",
+  vpsSshMaxSessions: "Max sessions per connection",
+  vpsSshLoginGrace: "Login grace time (seconds)",
+  vpsSshAliveInterval: "Keep-alive every (seconds, 0 = off)",
+  vpsSshAliveCount: "Missed keep-alives before disconnect",
+  vpsSshWriteDropIn: "Changes are written to /etc/ssh/sshd_config.d/00-sshbox.conf",
+  vpsSshWriteMain: "Changes are written to /etc/ssh/sshd_config",
+  vpsSshPending: "A previous change is still waiting to be verified or rolled back.",
+  vpsSshProgressTitle: "Applying SSH changes",
+  vpsSshRollbackIn: "Rolls back in {s}s unless verified",
+  vpsSshDone: "Applied and verified with a new connection.",
+  vpsSshPortSaved: "The app saved the new port {p} for this host.",
+  vpsSshRolledBack: "Rolled back to the previous configuration.",
+  vpsSshClose: "Close",
+  vpsSshInvalid: "Some values are invalid.",
+  vpsSshSteps: ["Check lockout guard", "Back up", "Write config", "Check syntax (sshd -t)", "Arm 60-second rollback", "Reload SSH", "Check port", "Test a new connection", "Keep the change"],
 };
 
 export function getI18n(lang?: AppLanguage): AppI18nStrings {

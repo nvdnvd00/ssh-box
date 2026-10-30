@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Check, Loader2, X } from "lucide-react";
 import { SshdApplyStarted, SshdSettings, SshdView } from "../../types";
@@ -28,7 +28,14 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
   );
   const current = res.data?.settings ?? null;
   const [draft, setDraft] = useState<SshdSettings | null>(null);
-  useEffect(() => setDraft(current), [current]);
+  // Raw text of the user lists, so typing a space before the next name is not swallowed.
+  const [usersText, setUsersText] = useState({ allowUsers: "", denyUsers: "" });
+  const reset = () => {
+    setDraft(current);
+    setUsersText({ allowUsers: current?.allowUsers.join(" ") ?? "", denyUsers: current?.denyUsers.join(" ") ?? "" });
+  };
+  useEffect(reset, [current]);
+  const rolledBack = useRef(false);
 
   const [previewOpen, setPreviewOpen] = useState(false);
   const [blocked, setBlocked] = useState<string | null>(null);
@@ -99,14 +106,17 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
     }
     setPreviewOpen(false);
     setProgress({ phase: "verifying", deadline: Date.now() + (started.rollbackAt - started.serverNow) * 1000 });
+    rolledBack.current = false;
     try {
       const view = await invoke<SshdView>("vps_finish_sshd_apply", {
         hostId, newPort: started.newPort, sudoPassword: vps.sudoPassword ?? null,
       });
       let message = t.vpsSshDone;
-      if (started.newPort !== host.port) {
-        await onSaveHost({ ...host, port: started.newPort });
-        message += " " + t.vpsSshPortSaved.replace("{p}", String(started.newPort));
+      // Save only a port the server is really on now (not after "Roll back now" or the timer).
+      const newPort = started.newPort;
+      if (newPort !== null && !rolledBack.current && view.settings.port === newPort) {
+        await onSaveHost({ ...host, port: newPort });
+        message += " " + t.vpsSshPortSaved.replace("{p}", String(newPort));
       }
       await res.mutate(async () => view);
       setProgress({ phase: "done", message });
@@ -117,6 +127,7 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
   };
 
   const rollbackNow = async () => {
+    rolledBack.current = true;
     try {
       await res.mutate((pw) => invoke<SshdView>("vps_revert_sshd_settings", { hostId, sudoPassword: pw ?? null }));
       setProgress({ phase: "failed", failedAt: 7, message: t.vpsSshRolledBack });
@@ -145,8 +156,11 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
   const usersInput = (key: "allowUsers" | "denyUsers") => (
     <input
       className="ui-input w-full sm:w-72 font-mono"
-      value={draft[key].join(" ")}
-      onChange={(e) => set(key, e.target.value.split(/\s+/).filter(Boolean))}
+      value={usersText[key]}
+      onChange={(e) => {
+        setUsersText((u) => ({ ...u, [key]: e.target.value }));
+        set(key, e.target.value.split(/\s+/).filter(Boolean));
+      }}
     />
   );
   const remaining = progress?.deadline ? Math.max(0, Math.ceil((progress.deadline - now) / 1000)) : 0;
@@ -227,7 +241,7 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
             {valid ? t.vpsCommonPendingChanges.replace("{n}", String(changes.length)) : t.vpsSshInvalid}
           </span>
           <div className="flex gap-2">
-            <button type="button" onClick={() => setDraft(current)} className="flex-1 sm:flex-none px-3 py-1.5 rounded-xl text-xs font-medium border border-border/60 hover:bg-accent/70 cursor-pointer">
+            <button type="button" onClick={reset} className="flex-1 sm:flex-none px-3 py-1.5 rounded-xl text-xs font-medium border border-border/60 hover:bg-accent/70 cursor-pointer">
               {t.vpsCommonDiscard}
             </button>
             <button

@@ -854,7 +854,7 @@ async fn vps_apply_sshd_settings(
 async fn vps_finish_sshd_apply(
     state: State<'_, AppState>,
     host_id: String,
-    new_port: u16,
+    new_port: Option<u16>,
     sudo_password: Option<String>,
 ) -> Result<SshdView, String> {
     vps_config::finish_sshd_apply(&host_id, &state.ssh_pool, sudo_password, new_port).await

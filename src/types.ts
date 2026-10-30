@@ -203,7 +203,7 @@ export interface SshdView {
 export interface SshdApplyStarted {
   rollbackAt: number;
   serverNow: number;
-  newPort: number;
+  newPort: number | null;
 }
 
 export interface ListeningSocketItem {

@@ -142,7 +142,7 @@ fn session_auth_reports_the_key_that_logged_in() {
 #[test]
 #[ignore]
 fn dropin_wins_over_cloud_init_and_main_file() {
-    use ssh_box_lib::vps_config::{parse_sshd_t, render_dropin, SshdSettings};
+    use ssh_box_lib::vps_config::{changed_directives, parse_sshd_t, render_dropin, SshdSettings};
     let dir = std::env::temp_dir().join(format!("sshbox-it-{}-dropin", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let d = dir.join("sshd_config.d");
@@ -163,8 +163,9 @@ fn dropin_wins_over_cloud_init_and_main_file() {
     };
     assert!(effective().password_authentication, "cloud-init drop-in should beat the main file");
 
-    let ours = SshdSettings { password_authentication: false, ..effective() };
-    std::fs::write(d.join("00-sshbox.conf"), render_dropin(&ours)).unwrap();
+    let before = effective();
+    let ours = SshdSettings { password_authentication: false, ..before.clone() };
+    std::fs::write(d.join("00-sshbox.conf"), render_dropin("", &changed_directives(&before, &ours))).unwrap();
     assert!(!effective().password_authentication, "00-sshbox.conf should beat 50-cloud-init.conf");
     let _ = std::fs::remove_dir_all(&dir);
 }

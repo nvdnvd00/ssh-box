@@ -80,19 +80,27 @@ impl Default for SshdSettings {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum WriteTarget {
     DropIn,
+    #[default]
     MainFile,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SshdView {
     pub settings: SshdSettings,
     pub write_target: WriteTarget,
     pub rollback_pending: bool,
+    // Server-side inputs for planning a change; not sent to the UI.
+    #[serde(skip)]
+    pub main_raw: String,
+    #[serde(skip)]
+    pub dropin_raw: String,
+    #[serde(skip)]
+    pub port_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1376,19 +1384,27 @@ fn sshd_directives(s: &SshdSettings) -> Vec<(&'static str, Option<String>)> {
     ]
 }
 
-pub fn render_dropin(s: &SshdSettings) -> String {
-    let mut out = String::from("# Managed by ssh-box. Changes here are overwritten by Server Config.\n");
-    for line in sshd_directives(s).into_iter().filter_map(|(_, l)| l) {
-        out.push_str(&line);
-        out.push('\n');
-    }
-    out
+// The directives whose rendered line differs between two settings (None = remove the line).
+pub fn changed_directives(current: &SshdSettings, desired: &SshdSettings) -> Vec<(&'static str, Option<String>)> {
+    sshd_directives(desired)
+        .into_iter()
+        .zip(sshd_directives(current))
+        .filter(|((_, want), (_, have))| want != have)
+        .map(|(d, _)| d)
+        .collect()
 }
 
-// Used only when sshd_config has no leading Include: replaces managed directives in place,
-// keeps comments, and appends missing ones before the first Match block.
-pub fn render_sshd_config(base_raw: &str, s: &SshdSettings) -> String {
-    let managed = sshd_directives(s);
+const DROPIN_HEADER: &str = "# Managed by ssh-box. Changes here are overwritten by Server Config.\n";
+
+// Only the given directives change; whatever the drop-in already holds stays.
+pub fn render_dropin(existing: &str, directives: &[(&'static str, Option<String>)]) -> String {
+    let base = if existing.trim().is_empty() { DROPIN_HEADER } else { existing };
+    render_sshd_config(base, directives)
+}
+
+// Replaces the given directives in place, keeps everything else (comments included), and
+// appends missing ones before the first Match block.
+pub fn render_sshd_config(base_raw: &str, managed: &[(&'static str, Option<String>)]) -> String {
     let mut emitted = std::collections::HashSet::new();
     let mut before: Vec<String> = Vec::new();
     let mut from_match: Vec<String> = Vec::new();
@@ -1421,7 +1437,9 @@ pub fn render_sshd_config(base_raw: &str, s: &SshdSettings) -> String {
         if before.last().is_some_and(|l| !l.trim().is_empty()) {
             before.push(String::new());
         }
-        before.push("# --- Managed by ssh-box ---".to_string());
+        if !base_raw.contains("Managed by ssh-box") {
+            before.push("# --- Managed by ssh-box ---".to_string());
+        }
         before.extend(missing);
     }
     if !from_match.is_empty() {
@@ -1439,13 +1457,19 @@ const SSHD_PART: &str = "---SSHBOX-PART---";
 
 pub fn parse_sshd_view(raw: &str) -> Result<SshdView, String> {
     let parts: Vec<&str> = raw.split(SSHD_PART).collect();
-    let [effective, main_cfg, pending] = parts.as_slice() else {
+    let [effective, main_cfg, dropin, pending] = parts.as_slice() else {
         return Err(vps_err(ERR_COMMAND_FAILED, raw.trim()));
     };
     Ok(SshdView {
         settings: parse_sshd_t(effective),
         write_target: sshd_write_target(main_cfg),
         rollback_pending: pending.trim() == "active",
+        main_raw: main_cfg.trim_start_matches('\n').to_string(),
+        dropin_raw: dropin.trim_start_matches('\n').to_string(),
+        port_count: effective
+            .lines()
+            .filter(|l| split_sshd_directive(l).is_some_and(|(k, _)| k.eq_ignore_ascii_case("port")))
+            .count(),
     })
 }
 
@@ -1463,7 +1487,7 @@ pub async fn get_sshd_view(
     );
     let script = format!(
         "sshd -T -C {spec} || exit 1\necho {SSHD_PART}\ncat {SSHD_MAIN_CONFIG}\necho {SSHD_PART}\n\
-systemctl is-active sshbox-rollback.timer 2>/dev/null || true\n",
+cat {SSHD_DROPIN} 2>/dev/null || true\necho {SSHD_PART}\nsystemctl is-active sshbox-rollback.timer 2>/dev/null || true\n",
         spec = shell_single_quote(&spec),
     );
     let raw = run_privileged_script(host_id, pool, sudo_password, &script, None).await?;
@@ -1477,6 +1501,7 @@ pub const SSHD_ROLLBACK_SCRIPT: &str = "/etc/ssh/sshbox-rollback.sh";
 pub struct ReloadPlan {
     pub ssh_socket_active: bool,
     pub selinux_enforcing: bool,
+    pub port: u16,
     pub new_port: Option<u16>,
     pub firewall_engine: FirewallEngine,
 }
@@ -1486,7 +1511,8 @@ pub struct ReloadPlan {
 pub struct SshdApplyStarted {
     pub rollback_at: i64,
     pub server_now: i64,
-    pub new_port: u16,
+    // Some only when the port changed; the UI saves the host port only then.
+    pub new_port: Option<u16>,
 }
 
 fn sshd_reload_cmd(plan: &ReloadPlan, restart: bool) -> &'static str {
@@ -1537,16 +1563,14 @@ pub fn build_sshd_rollback_script(file: &str, plan: &ReloadPlan) -> String {
 
 // Spec §4.2 steps 3–7. The new file content comes from $SSHBOX_SECRET_FILE.
 pub fn build_sshd_apply_script(file: &str, rollback_path: &str, plan: &ReloadPlan) -> String {
+    // semanage is slow on RHEL, so it runs before the 60s timer starts.
     let semanage = match plan.new_port {
         Some(port) if plan.selinux_enforcing && port != 22 => format!(
-            "semanage port -a -t ssh_port_t -p tcp {port} 2>/dev/null || semanage port -m -t ssh_port_t -p tcp {port}\n"
+            "if ! {{ semanage port -a -t ssh_port_t -p tcp {port} 2>/dev/null || semanage port -m -t ssh_port_t -p tcp {port}; }}; then \
+sshbox_restore; echo SSHBOX_SEMANAGE_FAILED; exit 6; fi\n"
         ),
         _ => String::new(),
     };
-    let port_check = plan
-        .new_port
-        .map(|p| p.to_string())
-        .unwrap_or_else(|| "$(sed -n 's/^Port \\([0-9]*\\).*/\\1/p' \"$F\" | head -n 1)".to_string());
     format!(
         r#"set -eu
 {restore}R={r}
@@ -1557,15 +1581,15 @@ cat "$SSHBOX_SECRET_FILE" > "$T"
 install -m 644 "$T" "$F"
 rm -f "$T"
 if ! sshd -t 2>&1; then sshbox_restore; echo SSHBOX_SSHD_INVALID; exit 1; fi
-cat > "$R" << 'SSHBOX_ROLLBACK_EOF'
+{semanage}cat > "$R" << 'SSHBOX_ROLLBACK_EOF'
 {rollback}SSHBOX_ROLLBACK_EOF
 chmod 700 "$R"
 trap 'rc=$?; [ "$rc" -eq 0 ] || /bin/sh "$R"; exit "$rc"' EXIT
 systemd-run --on-active=60 --unit=sshbox-rollback /bin/sh "$R" >/dev/null
 echo "NOW:$(date +%s)"
 echo "ROLLBACK_AT:$(( $(date +%s) + 60 ))"
-{semanage}{firewall}{reload}
-P={port_check}
+{firewall}{reload}
+P={port}
 ss -tlnpH "sport = :$P" | grep -Eq 'sshd|systemd' || {{ echo SSHBOX_PORT_NOT_LISTENING; exit 4; }}
 "#,
         restore = sshd_restore_fn(file),
@@ -1573,6 +1597,7 @@ ss -tlnpH "sport = :$P" | grep -Eq 'sshd|systemd' || {{ echo SSHBOX_PORT_NOT_LIS
         rollback = build_sshd_rollback_script(file, plan),
         firewall = sshd_firewall_cmd(plan, true),
         reload = sshd_reload_cmd(plan, false),
+        port = plan.port,
     )
 }
 
@@ -1586,7 +1611,7 @@ pub fn apply_preflight(probe: &VpsProbe, view: &SshdView, desired: &SshdSettings
     crate::vps_guard::check_sshd(&probe.context, desired)
 }
 
-pub fn parse_apply_started(raw: &str, new_port: u16) -> Result<SshdApplyStarted, String> {
+pub fn parse_apply_started(raw: &str, new_port: Option<u16>) -> Result<SshdApplyStarted, String> {
     let num = |key: &str| {
         raw.lines()
             .find_map(|l| l.trim().strip_prefix(key))
@@ -1598,6 +1623,60 @@ pub fn parse_apply_started(raw: &str, new_port: u16) -> Result<SshdApplyStarted,
     }
 }
 
+#[derive(Debug)]
+pub struct ApplyPlan {
+    pub file: &'static str,
+    pub content: String,
+    pub reload: ReloadPlan,
+}
+
+// Directives that accumulate across files instead of "first value wins".
+const ACCUMULATING: [&str; 3] = ["port", "allowusers", "denyusers"];
+
+fn main_file_keys(main_raw: &str) -> Vec<String> {
+    main_raw
+        .lines()
+        .filter_map(split_sshd_directive)
+        .map(|(k, _)| k.to_ascii_lowercase())
+        .take_while(|k| k != "match")
+        .collect()
+}
+
+// Writes only what changed, so Match-specific values read for the app's own connection are
+// never copied into the global config.
+pub fn plan_sshd_apply(probe: &VpsProbe, view: &SshdView, desired: &SshdSettings) -> Result<ApplyPlan, String> {
+    apply_preflight(probe, view, desired)?;
+    let changes = changed_directives(&view.settings, desired);
+    if changes.is_empty() {
+        return Err(vps_err(ERR_COMMAND_FAILED, "nothing to change"));
+    }
+    let port_changed = desired.port != view.settings.port;
+    if port_changed && view.port_count > 1 {
+        return Err(vps_err(ERR_UNSUPPORTED, "multiple_ports"));
+    }
+    if view.write_target == WriteTarget::DropIn {
+        let in_main = main_file_keys(&view.main_raw);
+        if changes.iter().any(|(k, _)| ACCUMULATING.contains(k) && in_main.iter().any(|m| m == k)) {
+            return Err(vps_err(ERR_UNSUPPORTED, "set_in_main_file"));
+        }
+    }
+    let (file, content) = match view.write_target {
+        WriteTarget::DropIn => (SSHD_DROPIN, render_dropin(&view.dropin_raw, &changes)),
+        WriteTarget::MainFile => (SSHD_MAIN_CONFIG, render_sshd_config(&view.main_raw, &changes)),
+    };
+    Ok(ApplyPlan {
+        file,
+        content,
+        reload: ReloadPlan {
+            ssh_socket_active: probe.ssh_socket_active,
+            selinux_enforcing: probe.selinux_enforcing,
+            port: desired.port,
+            new_port: port_changed.then_some(desired.port),
+            firewall_engine: probe.firewall_engine,
+        },
+    })
+}
+
 pub async fn apply_sshd_settings(
     host_id: &str,
     pool: &SshPool,
@@ -1606,23 +1685,10 @@ pub async fn apply_sshd_settings(
 ) -> Result<SshdApplyStarted, String> {
     let probe = probe(host_id, pool, sudo_password.clone()).await?;
     let view = get_sshd_view(host_id, pool, sudo_password.clone()).await?;
-    apply_preflight(&probe, &view, &desired)?;
-    let plan = ReloadPlan {
-        ssh_socket_active: probe.ssh_socket_active,
-        selinux_enforcing: probe.selinux_enforcing,
-        new_port: (desired.port != view.settings.port).then_some(desired.port),
-        firewall_engine: probe.firewall_engine,
-    };
-    let (file, content) = match view.write_target {
-        WriteTarget::DropIn => (SSHD_DROPIN, render_dropin(&desired)),
-        WriteTarget::MainFile => {
-            let main = run_privileged_script(host_id, pool, sudo_password.clone(), &format!("cat {SSHD_MAIN_CONFIG}"), None).await?;
-            (SSHD_MAIN_CONFIG, render_sshd_config(&main, &desired))
-        }
-    };
-    let script = build_sshd_apply_script(file, SSHD_ROLLBACK_SCRIPT, &plan);
-    let raw = run_privileged_script(host_id, pool, sudo_password, &script, Some(&content)).await?;
-    parse_apply_started(&raw, desired.port)
+    let plan = plan_sshd_apply(&probe, &view, &desired)?;
+    let script = build_sshd_apply_script(plan.file, SSHD_ROLLBACK_SCRIPT, &plan.reload);
+    let raw = run_privileged_script(host_id, pool, sudo_password, &script, Some(&plan.content)).await?;
+    parse_apply_started(&raw, plan.reload.new_port)
 }
 
 // Opens a brand-new SSH connection on `new_port`; the live session proves nothing (spec §4.1).
@@ -1653,13 +1719,18 @@ pub async fn verify_new_connection(
     Err(vps_err(ERR_VERIFY_FAILED, reason))
 }
 
-fn sshd_cleanup_script() -> String {
+// Keeps the change. Fails if the rollback already ran (timer fired or "Roll back now").
+fn sshd_cleanup_script(rollback: &str, files: [&str; 2]) -> String {
+    let r = shell_single_quote(rollback);
+    let markers: Vec<String> = files
+        .iter()
+        .flat_map(|f| [format!("{f}.sshbox.bak"), format!("{f}.sshbox.absent")])
+        .map(|m| shell_single_quote(&m))
+        .collect();
     format!(
         "systemctl stop sshbox-rollback.timer 2>/dev/null || true\n\
-rm -f {d}.sshbox.bak {d}.sshbox.absent {m}.sshbox.bak {m}.sshbox.absent {r}\n",
-        d = SSHD_DROPIN,
-        m = SSHD_MAIN_CONFIG,
-        r = SSHD_ROLLBACK_SCRIPT
+if [ ! -e {r} ]; then echo SSHBOX_ALREADY_ROLLED_BACK; exit 5; fi\nrm -f {} {r}\n",
+        markers.join(" ")
     )
 }
 
@@ -1675,18 +1746,22 @@ pub async fn finish_sshd_apply(
     host_id: &str,
     pool: &SshPool,
     sudo_password: Option<String>,
-    new_port: u16,
+    new_port: Option<u16>,
 ) -> Result<SshdView, String> {
     let host = find_remote_host(host_id)?;
     let expected_fp = pool
         .session_fingerprint(host_id)
         .await
         .ok_or_else(|| vps_err(ERR_COMMAND_FAILED, "no SSH session for this host"))?;
-    if let Err(e) = verify_new_connection(pool, &host, new_port, &expected_fp).await {
+    // Unchanged port: verify where the app already connects (may differ from sshd's port behind NAT).
+    if let Err(e) = verify_new_connection(pool, &host, new_port.unwrap_or(host.port), &expected_fp).await {
         run_privileged_script(host_id, pool, sudo_password, &sshd_rollback_now_script(), None).await?;
         return Err(e);
     }
-    run_privileged_script(host_id, pool, sudo_password.clone(), &sshd_cleanup_script(), None).await?;
+    let cleanup = sshd_cleanup_script(SSHD_ROLLBACK_SCRIPT, [SSHD_DROPIN, SSHD_MAIN_CONFIG]);
+    run_privileged_script(host_id, pool, sudo_password.clone(), &cleanup, None)
+        .await
+        .map_err(|_| vps_err(ERR_VERIFY_FAILED, "the change was rolled back before it could be kept"))?;
     get_sshd_view(host_id, pool, sudo_password).await
 }
 
@@ -2419,7 +2494,7 @@ maxsessions 4\nlogingracetime 60\nclientaliveinterval 300\nclientalivecountmax 2
 
     #[test]
     fn render_dropin_has_every_managed_directive() {
-        let out = render_dropin(&sample_settings());
+        let out = render_dropin("", &sshd_directives(&sample_settings()));
         assert!(out.starts_with("# Managed by ssh-box"));
         assert_eq!(parse_sshd_t(&out), sample_settings());
         for key in ["Port ", "PermitRootLogin ", "PasswordAuthentication ", "PubkeyAuthentication ", "MaxAuthTries ",
@@ -2433,7 +2508,7 @@ maxsessions 4\nlogingracetime 60\nclientaliveinterval 300\nclientalivecountmax 2
     fn renders_sshd_config_preserving_comments_and_before_match_blocks() {
         let base_raw = "# Ubuntu default sshd_config\n#Port 22\nPermitRootLogin yes\nPasswordAuthentication yes\n\
 UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    AllowTcpForwarding no\n";
-        let rendered = render_sshd_config(base_raw, &sample_settings());
+        let rendered = render_sshd_config(base_raw, &sshd_directives(&sample_settings()));
         for kept in ["# Ubuntu default sshd_config", "UsePAM yes", "Subsystem sftp /usr/lib/openssh/sftp-server"] {
             assert!(rendered.contains(kept), "{kept}");
         }
@@ -2441,19 +2516,81 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         let before_match = &rendered[..rendered.find("Match User git").unwrap()];
         assert_eq!(parse_sshd_t(before_match), sample_settings());
         let forced = SshdSettings { permit_root_login: "forced-commands-only".to_string(), ..sample_settings() };
-        assert!(render_sshd_config(base_raw, &forced).contains("PermitRootLogin forced-commands-only"));
+        assert!(render_sshd_config(base_raw, &sshd_directives(&forced)).contains("PermitRootLogin forced-commands-only"));
     }
 
     #[test]
     fn parses_sshd_view_parts() {
-        let raw = "port 2222\n---SSHBOX-PART---\nInclude /etc/ssh/sshd_config.d/*.conf\n---SSHBOX-PART---\nactive\n";
+        let raw = "port 2222\nport 22\n---SSHBOX-PART---\nInclude /etc/ssh/sshd_config.d/*.conf\n---SSHBOX-PART---\nMaxAuthTries 3\n---SSHBOX-PART---\nactive\n";
         let v = parse_sshd_view(raw).unwrap();
-        assert_eq!(v.settings.port, 2222);
+        assert_eq!((v.settings.port, v.port_count), (2222, 2));
         assert_eq!(v.write_target, WriteTarget::DropIn);
+        assert_eq!(v.dropin_raw.trim(), "MaxAuthTries 3");
         assert!(v.rollback_pending);
-        let v = parse_sshd_view("port 22\n---SSHBOX-PART---\nPort 22\n---SSHBOX-PART---\ninactive\n").unwrap();
-        assert!(!v.rollback_pending && v.write_target == WriteTarget::MainFile);
+        let v = parse_sshd_view("port 22\n---SSHBOX-PART---\nPort 22\n---SSHBOX-PART---\n---SSHBOX-PART---\ninactive\n").unwrap();
+        assert!(!v.rollback_pending && v.write_target == WriteTarget::MainFile && v.dropin_raw.is_empty());
         assert!(parse_sshd_view("garbage").unwrap_err().starts_with("COMMAND_FAILED"));
+    }
+
+    fn dropin_view() -> SshdView {
+        SshdView {
+            settings: SshdSettings::default(),
+            write_target: WriteTarget::DropIn,
+            dropin_raw: "# Managed by ssh-box\nPasswordAuthentication no\n".to_string(),
+            main_raw: "Include /etc/ssh/sshd_config.d/*.conf\nUsePAM yes\n".to_string(),
+            port_count: 1,
+            ..Default::default()
+        }
+    }
+
+    // Writing all 11 directives (read with this connection's Match context) changed other users' login.
+    #[test]
+    fn plans_only_changed_directives_and_keeps_existing_dropin() {
+        let desired = SshdSettings { max_auth_tries: 3, ..SshdSettings::default() };
+        let plan = plan_sshd_apply(&probe_for("deploy", true), &dropin_view(), &desired).unwrap();
+        assert_eq!(plan.file, SSHD_DROPIN);
+        assert!(plan.content.contains("PasswordAuthentication no") && plan.content.contains("MaxAuthTries 3"), "{}", plan.content);
+        assert!(!plan.content.contains("Port ") && !plan.content.contains("PubkeyAuthentication"), "{}", plan.content);
+        assert_eq!(plan.reload.new_port, None);
+        let moved = SshdSettings { port: 2222, ..desired };
+        assert_eq!(plan_sshd_apply(&probe_for("deploy", true), &dropin_view(), &moved).unwrap().reload.new_port, Some(2222));
+    }
+
+    // Port/AllowUsers/DenyUsers add up across files: the old port would stay open.
+    #[test]
+    fn apply_refuses_directive_also_set_in_main_file() {
+        let view = SshdView { main_raw: "Include /etc/ssh/sshd_config.d/*.conf\nPort 22\n".to_string(), ..dropin_view() };
+        let moved = SshdSettings { port: 2222, ..SshdSettings::default() };
+        let err = plan_sshd_apply(&probe_for("deploy", true), &view, &moved).unwrap_err();
+        assert_eq!(err, "UNSUPPORTED: set_in_main_file");
+        let other = SshdSettings { max_auth_tries: 3, ..SshdSettings::default() };
+        assert!(plan_sshd_apply(&probe_for("deploy", true), &view, &other).is_ok());
+    }
+
+    #[test]
+    fn apply_refuses_port_change_with_multiple_ports() {
+        let view = SshdView { port_count: 2, ..dropin_view() };
+        let moved = SshdSettings { port: 2222, ..SshdSettings::default() };
+        assert_eq!(plan_sshd_apply(&probe_for("deploy", true), &view, &moved).unwrap_err(), "UNSUPPORTED: multiple_ports");
+    }
+
+    // If the timer (or "Roll back now") already restored the old config, keeping the change must fail.
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_fails_when_rollback_already_ran() {
+        let dir = shell::temp_dir();
+        let bin = dir.join("bin");
+        shell::fake_bin(&bin, "systemctl", "exit 0");
+        let rollback = dir.join("rollback.sh");
+        let files = [dir.join("a.conf"), dir.join("b.conf")];
+        let script = sshd_cleanup_script(rollback.to_str().unwrap(), [files[0].to_str().unwrap(), files[1].to_str().unwrap()]);
+        let out = shell::run_local(&script, b"", &bin, &[], &dir);
+        assert!(out.contains("SSHBOX_ALREADY_ROLLED_BACK"), "{out}");
+        std::fs::write(&rollback, "").unwrap();
+        std::fs::write(dir.join("a.conf.sshbox.bak"), "").unwrap();
+        let out = shell::run_local(&script, b"", &bin, &[], &dir);
+        assert!(!out.contains("SSHBOX_ALREADY_ROLLED_BACK"), "{out}");
+        assert!(!rollback.exists() && !dir.join("a.conf.sshbox.bak").exists());
     }
 
     // Runs the apply script locally with fake systemctl/sshd/ss/semanage/ufw that log each call in order.
@@ -2469,7 +2606,7 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
 
     #[cfg(unix)]
     fn plan(socket: bool, selinux: bool, new_port: Option<u16>, engine: FirewallEngine) -> ReloadPlan {
-        ReloadPlan { ssh_socket_active: socket, selinux_enforcing: selinux, new_port, firewall_engine: engine }
+        ReloadPlan { ssh_socket_active: socket, selinux_enforcing: selinux, port: new_port.unwrap_or(2222), new_port, firewall_engine: engine }
     }
 
     #[cfg(unix)]
@@ -2527,6 +2664,8 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
     fn apply_script_handles_socket_selinux_and_firewall() {
         let r = run_apply(&plan(true, true, Some(2222), FirewallEngine::Ufw), Some("Port 22\n"), &[]);
         assert!(pos(&r.log, "semanage port") < pos(&r.log, "systemctl restart ssh.socket"), "{}", r.log);
+        // semanage is slow on RHEL; it runs before the 60s timer starts counting.
+        assert!(pos(&r.log, "semanage port") < pos(&r.log, "systemd-run"), "{}", r.log);
         assert!(pos(&r.log, "ufw allow 2222/tcp") < pos(&r.log, "systemctl restart ssh.socket"), "{}", r.log);
         assert!(!r.log.contains("reload-or-restart"), "{}", r.log);
         let r = run_apply(&plan(false, true, Some(22), FirewallEngine::Firewalld), Some("Port 2222\n"), &[]);
@@ -2606,7 +2745,7 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
 
     #[test]
     fn apply_refuses_change_blocked_by_guard() {
-        let view = SshdView { settings: SshdSettings::default(), write_target: WriteTarget::DropIn, rollback_pending: false };
+        let view = SshdView { write_target: WriteTarget::DropIn, ..Default::default() };
         let no_pubkey = SshdSettings { pubkey_authentication: false, ..SshdSettings::default() };
         assert!(apply_preflight(&probe_for("deploy", true), &view, &no_pubkey).unwrap_err().starts_with("LOCKOUT_BLOCKED"));
         let fine = SshdSettings { max_auth_tries: 3, ..SshdSettings::default() };
@@ -2618,9 +2757,9 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
 
     #[test]
     fn parses_apply_started_times() {
-        let s = parse_apply_started("noise\nNOW:1000\nROLLBACK_AT:1060\n", 2222).unwrap();
-        assert_eq!((s.server_now, s.rollback_at, s.new_port), (1000, 1060, 2222));
-        assert!(parse_apply_started("nothing", 22).unwrap_err().starts_with("COMMAND_FAILED"));
+        let s = parse_apply_started("noise\nNOW:1000\nROLLBACK_AT:1060\n", Some(2222)).unwrap();
+        assert_eq!((s.server_now, s.rollback_at, s.new_port), (1000, 1060, Some(2222)));
+        assert!(parse_apply_started("nothing", None).unwrap_err().starts_with("COMMAND_FAILED"));
     }
 
     const PROBE_UBUNTU: &str = "UNAME:Linux\nUSER:deploy\nUID:1000\nSUDO:password_ok\nOS_ID:ubuntu\nOS_VERSION:24.04\n\

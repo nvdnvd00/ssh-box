@@ -993,6 +993,14 @@ pub fn export_machines_bundle_at(
 
     let has_identities = !identities.is_empty() || !host_secrets.is_empty();
     let has_ssh_keys = !ssh_keys.is_empty();
+    // Asked for credentials but there are none: say so instead of writing a file without them.
+    if (include_identities || include_ssh_keys) && !has_identities && !has_ssh_keys {
+        return Err(
+            "The selected machines have no saved passwords, identities or SSH keys. \
+            Untick the credential options to export the machines alone."
+                .to_string(),
+        );
+    }
     let encrypted_secrets = if has_identities || has_ssh_keys {
         let pass = passphrase.as_deref().unwrap_or("").trim();
         if pass.is_empty() {
@@ -1451,10 +1459,33 @@ mod tests {
             ssh_key_id: Some("key:gone".into()),
             ..host.clone()
         };
-        let b = export_machines_bundle_at(&src_res_path, vec![dangling], true, true, pass).unwrap();
+        let b = export_machines_bundle_at(
+            &src_res_path,
+            vec![dangling, host.clone()],
+            true,
+            true,
+            pass,
+        )
+        .unwrap();
         assert_eq!(b.items[0].auth_method, "passwordOrKey");
         assert_eq!(b.items[0].identity_id, None);
         assert_eq!(b.items[0].ssh_key_id, None);
+
+        // 7. Credential boxes ticked for machines with no identity, key or saved password:
+        // fail instead of writing a file the user believes carries credentials.
+        let bare = HostEntry {
+            id: format!("custom:{}", uuid::Uuid::new_v4()),
+            auth_method: "passwordOrKey".into(),
+            identity_id: None,
+            ssh_key_id: None,
+            ..host.clone()
+        };
+        for (ids, keys) in [(true, false), (false, true), (true, true)] {
+            let pass = Some("backup-secret-999".to_string());
+            let res = export_machines_bundle_at(&src_res_path, vec![bare.clone()], ids, keys, pass);
+            assert!(res.is_err(), "ids={ids} keys={keys}");
+        }
+        assert!(export_machines_bundle_at(&src_res_path, vec![bare], false, false, None).is_ok());
 
         let _ = std::fs::remove_dir_all(&src_dir);
         let _ = std::fs::remove_dir_all(&dst_dir);

@@ -836,9 +836,8 @@ async fn installer_scan(
     state: State<'_, AppState>,
     host_id: String,
     os: installer::HostOs,
-    sudo_password: Option<String>,
 ) -> Result<installer::InstallerScan, String> {
-    installer::scan(&host_id, &state.ssh_pool, os, sudo_password).await
+    installer::scan(&host_id, &state.ssh_pool, os).await
 }
 
 #[tauri::command]

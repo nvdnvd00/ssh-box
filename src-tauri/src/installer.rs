@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use crate::vps_config::shell_single_quote as shq;
 use crate::ssh_pool::SshPool;
 use crate::vps_config::{
-    find_remote_host, run_privileged_script, vps_err, ERR_COMMAND_FAILED, ERR_SUDO_DENIED, ERR_SUDO_REQUIRED, ERR_UNSUPPORTED,
+    classify_privileged_output, find_remote_host, run_privileged_script, vps_err, ERR_COMMAND_FAILED, ERR_SUDO_DENIED, ERR_SUDO_REQUIRED, ERR_UNSUPPORTED,
 };
 use crate::vps_windows::{ps_quote, run_windows_script};
 #[cfg(target_os = "windows")]
@@ -368,6 +368,17 @@ pub fn parse_search(raw: &str) -> Vec<SearchHit> {
 
 const TIMEOUT: &str = "TIMEOUT";
 
+struct GroupKill(Option<u32>);
+
+impl Drop for GroupKill {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.0 {
+            let _ = std::process::Command::new("kill").args(["-TERM", &format!("-{pid}")]).output();
+        }
+    }
+}
+
 async fn pipe(mut cmd: tokio::process::Command, stdin: Vec<u8>) -> Result<String, String> {
     use std::process::Stdio;
     use tokio::io::AsyncWriteExt;
@@ -375,14 +386,19 @@ async fn pipe(mut cmd: tokio::process::Command, stdin: Vec<u8>) -> Result<String
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| vps_err(ERR_COMMAND_FAILED, e))?;
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let mut child = cmd.spawn().map_err(|e| vps_err(ERR_COMMAND_FAILED, e))?;
+    // On timeout the future is dropped: SIGTERM the whole group so apt/brew grandchildren die too
+    // (sudo relays it to its child). ponytail: remote SSH timeouts rely on the channel closing.
+    let mut _guard = GroupKill(child.id());
     let mut sin = child.stdin.take().ok_or_else(|| vps_err(ERR_COMMAND_FAILED, "no stdin"))?;
     // Ignore write errors: the child may exit before reading everything.
     let _ = sin.write_all(&stdin).await;
     drop(sin);
     let out = child.wait_with_output().await.map_err(|e| vps_err(ERR_COMMAND_FAILED, e))?;
+    _guard.0 = None; // finished: never signal a possibly reused pid
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     if out.status.success() {
         Ok(text)
@@ -405,7 +421,6 @@ pub async fn run_local(
     if os == HostOs::Windows {
         return run_local_windows(script, elevated).await;
     }
-    let _ = elevated;
     let mut cmd = tokio::process::Command::new(if root { "sudo" } else { "sh" });
     if !root {
         cmd.arg("-s");
@@ -451,8 +466,11 @@ async fn run_local_windows(script: &str, elevated: bool) -> Result<String, Strin
     // UAC prompt via RunAs; the elevated child cannot pipe back, so it writes to a temp file.
     let dir = std::env::temp_dir();
     let id = std::process::id();
-    let (ps1, out) = (dir.join(format!("sshbox-inst-{id}.ps1")), dir.join(format!("sshbox-inst-{id}.txt")));
-    std::fs::write(&ps1, format!("& {{\n{script}\n}} *> {} \n", ps_quote(&out.to_string_lossy())))
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (ps1, out) = (dir.join(format!("sshbox-inst-{id}-{n}.ps1")), dir.join(format!("sshbox-inst-{id}-{n}.txt")));
+    let o = ps_quote(&out.to_string_lossy());
+    std::fs::write(&ps1, format!("& {{\n{script}\n}} *> {o}\nif (-not $?) {{ Add-Content -Path {o} 'SSHBOX_EXIT_CODE:1' }}\n"))
         .map_err(|e| vps_err(ERR_COMMAND_FAILED, e))?;
     let outer = format!(
         "Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',{}",
@@ -462,7 +480,8 @@ async fn run_local_windows(script: &str, elevated: bool) -> Result<String, Strin
     let text = std::fs::read_to_string(&out).unwrap_or_default();
     let _ = std::fs::remove_file(&ps1);
     let _ = std::fs::remove_file(&out);
-    r.map(|_| text)
+    r?;
+    classify_privileged_output(&text)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -490,8 +509,8 @@ pub async fn run(
             run_privileged_script(host_id, pool, sudo_password, script, None).await
         } else {
             let host = find_remote_host(host_id)?;
-            let out = pool.exec_bytes_on_host(&host, "sh -s 2>&1", Some(script.as_bytes())).await?;
-            Ok(String::from_utf8_lossy(&out).into_owned())
+            let out = pool.exec_bytes_on_host(&host, r#"sh -s 2>&1 || echo "SSHBOX_EXIT_CODE:$?""#, Some(script.as_bytes())).await?;
+            classify_privileged_output(&String::from_utf8_lossy(&out))
         }
     };
     tokio::time::timeout(std::time::Duration::from_secs(secs), fut)
@@ -509,9 +528,9 @@ pub fn local_os() -> HostOs {
     }
 }
 
-pub async fn scan(host_id: &str, pool: &SshPool, os: HostOs, pw: Option<String>) -> Result<InstallerScan, String> {
+pub async fn scan(host_id: &str, pool: &SshPool, os: HostOs) -> Result<InstallerScan, String> {
     // Scan is read-only: no root needed.
-    let raw = run(host_id, pool, os, &scan_script(os), pw, false, false, 60).await?;
+    let raw = run(host_id, pool, os, &scan_script(os), None, false, false, 60).await?;
     Ok(parse_scan(os, &raw))
 }
 
@@ -683,8 +702,13 @@ mod tests {
     #[tokio::test]
     async fn run_local_times_out() {
         let pool = crate::ssh_pool::SshPool::default();
-        let e = run("local", &pool, HostOs::Linux, "sleep 5", None, false, false, 1).await.unwrap_err();
+        let f = std::env::temp_dir().join(format!("sshbox-timeout-{}", std::process::id()));
+        let _ = std::fs::remove_file(&f);
+        let script = format!("sh -c 'sleep 2; touch {}'", f.display());
+        let e = run("local", &pool, HostOs::Linux, &script, None, false, false, 1).await.unwrap_err();
         assert!(e.contains("TIMEOUT"), "{e}");
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        assert!(!f.exists(), "grandchild survived the timeout");
     }
 
     #[cfg(unix)]

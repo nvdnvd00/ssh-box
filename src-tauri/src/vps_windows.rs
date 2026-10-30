@@ -78,6 +78,7 @@ $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 Write-Output ('ADMIN:' + [int]$admin)
 Write-Output ('OPENSSH:' + (Get-Item "$env:WINDIR\System32\OpenSSH\sshd.exe" -ErrorAction SilentlyContinue).VersionInfo.ProductVersion)
 Write-Output ('SSHD_SERVICE:' + (Get-Service sshd -ErrorAction SilentlyContinue).Status)
+Write-Output ('SSHD_EXE:' + [int](Test-Path "$env:WINDIR\System32\OpenSSH\sshd.exe"))
 Write-Output ('SSH_CONNECTION:' + $env:SSH_CONNECTION)
 Write-Output ('SCHEDTASKS:' + [int][bool](Get-Module -ListAvailable ScheduledTasks))
 Write-Output ('NETSECURITY:' + [int][bool](Get-Module -ListAvailable NetSecurity))
@@ -117,7 +118,8 @@ pub fn parse_windows_probe(raw: &str, auth: AuthUsed) -> Result<VpsProbe, String
         os_family: OsFamily::Windows,
         support: VpsSupport::default(),
         caps: OsCaps {
-            sshd_running: field("SSHD_SERVICE:") == "Running",
+            // Every SSH script runs the inbox sshd.exe, so a running service elsewhere does not count.
+            sshd_running: field("SSHD_SERVICE:") == "Running" && field("SSHD_EXE:") == "1",
             has_scheduled_tasks: field("SCHEDTASKS:") == "1",
             has_net_security: net_security,
             ..Default::default()
@@ -707,7 +709,7 @@ mod tests {
 
     fn raw(admin: &str, user: &str, conn: &str) -> String {
         format!(
-            "OS_FAMILY:windows\nOS_CAPTION:Microsoft Windows 11 Pro\nOS_DISPLAY_VERSION:24H2\nUSER:{user}\nADMIN:{admin}\nOPENSSH:9.5.0.0\nSSHD_SERVICE:Running\nSSH_CONNECTION:{conn}\nSCHEDTASKS:1\nNETSECURITY:1\n"
+            "OS_FAMILY:windows\nOS_CAPTION:Microsoft Windows 11 Pro\nOS_DISPLAY_VERSION:24H2\nUSER:{user}\nADMIN:{admin}\nOPENSSH:OpenSSH_9.5p2 for Windows\nSSHD_SERVICE:Running\nSSHD_EXE:1\nSSH_CONNECTION:{conn}\nSCHEDTASKS:1\nNETSECURITY:1\n"
         )
     }
     const CONN: &str = "10.0.0.5 51000 10.0.0.9 22";
@@ -782,6 +784,16 @@ mod tests {
     fn windows_probe_script_survives_cim_access_denied() {
         let cim = WINDOWS_PROBE_SCRIPT.lines().find(|l| l.contains("Get-CimInstance")).unwrap();
         assert!(cim.contains("-ErrorAction SilentlyContinue"), "{cim}");
+    }
+
+    // Spec §3.1: every SSH write runs the inbox sshd.exe; a running service without that file must not unlock writes.
+    #[test]
+    fn windows_ssh_needs_the_inbox_sshd_exe() {
+        let p = parse_windows_probe(&raw("1", "admin", CONN).replace("SSHD_EXE:1", "SSHD_EXE:0"), key_auth()).unwrap();
+        assert!(!p.caps.sshd_running);
+        assert_eq!(p.support.ssh.reason.as_deref(), Some("windows_no_sshd"));
+        let exe = WINDOWS_PROBE_SCRIPT.lines().find(|l| l.contains("SSHD_EXE:")).unwrap();
+        assert!(exe.contains(r#"Test-Path "$env:WINDIR\System32\OpenSSH\sshd.exe""#), "{exe}");
     }
 
     // Người dùng không phải Administrator không được coi là có quyền ghi.

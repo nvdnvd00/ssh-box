@@ -251,3 +251,23 @@ Mỗi bước mở thêm ô nào thì sửa bảng mức hỗ trợ và test c�
 10. Tài khoản Windows không phải admin: hiện thông báo kèm những gì đọc được, không tự parse `sshd_config` (§4).
 11. Cổng trên Windows không khớp rule theo cổng nào thì hiện "Không xác định" (§6.2).
 12. macOS không có dòng `Include` thì tab SSH ở mức Chỉ xem (§3.1).
+
+### 8.1. Kết quả thử nghiệm (2026-10-31)
+
+Máy ảo UTM: macOS 27.0.1 (OpenSSH 10.3p1), Windows 11 Pro 26H2 ARM64 (OpenSSH_9.5p2 for Windows). Thử bằng khoá SSH riêng, không dùng mật khẩu.
+
+| Điểm | Kết quả | Kết luận |
+|---|---|---|
+| 1. `Restart-Service sshd` có làm rớt phiên? | Không. Phiên vẫn chạy tiếp sau 3 giây và in kết quả | Giữ `Restart-Service` trong script áp dụng (Task 10 bước 9), không cần task `sshbox-restart` |
+| 2. Token quản trị qua SSH | Tài khoản admin: `IsInRole(Administrator) = True`. Tài khoản thường `sshbox-std`: `False` | Nhận diện `admin` / `none` đúng |
+| 3. `SSH_CONNECTION` trên Windows | Có, ví dụ `192.168.65.1 59685 192.168.65.2 22` | Đủ thông tin cho bộ chặn |
+| 4. Bootstrap + stdin, chữ "Đạt" | Chữ tiếng Việt, bí mật có `' $ ; \`` và dấu `SSHBOX_EXIT_CODE` khi `throw` đều đúng, với `DefaultShell` là cmd lẫn PowerShell. `uname -s` dưới cả hai shell chỉ báo "không có lệnh" | Bộ chạy PowerShell dùng được |
+| 5. LaunchDaemon trên macOS | Job vẫn chạy sau khi phiên SSH đóng; `launchctl bootout` huỷ được | Dùng được cho hẹn giờ hoàn tác |
+| 6. Dòng `Include` trên macOS | `Include /etc/ssh/sshd_config.d/*` là directive đầu tiên | Nhánh file phụ |
+| 7. Chỉ tắt `PasswordAuthentication` | macOS và Windows đều vẫn mời `keyboard-interactive` (`publickey,keyboard-interactive`); tắt cả hai thì chỉ còn `publickey` | `password_coupled = true` cho cả macOS lẫn Windows |
+
+Phát hiện thêm, cần xử lý ở các task Windows:
+- Tên người dùng Windows có thể có dấu cách và bị trả về dạng chữ thường (`$env:USERNAME` = `ssh box test` cho tài khoản `SSH Box Test`).
+- Với tài khoản thường, `(Get-CimInstance Win32_OperatingSystem).Caption` trả về rỗng; cần chuỗi dự phòng khi hiện tên hệ.
+- Rule mặc định `OpenSSH-Server-In-TCP` của Windows chỉ áp dụng cho profile **Private**. Mạng ảo mới được xếp vào Public nên cổng 22 bị chặn tới khi đổi profile, đúng trường hợp "rule có nhưng không có hiệu lực".
+- PowerShell in tiến trình "Preparing modules for first use" ra stderr dạng CLIXML; không ảnh hưởng vì bộ chạy chỉ đọc stdout khi thoát mã 0.

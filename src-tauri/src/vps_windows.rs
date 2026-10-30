@@ -43,7 +43,10 @@ const WINDOWS_EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 // Seen once on the VM matrix: the bootstrap sat on stdin for 10+ minutes before running anything. Never wait forever.
 async fn bounded<T>(run: impl std::future::Future<Output = Result<T, String>>, limit: std::time::Duration) -> Result<T, String> {
     tokio::time::timeout(limit, run).await.unwrap_or_else(|_| {
-        Err(vps_err(ERR_COMMAND_FAILED, format!("the Windows host did not answer within {}s", limit.as_secs())))
+        Err(vps_err(
+            ERR_COMMAND_FAILED,
+            format!("the Windows host did not answer within {}s; if a change was being applied it is rolled back automatically within 60s", limit.as_secs()),
+        ))
     })
 }
 
@@ -769,7 +772,8 @@ mod tests {
     #[tokio::test]
     async fn windows_exec_gives_up_on_a_silent_host() {
         let e = bounded(std::future::pending::<Result<Vec<u8>, String>>(), std::time::Duration::from_millis(20)).await.unwrap_err();
-        assert!(e.starts_with("COMMAND_FAILED: the Windows host did not answer"), "{e}");
+        // The user must know a half-applied sshd change is not left behind: the armed task reverts it.
+        assert_eq!(e, "COMMAND_FAILED: the Windows host did not answer within 0s; if a change was being applied it is rolled back automatically within 60s");
         assert_eq!(exec_failure(&e), e);
     }
 

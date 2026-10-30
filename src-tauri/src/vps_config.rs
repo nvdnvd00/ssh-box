@@ -1517,7 +1517,11 @@ pub fn render_sshd_config(base_raw: &str, managed: &[(&'static str, Option<Strin
     for line in base_raw.lines() {
         if from_match.is_empty() {
             if let Some((key, _)) = split_sshd_directive(line) {
-                let key = key.to_ascii_lowercase();
+                let key = match key.to_ascii_lowercase().as_str() {
+                    // Same directive under its old name: replaced too when the kbd line is written, or its value could win.
+                    "challengeresponseauthentication" => "kbdinteractiveauthentication".to_string(),
+                    k => k.to_string(),
+                };
                 if key == "match" {
                     from_match.push(line.to_string());
                     continue;
@@ -2966,6 +2970,20 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         assert!(!parse_sshd_t("kbdinteractiveauthentication no\n").kbd_interactive_authentication);
         assert!(!parse_sshd_t("challengeresponseauthentication no\n").kbd_interactive_authentication);
         assert!(parse_sshd_t("port 22\n").kbd_interactive_authentication);
+    }
+
+    // An uncommented ChallengeResponseAuthentication above the Match block is the same directive as KbdInteractiveAuthentication
+    // and sshd keeps the first value it reads, so writing the kbd line must replace it in place.
+    #[test]
+    fn kbd_write_replaces_the_challenge_response_alias() {
+        let base = "Port 22\nChallengeResponseAuthentication yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\nMatch Group administrators\n  ChallengeResponseAuthentication yes\n";
+        let out = render_sshd_config(base, &[("kbdinteractiveauthentication", Some("KbdInteractiveAuthentication no".into()))]);
+        let head = &out[..out.find("Match").unwrap()];
+        assert_eq!(head.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>(), ["Port 22", "KbdInteractiveAuthentication no", "PasswordAuthentication yes"]);
+        assert!(out.ends_with("Match Group administrators\n  ChallengeResponseAuthentication yes\n"), "{out:?}");
+        // Linux never writes the kbd directive, so its alias line stays untouched.
+        let out = render_sshd_config(base, &[("passwordauthentication", Some("PasswordAuthentication no".into()))]);
+        assert!(out.starts_with("Port 22\nChallengeResponseAuthentication yes\nPasswordAuthentication no\nKbdInteractiveAuthentication yes\n"), "{out:?}");
     }
 
     // Linux must never get an extra KbdInteractiveAuthentication line written behind the user's back.

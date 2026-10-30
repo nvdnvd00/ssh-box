@@ -4,6 +4,7 @@
 //! VM (macOS, Lima; restarted by `limactl` in the reboot scenario):
 //!   limactl start --name=u24 --vm-type=vz --network=vzNAT --plain template://ubuntu-24.04
 //!   (also template://debian-13 and template://rocky-9; ufw / firewalld + semanage may need installing)
+//! MX_DISTRO=macos runs the macOS scenarios M1,M2,M4,M5,M6 (VM user needs passwordless sudo).
 //! Run (MX_DISTRO = ubuntu | debian | rocky; MX_ONLY=S1,S5 runs a subset):
 //!   MX_VM=u24 MX_IP=<lima0 address> MX_USER=$USER MX_KEY=$HOME/.lima/_config/user MX_DISTRO=ubuntu \
 //!   env -u SSH_AUTH_SOCK cargo test --manifest-path src-tauri/Cargo.toml --test vps_matrix -- --ignored --nocapture
@@ -11,6 +12,7 @@
 use ssh_box_lib::host_store::{upsert_custom_host, HostEntry};
 use ssh_box_lib::ssh_pool::{AuthUsed, SshPool};
 use ssh_box_lib::vps_config::*;
+use ssh_box_lib::vps_support::{OsFamily, SupportLevel};
 use std::time::Duration;
 
 fn env(k: &str) -> String {
@@ -219,6 +221,137 @@ async fn s7_users_keys(pool: &SshPool, h: &HostEntry) -> Result<String, String> 
     Ok(format!("nopasswd sudo, password sudo, key grant (700/600 as user), revoke, lock/unlock, useradd '{}' not locked", shadow.trim()))
 }
 
+// ---- macOS scenarios (MX_DISTRO=macos; sudo -n works for the VM admin user) ----
+
+// Auth methods sshd offers to a client with no usable credentials (what a password login would be offered).
+fn offered_methods() -> String {
+    let kh = std::env::temp_dir().join(format!("mx-methods-kh-{}", std::process::id()));
+    let out = std::process::Command::new("ssh")
+        .args(["-o", &format!("UserKnownHostsFile={}", kh.display()), "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes"])
+        .args(["-o", "PubkeyAuthentication=no", "-o", "PreferredAuthentications=keyboard-interactive,password", "-o", "ConnectTimeout=8"])
+        .arg(format!("{}@{}", env("MX_USER"), env("MX_IP")))
+        .arg("true")
+        .output()
+        .expect("run ssh");
+    let text = String::from_utf8_lossy(&out.stderr).to_string();
+    text.split("Permission denied (").nth(1).and_then(|r| r.split(')').next()).unwrap_or(text.trim()).to_string()
+}
+
+async fn mac_leftovers(pool: &SshPool, h: &HostEntry) -> String {
+    root(pool, h, "launchctl print system/com.sshbox.rollback >/dev/null 2>&1 && echo JOB; \
+ls /Library/LaunchDaemons/com.sshbox.rollback.plist /etc/ssh/sshbox-rollback.sh 2>/dev/null").await
+}
+
+async fn m1_probe(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let p = probe(&h.id, pool, None).await?;
+    ensure(p.os_family == OsFamily::Macos, format!("family {:?}", p.os_family))?;
+    ensure(p.os_id == "macOS" && p.os_version == "27.0.1", format!("os {} {}", p.os_id, p.os_version))?;
+    ensure(p.privilege == PrivilegeLevel::SudoNoPassword, format!("privilege {:?}", p.privilege))?;
+    ensure(p.support.ssh.level == SupportLevel::Full, format!("ssh {:?}", p.support.ssh))?;
+    ensure(!p.support.ssh_rows.port && p.support.password_coupled, format!("rows {:?}", p.support))?;
+    ensure(p.support.firewall.level == SupportLevel::Hidden, format!("firewall {:?}", p.support.firewall))?;
+    ensure(p.support.access.level == SupportLevel::ReadOnly && p.support.access.reason.as_deref() == Some("read_only_os"), format!("access {:?}", p.support.access))?;
+    Ok(format!("{} {} sudo-nopw, ssh Full, port row hidden, coupled, firewall Hidden, access ReadOnly", p.os_id, p.os_version))
+}
+
+async fn m2_password_off_on(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let view = get_sshd_view(&h.id, pool, None).await?;
+    let off = SshdSettings { password_authentication: false, kbd_interactive_authentication: false, ..view.settings.clone() };
+    let s = apply_sshd_settings(&h.id, pool, None, off).await?;
+    finish_sshd_apply(&h.id, pool, None, s.new_port).await?;
+    let t = root(pool, h, "sshd -T | grep -i '^passwordauthentication \\|^kbdinteractiveauthentication '").await;
+    ensure(t.contains("passwordauthentication no") && t.contains("kbdinteractiveauthentication no"), format!("sshd -T: {t}"))?;
+    let dropin = root(pool, h, "ls /etc/ssh/sshd_config.d/00-sshbox.conf").await;
+    ensure(dropin.trim() == "/etc/ssh/sshd_config.d/00-sshbox.conf", format!("drop-in: {dropin}"))?;
+    let left = mac_leftovers(pool, h).await;
+    ensure(left.trim().is_empty(), format!("rollback leftovers: {left}"))?;
+    let m_off = offered_methods();
+    ensure(m_off == "publickey", format!("methods off: {m_off}"))?;
+    let view = get_sshd_view(&h.id, pool, None).await?;
+    let on = SshdSettings { password_authentication: true, kbd_interactive_authentication: true, ..view.settings };
+    let s = apply_sshd_settings(&h.id, pool, None, on).await?;
+    finish_sshd_apply(&h.id, pool, None, s.new_port).await?;
+    let m_on = offered_methods();
+    ensure(m_on.contains("password") && m_on.contains("keyboard-interactive"), format!("methods on: {m_on}"))?;
+    let left = mac_leftovers(pool, h).await;
+    ensure(left.trim().is_empty(), format!("rollback leftovers after on: {left}"))?;
+    Ok(format!("off: sshd -T {} / methods '{m_off}'; on: methods '{m_on}'", t.split_whitespace().collect::<Vec<_>>().join(" ")))
+}
+
+async fn m4_apply_then_disconnect(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let view = get_sshd_view(&h.id, pool, None).await?;
+    let off = SshdSettings { password_authentication: false, kbd_interactive_authentication: false, ..view.settings };
+    apply_sshd_settings(&h.id, pool, None, off).await?;
+    let m_mid = offered_methods();
+    ensure(m_mid == "publickey", format!("methods right after apply: {m_mid}"))?;
+    tokio::time::sleep(Duration::from_secs(75)).await;
+    let fresh = SshPool::default();
+    fresh.get_or_connect(h, None).await.map_err(|e| format!("key login after timeout: {e}"))?;
+    let m_after = offered_methods();
+    ensure(m_after.contains("password"), format!("methods after rollback: {m_after}"))?;
+    let t = root(&fresh, h, "sshd -T | grep -i '^passwordauthentication \\|^kbdinteractiveauthentication '").await;
+    ensure(t.contains("passwordauthentication yes") && t.contains("kbdinteractiveauthentication yes"), format!("sshd -T: {t}"))?;
+    let dropin = root(&fresh, h, "cat /etc/ssh/sshd_config.d/00-sshbox.conf 2>&1 | grep -ic 'no$'").await;
+    let left = mac_leftovers(&fresh, h).await;
+    ensure(left.trim().is_empty(), format!("rollback leftovers: {left}"))?;
+    Ok(format!("mid '{m_mid}' -> after 75s '{m_after}'; key login ok; no job/plist/script; dropin 'no' lines {}", dropin.trim()))
+}
+
+async fn m5_port_hidden(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let before = root(pool, h, "sshd -T | grep -i '^port '; ls /etc/ssh/sshd_config.d; shasum /etc/ssh/sshd_config.d/* 2>&1").await;
+    let view = get_sshd_view(&h.id, pool, None).await?;
+    let r = apply_sshd_settings(&h.id, pool, None, SshdSettings { port: 2299, ..view.settings }).await;
+    match r {
+        Err(e) if e.starts_with("UNSUPPORTED: hidden_setting") => {
+            let after = root(pool, h, "sshd -T | grep -i '^port '; ls /etc/ssh/sshd_config.d; shasum /etc/ssh/sshd_config.d/* 2>&1").await;
+            ensure(before == after, format!("VM changed:\n{before}\n---\n{after}"))?;
+            Ok(format!("{e}; VM unchanged"))
+        }
+        other => Err(format!("expected UNSUPPORTED: hidden_setting, got {other:?}")),
+    }
+}
+
+async fn m6_users_keys(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let snap = get_access_keys_snapshot(&h.id, pool, None).await?;
+    let me = snap.accounts.iter().find(|a| a.username == h.user).ok_or("login user missing")?;
+    ensure(me.uid == 501 && me.has_sudo, format!("{} uid {} sudo {}", me.username, me.uid, me.has_sudo))?;
+    let pubkey = std::fs::read_to_string(format!("{}.pub", env("MX_KEY"))).map_err(|e| e.to_string())?;
+    let body = pubkey.split_whitespace().nth(1).ok_or("bad pub key")?;
+    ensure(me.authorized_keys.iter().any(|k| k.public_key_body == body), "vm key not in authorized_keys".into())?;
+    let root_acc = snap.accounts.iter().find(|a| a.username == "root").ok_or("root missing")?;
+    ensure(root_acc.home_dir == "/var/root", format!("root home {}", root_acc.home_dir))?;
+    let w = create_linux_user(&h.id, pool, None, "mxnew".into(), SudoMode::NoPassword, None).await;
+    ensure(matches!(&w, Err(e) if e.starts_with("UNSUPPORTED: read_only_os")), format!("create_linux_user: {w:?}"))?;
+    let exists = root(pool, h, "id mxnew 2>&1").await;
+    ensure(exists.contains("no such user"), format!("user created anyway: {exists}"))?;
+    Ok(format!("{} uid 501 sudo, key present; root home /var/root; create -> {}", me.username, w.unwrap_err()))
+}
+
+fn run_macos(only: &str) {
+    let h = host("mx-main", &env("MX_USER"), Some(env("MX_KEY")), 22);
+    upsert_custom_host(h.clone()).unwrap();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let pool = SshPool::default();
+        pool.get_or_connect(&h, None).await.expect("connect to VM");
+        let mut failed = 0;
+        macro_rules! run {
+            ($name:expr, $f:expr) => {
+                if only.is_empty() || only.split(',').any(|s| s == &$name[..2]) {
+                    let r = $f.await;
+                    println!("{} {}: {:?}", if r.is_ok() { "PASS" } else { "FAIL" }, $name, r);
+                    failed += r.is_err() as u32;
+                }
+            };
+        }
+        run!("M1 probe", m1_probe(&pool, &h));
+        run!("M2 password off/on (coupled)", m2_password_off_on(&pool, &h));
+        run!("M4 apply then disconnect -> rollback", m4_apply_then_disconnect(&pool, &h));
+        run!("M5 port change blocked", m5_port_hidden(&pool, &h));
+        run!("M6 users & keys read-only", m6_users_keys(&pool, &h));
+        assert_eq!(failed, 0);
+    });
+}
+
 #[test]
 #[ignore]
 fn matrix() {
@@ -229,6 +362,9 @@ fn matrix() {
     std::env::remove_var("SSH_AUTH_SOCK");
     let distro = env("MX_DISTRO");
     let only = std::env::var("MX_ONLY").unwrap_or_default();
+    if distro == "macos" {
+        return run_macos(&only);
+    }
     let mut h = host("mx-main", &env("MX_USER"), Some(env("MX_KEY")), 22);
     upsert_custom_host(h.clone()).unwrap();
 

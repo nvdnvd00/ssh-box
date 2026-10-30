@@ -489,7 +489,7 @@ mod tests {
         assert!(source_covers("::/0", "2001:db8::7"));
     }
 
-    // Windows: block thắng allow, nên allow bị block che không còn là đường vào; Linux thì vẫn còn.
+    // Windows: block beats allow, so an allow shadowed by a block is no way in; on Linux it still is.
     #[test]
     fn windows_delete_ignores_allow_shadowed_by_block() {
         let c = deploy_key();
@@ -500,11 +500,11 @@ mod tests {
         ];
         assert!(blocked(check_firewall_delete_windows(&c, &rules, &rules[0])));
         assert!(check_firewall_delete(&c, &rules, &rules[0]).is_ok());
-        // Không có block thì allow còn lại vẫn là đường vào.
+        // Without the block, the remaining allow is still a way in.
         assert!(check_firewall_delete_windows(&c, &rules[..2], &rules[0]).is_ok());
     }
 
-    // Máy khách IPv6 chỉ có một allow cho /64 của nó: xoá luật đó là tự khoá, nên phải bị chặn.
+    // An IPv6 client has a single allow for its /64: deleting it locks the app out, so it must be blocked.
     #[test]
     fn windows_delete_blocks_only_ipv6_allow() {
         let mut c = deploy_key();
@@ -514,7 +514,7 @@ mod tests {
         assert!(blocked(check_firewall_delete_windows(&c, std::slice::from_ref(&r), &r)));
     }
 
-    // Allow của profile không dùng hoặc gắn chương trình không cho máy khách vào; không được coi là đường dự phòng.
+    // An allow of an unused profile or tied to a program does not let the client in; it is no fallback path.
     #[test]
     fn windows_delete_ignores_ineffective_backup_allows() {
         let c = deploy_key();
@@ -524,12 +524,12 @@ mod tests {
             backup.raw_spec = name.into();
             backup.effective = false;
             assert!(blocked(check_firewall_delete_windows(&c, &[real.clone(), backup.clone()], &real)), "{name}");
-            // Xoá chính allow vô hiệu thì không mất đường vào nào.
+            // Deleting the ineffective allow itself removes no way in.
             assert!(check_firewall_delete_windows(&c, &[real.clone(), backup.clone()], &backup).is_ok(), "{name}");
         }
     }
 
-    // Từ JSON thật: allow IPv6 duy nhất cho /64 của máy khách, xoá phải bị chặn (parser + guard cùng chạy).
+    // From real JSON: the only IPv6 allow for the client's /64; deleting it must be blocked (parser and guard together).
     #[test]
     fn windows_delete_from_parsed_json_blocks_only_ipv6_allow() {
         let j = r#"{"profiles":[{"name":"Private","enabled":true,"defaultInbound":"Block"}],"active":["Private"],"rules":[{"displayName":"ssh6","group":"","program":"Any","profile":"Any","scoped":false,"action":"Allow","localPort":"2222","protocol":"TCP","remoteAddress":"2001:db8::/64"}],"sockets":[]}"#;

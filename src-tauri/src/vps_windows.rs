@@ -714,7 +714,7 @@ mod tests {
     }
     const CONN: &str = "10.0.0.5 51000 10.0.0.9 22";
 
-    // Script nằm trong lệnh thì vượt giới hạn 8191 ký tự của cmd, và bí mật lộ trong danh sách tiến trình.
+    // A script on the command line would exceed cmd's 8191-char limit and expose secrets in the process list.
     #[test]
     fn powershell_command_is_constant_and_carries_no_script() {
         let c = build_powershell_command();
@@ -723,7 +723,7 @@ mod tests {
         assert!(!c.contains("sshbox_secret_begin"));
     }
 
-    // cmd.exe và PowerShell diễn giải các ký tự đặc biệt; lệnh chỉ được chứa base64 thuần.
+    // cmd.exe and PowerShell interpret special characters; the command may only carry plain base64.
     #[test]
     fn powershell_command_is_plain_ascii_safe_in_cmd_and_powershell() {
         let c = build_powershell_command();
@@ -732,7 +732,7 @@ mod tests {
         assert!(!c.chars().any(|ch| "%^&|<>\"`$".contains(ch)));
     }
 
-    // Bootstrap sai mã hoá thì PowerShell chạy sai script, hoặc không chạy gì.
+    // A wrongly encoded bootstrap makes PowerShell run the wrong script, or nothing.
     #[test]
     fn encoded_command_decodes_to_bootstrap() {
         let c = build_powershell_command();
@@ -742,20 +742,20 @@ mod tests {
         assert_eq!(String::from_utf16(&units).unwrap(), PS_BOOTSTRAP);
     }
 
-    // Bootstrap tách script và bí mật theo đúng dấu phân cách này, bằng UTF-8.
+    // The bootstrap splits script and secret at exactly this separator, in UTF-8.
     #[test]
     fn stdin_carries_script_then_secret_utf8() {
         let got = powershell_stdin("Write-Output 'Đạt'", Some("p'a$s"));
         assert_eq!(got, "Write-Output 'Đạt'\nSSHBOX_SECRET_BEGIN\np'a$s".as_bytes());
     }
 
-    // Giá trị chèn vào script phải không thoát được khỏi chuỗi trong dấu nháy đơn.
+    // A value placed in a script must not escape its single-quoted string.
     #[test]
     fn ps_quote_doubles_single_quotes() {
         assert_eq!(ps_quote("a'b"), "'a''b'");
     }
 
-    // Lưới quyền và firewall dựa vào các trường này; sai là hiện nhầm tính năng.
+    // The support table and firewall rely on these fields; wrong values show the wrong features.
     #[test]
     fn windows_probe_admin_with_ssh_running() {
         let p = parse_windows_probe(&raw("1", "admin", CONN), key_auth()).unwrap();
@@ -796,21 +796,21 @@ mod tests {
         assert!(exe.contains(r#"Test-Path "$env:WINDIR\System32\OpenSSH\sshd.exe""#), "{exe}");
     }
 
-    // Người dùng không phải Administrator không được coi là có quyền ghi.
+    // A user who is not an Administrator must not be treated as able to write.
     #[test]
     fn windows_probe_non_admin() {
         let p = parse_windows_probe(&raw("0", "bob", CONN), key_auth()).unwrap();
         assert_eq!(p.privilege, PrivilegeLevel::None);
     }
 
-    // Tên người dùng có dấu là thật ở máy Windows tiếng Việt; không được làm hỏng.
+    // Accented user names are real on Vietnamese Windows hosts; they must arrive intact.
     #[test]
     fn windows_probe_keeps_vietnamese_user_name() {
         let p = parse_windows_probe(&raw("1", "Đạt", CONN), key_auth()).unwrap();
         assert_eq!(p.context.login_user, "Đạt");
     }
 
-    // Bộ chặn khoá cổng so sánh IP máy khách/máy chủ; IPv6 phải đi qua nguyên vẹn.
+    // The lockout guard compares client/server IPs; IPv6 must pass through intact.
     #[test]
     fn windows_probe_parses_ipv6_ssh_connection() {
         let p = parse_windows_probe(&raw("1", "a", "fe80::1 51000 fe80::2 2222"), key_auth()).unwrap();
@@ -818,7 +818,7 @@ mod tests {
         assert_eq!(p.context.server_port, 2222);
     }
 
-    // Máy không có PowerShell (cmd báo lỗi) phải ra "không hỗ trợ", không phải lỗi lạ.
+    // A host without PowerShell (cmd reports an error) must read as "unsupported", not as an odd error.
     #[test]
     fn windows_probe_without_marker_is_unsupported() {
         let e = parse_windows_probe("'powershell.exe' is not recognized as an internal or external command", key_auth()).unwrap_err();
@@ -834,7 +834,7 @@ mod tests {
         assert_eq!(exec_failure(&e), e);
     }
 
-    // Lỗi chạy lệnh (không có powershell.exe) được đổi thành unsupported_os, (lỗi kết nối đã được get_or_connect báo trước đó).
+    // An exec failure (no powershell.exe) becomes unsupported_os; connection errors were already reported by get_or_connect.
     #[test]
     fn exec_failure_maps_to_unsupported_os() {
         assert!(exec_failure("exit 1: 'powershell.exe' is not recognized").starts_with("UNSUPPORTED: unsupported_os"));
@@ -925,7 +925,7 @@ mod tests {
 
     const FW: &str = r#"{"profiles":[{"name":"Domain","enabled":false,"defaultInbound":"Block"},{"name":"Private","enabled":true,"defaultInbound":"Block"}],"active":["Private"],"sshProfile":"Private","rules":[{"displayName":"OpenSSH-Server-In-TCP","group":"ssh-box","program":"Any","action":"Allow","localPort":"22","protocol":"TCP","remoteAddress":"Any"},{"displayName":"Cho phép Đạt","group":"","program":"Any","action":"Block","localPort":"8080","protocol":"UDP","remoteAddress":"10.0.0.0/8"}],"sockets":[{"protocol":"tcp","addr":"::","port":22,"pid":1234,"process":"sshd","path":"C:\\Windows\\System32\\OpenSSH\\sshd.exe"},{"protocol":"tcp","addr":"127.0.0.1","port":5432,"pid":null,"process":"","path":""}]}"#;
 
-    // Rule "Any" phải thành hai mục v4/v6, tên rule và nhóm phải qua được để Task 9 xoá theo tên.
+    // An "Any" rule becomes a v4 and a v6 item; name and group must survive so deletes can find the rule by name.
     #[test]
     fn windows_firewall_parses_rules_profiles_and_sockets() {
         let s = parse_windows_firewall(FW).unwrap();
@@ -940,14 +940,14 @@ mod tests {
         assert_eq!(s.listening_sockets[1].exposure, "loopback");
     }
 
-    // Máy Windows tiếng Việt có tên rule có dấu; mất dấu thì không xoá/đối chiếu được.
+    // Vietnamese Windows hosts have accented rule names; losing the accents breaks delete and matching.
     #[test]
     fn windows_firewall_parses_unicode_display_name() {
         let s = parse_windows_firewall(FW).unwrap();
         assert!(s.rules.iter().any(|r| r.raw_spec == "Cho phép Đạt"));
     }
 
-    // Profile không dùng mà bật không được làm firewall "bật"; tất cả profile đang dùng tắt thì phơi ra ngoài.
+    // An enabled but unused profile must not make the firewall "on"; with every active profile off, ports are exposed.
     #[test]
     fn windows_firewall_enabled_only_counts_active_profiles() {
         let off = FW.replace(r#""enabled":true"#, r#""enabled":false"#).replace(r#""name":"Domain","enabled":false"#, r#""name":"Domain","enabled":true"#);
@@ -963,7 +963,7 @@ mod tests {
         FirewallRuleItem { index: 1, to_port: port.into(), protocol: "tcp".into(), action: action.into(), from_source: from.into(), v6: false, comment: String::new(), raw_spec: format!("{action} {port}"), effective: true }
     }
 
-    // ufw: luật khớp đầu tiên thắng. Windows: block luôn thắng dù đứng sau allow.
+    // ufw: the first matching rule wins. Windows: a block always wins, even after an allow.
     #[test]
     fn allow_then_block_same_port_differs_between_ufw_and_windows() {
         let rules = [wrule("ALLOW", "80", "Anywhere"), wrule("DENY", "80", "Anywhere")];
@@ -971,7 +971,7 @@ mod tests {
         assert_eq!(compute_socket_exposure_windows(&sock(80), true, &rules), "blocked");
     }
 
-    // Cổng không có rule theo cổng nào thì không được báo "blocked" sai; phải là unknown. Nguồn cụ thể thì restricted.
+    // A port without any port rule must not be reported "blocked"; it is unknown. A specific source means restricted.
     #[test]
     fn port_without_port_rule_is_unknown_on_windows() {
         assert_eq!(compute_socket_exposure_windows(&sock(9000), true, &[wrule("ALLOW", "80", "Anywhere")]), "unknown");
@@ -979,7 +979,7 @@ mod tests {
         assert_eq!(compute_socket_exposure_windows(&sock(80), false, &[]), "exposed");
     }
 
-    // Script đọc phải ghép bộ lọc một lần (PS 5.1 chậm) và không nuốt lỗi cả danh mục.
+    // The read script joins the filters once (PS 5.1 is slow) and never swallows a failing cmdlet.
     #[test]
     fn windows_firewall_script_joins_filters_once_and_fails_loudly() {
         let s = windows_firewall_read_script("10.0.0.9");
@@ -988,7 +988,7 @@ mod tests {
         assert!(s.contains("Get-NetTCPConnection -State Listen") && s.contains("Get-NetUDPEndpoint"));
         assert!(s.contains("ConvertTo-Json") && s.contains("-Compress"));
         assert!(!s.contains("Get-NetFirewallRule -ErrorAction SilentlyContinue"));
-        assert_eq!(s.matches("SilentlyContinue").count(), 1); // chỉ tra tên tiến trình
+        assert_eq!(s.matches("SilentlyContinue").count(), 1); // only the process-name lookup
     }
 
     // Group Policy can override local firewall settings: display and guard must read the effective policy (ActiveStore),
@@ -1006,13 +1006,13 @@ mod tests {
         assert!(writes.iter().all(|w| !w.contains("PolicyStore")));
     }
 
-    // JSON hỏng phải ra COMMAND_FAILED, không phải một danh sách rỗng trông như "an toàn".
+    // Broken JSON must be COMMAND_FAILED, not an empty list that looks "safe".
     #[test]
     fn windows_firewall_parse_error_is_command_failed() {
         assert!(parse_windows_firewall("not json").unwrap_err().starts_with("COMMAND_FAILED"));
     }
 
-    // Luật Block của profile Public không chặn cổng khi máy đang dùng Private; không được báo "blocked".
+    // A Public-profile block does not block the port while SSH arrives on Private; it must not read "blocked".
     #[test]
     fn windows_rule_of_inactive_profile_does_not_count() {
         let j = FW.replace(r#""remoteAddress":"Any"}"#, r#""remoteAddress":"Any"},{"displayName":"B","group":"","program":"Any","profile":"Public","action":"Block","localPort":"22","protocol":"TCP","remoteAddress":"Any"}"#);
@@ -1021,7 +1021,7 @@ mod tests {
         assert_eq!(parse_windows_firewall(&j).unwrap().listening_sockets[0].exposure, "blocked");
     }
 
-    // Luật gắn với chương trình không phải luật cổng thuần; không được tạo "blocked" mà cổng suy biến về unknown.
+    // A program-scoped rule is not a plain port rule; it must not create "blocked", the port degrades to unknown.
     #[test]
     fn windows_program_scoped_rule_degrades_to_unknown() {
         let j = FW.replace(r#""displayName":"OpenSSH-Server-In-TCP""#, r#""displayName":"OpenSSH-Server-In-TCP","scoped":true"#).replace(r#""action":"Allow""#, r#""action":"Block""#);
@@ -1065,7 +1065,7 @@ mod tests {
         assert!(windows_firewall_read_script("10.0.0.9").contains("$prog = if ($app) {"));
     }
 
-    // Mỗi địa chỉ nguồn phải thành mục riêng đúng họ v4/v6, nếu không guard khoá không thấy allow của máy khách IPv6.
+    // Each source address becomes its own item of the right family, or the guard misses an IPv6 client's allow.
     #[test]
     fn windows_remote_addresses_split_per_address_and_family() {
         let j = FW.replace(r#""remoteAddress":"10.0.0.0/8""#, r#""remoteAddress":"10.0.0.0/8,2001:db8::/64,LocalSubnet""#);
@@ -1084,7 +1084,7 @@ mod tests {
         assert!(crate::vps_guard::source_covers(got[0], "192.168.65.1"));
     }
 
-    // Allow từ mọi nơi cộng block một nguồn: mọi người trừ nguồn đó vẫn vào được, nên phải là exposed.
+    // Allow from anywhere plus a block for one source: everyone but that source gets in, so it is exposed.
     #[test]
     fn windows_allow_any_with_one_blocked_source_is_exposed() {
         let rules = [wrule("ALLOW", "80", "Anywhere"), wrule("DENY", "80", "198.51.100.9")];
@@ -1098,7 +1098,7 @@ mod tests {
         }
     }
 
-    // Mọi giá trị người dùng đưa vào PowerShell phải được quote và rule phải nằm trong nhóm ssh-box (để xoá được sau này).
+    // Every user value sent to PowerShell is quoted, and the rule joins the ssh-box group (so it can be deleted later).
     #[test]
     fn windows_add_rule_quotes_and_groups() {
         let s = build_windows_add_rule_script("deny", "10.0.0.1'; calc", "22", "tcp");
@@ -1108,7 +1108,7 @@ mod tests {
         assert!(build_windows_add_rule_script("allow", "any", "22;calc", "tcp").is_err());
     }
 
-    // Port mà proto = any phải mở cả TCP lẫn UDP, nếu không rule chỉ chặn/mở một nửa.
+    // A port with proto any must cover both TCP and UDP, or the rule only half applies.
     #[test]
     fn windows_add_any_proto_creates_tcp_and_udp() {
         let s = build_windows_add_rule_script("allow", "any", "53", "any").unwrap();
@@ -1116,7 +1116,7 @@ mod tests {
         assert!(s.contains("-Protocol TCP") && s.contains("-Protocol UDP"));
     }
 
-    // Chỉ xoá rule do ssh-box tạo; rule hệ thống như OpenSSH-Server-In-TCP không được đụng tới.
+    // Only rules ssh-box created can be deleted; system rules such as OpenSSH-Server-In-TCP stay untouched.
     #[test]
     fn windows_delete_refuses_unmanaged_rule() {
         assert_eq!(build_windows_delete_rule_script(&win_rule("")), Err("UNSUPPORTED: windows_rule_not_managed".to_string()));
@@ -1125,7 +1125,7 @@ mod tests {
         assert!(!s.contains("-DisplayName"), "DisplayName parameter set is wildcard and cannot mix with -Group");
     }
 
-    // Bật firewall mà chưa có rule allow SSH sẽ tự cắt kết nối; rule phải có trước lệnh bật.
+    // Enabling the firewall without an SSH allow cuts the session; the rule must exist before the enable command.
     #[test]
     fn windows_enable_adds_ssh_allow_before_enabling() {
         let s = build_windows_firewall_state_script(true, Some(22));
@@ -1135,7 +1135,7 @@ mod tests {
         assert!(!off.contains("New-NetFirewallRule") && off.contains("-Enabled False"));
     }
 
-    // Chặn mọi nguồn trên cổng SSH đang dùng là tự khoá mình; phải bị bộ chặn từ chối trước khi tới PowerShell.
+    // Blocking every source on the SSH port in use is a lockout; the guard must refuse it before PowerShell runs.
     #[test]
     fn windows_block_covering_me_is_blocked() {
         let ctx = parse_windows_probe(&raw("1", "admin", CONN), key_auth()).unwrap().context;

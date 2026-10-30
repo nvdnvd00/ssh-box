@@ -374,6 +374,8 @@ const VI_STRINGS: AppI18nStrings = {
     key_in_use: "Đây là SSH key mà ứng dụng đang dùng để đăng nhập.",
     windows_block_covers_me:
       "Đang có rule chặn chính kết nối SSH của bạn. Bật firewall lúc này sẽ cắt kết nối, nên ứng dụng không bật.",
+    windows_inbound_allows_off:
+      "Firewall đang đặt chế độ chặn mọi kết nối vào, kể cả ứng dụng được phép. Bật firewall lúc này sẽ cắt SSH, nên ứng dụng không bật.",
   },
   vpsUnsupportedReasons: {
     linux_only: "Cấu hình VPS không dùng cho máy local",
@@ -641,6 +643,8 @@ const EN_STRINGS: AppI18nStrings = {
     key_in_use: "This is the SSH key the app signs in with.",
     windows_block_covers_me:
       "A rule blocks your own SSH connection. Turning the firewall on now would cut you off, so the app will not do it.",
+    windows_inbound_allows_off:
+      "The firewall is set to block all incoming connections, even allowed apps. Turning it on now would cut SSH, so the app will not do it.",
   },
   vpsUnsupportedReasons: {
     linux_only: "Server Config is not available for the local machine",

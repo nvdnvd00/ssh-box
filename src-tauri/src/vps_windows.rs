@@ -381,7 +381,7 @@ pub const WINDOWS_RULE_GROUP: &str = "ssh-box";
 // $ErrorActionPreference is Stop (bootstrap), so a failing cmdlet fails the read instead of showing a false "safe" state.
 // Only the process-name lookup is lenient: a process can exit between listing the socket and naming it.
 // The SSH interface's profile lookup is lenient too: unknown ('') only narrows which rules count.
-const WINDOWS_FIREWALL_READ_SCRIPT: &str = r#"$profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore | ForEach-Object { [ordered]@{ name = [string]$_.Name; enabled = ([string]$_.Enabled -eq 'True'); defaultInbound = [string]$_.DefaultInboundAction } })
+const WINDOWS_FIREWALL_READ_SCRIPT: &str = r#"$profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore | ForEach-Object { [ordered]@{ name = [string]$_.Name; enabled = ([string]$_.Enabled -eq 'True'); defaultInbound = [string]$_.DefaultInboundAction; allowInbound = [string]$_.AllowInboundRules } })
 $active = @(Get-NetConnectionProfile | ForEach-Object { [string]$_.NetworkCategory -replace 'Authenticated','' } | Select-Object -Unique)
 $sshProfile = ''
 if ($sshIp) { try { $ifx = @(Get-NetIPAddress -IPAddress $sshIp -ErrorAction Stop)[0].InterfaceIndex; $sshProfile = ([string]@(Get-NetConnectionProfile -InterfaceIndex $ifx -ErrorAction Stop)[0].NetworkCategory) -replace 'Authenticated','' } catch { $sshProfile = '' } }
@@ -421,6 +421,9 @@ struct WinProfile {
     enabled: bool,
     #[serde(default)]
     default_inbound: String,
+    // AllowInboundRules: "False" blocks every inbound connection, allowed apps included; "NotConfigured" (default) and "True" do not.
+    #[serde(default)]
+    allow_inbound: String,
 }
 
 #[derive(Deserialize)]
@@ -505,6 +508,10 @@ pub fn parse_windows_firewall(json: &str, server_port: u16) -> Result<FirewallSn
             || (ssh_profile.is_empty() && block)
             || (!ssh_profile.is_empty() && p.split(',').any(|x| x.trim().eq_ignore_ascii_case(ssh_profile)))
     };
+    // Allowed apps blocked too on the SSH NIC's profile (any profile when unknown): no allow lets this session in.
+    let allows_off = w.profiles.iter().any(|p| {
+        p.allow_inbound.trim().eq_ignore_ascii_case("false") && (ssh_profile.is_empty() || p.name.eq_ignore_ascii_case(ssh_profile))
+    });
     // A program-scoped rule (the stock OpenSSH one is limited to sshd.exe) applies only while exactly that file owns every
     // socket on its port: another sshd.exe (zip/MSI install, Cygwin) does not, and an unknown listener path never does.
     let is_any = |v: &str| v.trim().eq_ignore_ascii_case("any");
@@ -556,7 +563,7 @@ pub fn parse_windows_firewall(json: &str, server_port: u16) -> Result<FirewallSn
                 v6,
                 comment: r.group.clone(),
                 raw_spec: r.display_name.clone(),
-                effective: !r.scoped && !service_scoped && applies(&r.profile, !allow) && program_owns(r, protocol),
+                effective: !r.scoped && !service_scoped && !(allow && allows_off) && applies(&r.profile, !allow) && program_owns(r, protocol),
             };
             if r.local_port.trim().eq_ignore_ascii_case("any") {
                 unlisted_blocks.push(item);
@@ -592,6 +599,7 @@ pub fn parse_windows_firewall(json: &str, server_port: u16) -> Result<FirewallSn
         rules,
         listening_sockets,
         unlisted_blocks,
+        inbound_allows_off: allows_off,
     })
 }
 
@@ -656,7 +664,7 @@ fn guard_rules(snap: &FirewallSnapshot) -> Vec<FirewallRuleItem> {
 // Enabling makes every saved block live, and a block beats the auto-allow: refuse while one covers this session.
 pub fn build_windows_set_state(ctx: &ConnectionContext, snap: &FirewallSnapshot, enable: bool) -> Result<String, String> {
     if enable {
-        crate::vps_guard::check_firewall_enable_windows(ctx, &guard_rules(snap))?;
+        crate::vps_guard::check_firewall_enable_windows(ctx, &guard_rules(snap), snap.inbound_allows_off)?;
     }
     Ok(build_windows_firewall_state_script(enable, windows_ensure_port(ctx, &snap.rules)))
 }
@@ -1263,6 +1271,32 @@ mod tests {
             assert!(s.rules.iter().all(|r| !r.effective), "{svc}");
             assert_eq!(windows_ensure_port(&admin_ctx(), &s.rules), Some(22), "{svc}");
         }
+    }
+
+    // "Block all incoming connections, including allowed apps" (AllowInboundRules False) on the SSH NIC's profile, or on any profile
+    // when that is unknown: no allow, not even the auto-allow, lets SSH in, so enabling is refused and allows do not count.
+    // NotConfigured is the default (allows apply), and the setting on another known profile changes nothing.
+    #[test]
+    fn windows_enable_refused_when_inbound_allows_are_off() {
+        let profiles = |private: &str| format!(r#""profiles":[{{"name":"Private","enabled":false,"defaultInbound":"Block","allowInbound":"{private}"}},{{"name":"Public","enabled":false,"defaultInbound":"Block","allowInbound":"NotConfigured"}}]"#);
+        let with = |private: &str, ssh: &str, on: bool| {
+            let j = FW_OFF
+                .replace(r#""profiles":[{"name":"Private","enabled":false,"defaultInbound":"Block"}]"#, &profiles(private))
+                .replace(r#""sshProfile":"Private""#, &format!(r#""sshProfile":"{ssh}""#))
+                .replace(r#""name":"Private","enabled":false"#, &format!(r#""name":"Private","enabled":{on}"#))
+                .replace("EXTRA", MY_ALLOW);
+            parse_windows_firewall(&j, 22).unwrap()
+        };
+        let refused = Err("LOCKOUT_BLOCKED: windows_inbound_allows_off".to_string());
+        let snap = with("False", "Private", false);
+        assert_eq!(build_windows_set_state(&admin_ctx(), &snap, true), refused);
+        assert!(snap.inbound_allows_off && snap.rules.iter().all(|r| !r.effective));
+        assert_eq!(build_windows_set_state(&admin_ctx(), &with("False", "", false), true), refused);
+        assert_eq!(with("False", "Private", true).listening_sockets[0].exposure, "unknown", "no allow counts, so never \"exposed\"");
+        assert!(build_windows_set_state(&admin_ctx(), &with("False", "Public", false), true).is_ok());
+        assert!(build_windows_set_state(&admin_ctx(), &with("NotConfigured", "Private", false), true).is_ok());
+        assert!(build_windows_set_state(&admin_ctx(), &with("NotConfigured", "", false), true).is_ok());
+        assert!(windows_firewall_read_script("10.0.0.9").contains("allowInbound = [string]$_.AllowInboundRules"));
     }
 
     // Multi-NIC host: SSH arrives on a Public NIC while another NIC is Private. The Private-only stock rule does not carry

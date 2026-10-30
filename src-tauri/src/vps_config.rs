@@ -160,6 +160,9 @@ pub struct FirewallSnapshot {
     // so the lockout guard and the exposure must still see them.
     #[serde(default)]
     pub unlisted_blocks: Vec<FirewallRuleItem>,
+    // Windows only: the SSH interface's profile blocks every inbound connection, allowed apps included.
+    #[serde(default)]
+    pub inbound_allows_off: bool,
 }
 
 impl Default for FirewallSnapshot {
@@ -173,6 +176,7 @@ impl Default for FirewallSnapshot {
             rules: Vec::new(),
             listening_sockets: Vec::new(),
             unlisted_blocks: Vec::new(),
+            inbound_allows_off: false,
         }
     }
 }

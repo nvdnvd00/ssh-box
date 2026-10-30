@@ -200,7 +200,7 @@ pub struct AccessKeysSnapshot {
     pub accounts: Vec<LinuxAccountItem>,
 }
 
-fn is_public_bind_address(bind_addr: &str) -> bool {
+pub(crate) fn is_public_bind_address(bind_addr: &str) -> bool {
     let clean = bind_addr
         .trim()
         .trim_matches(|c| c == '[' || c == ']')
@@ -299,6 +299,38 @@ pub fn compute_socket_exposure(
         2 => "exposed",
         1 => "restricted",
         _ => "blocked",
+    }
+    .to_string()
+}
+
+// Windows Firewall: a block rule beats any allow regardless of order, so there is no first-match walk.
+pub fn compute_socket_exposure_windows(
+    socket: &ListeningSocketItem,
+    firewall_enabled: bool,
+    rules: &[FirewallRuleItem],
+) -> String {
+    if !socket.is_public {
+        return "loopback".to_string();
+    }
+    if !firewall_enabled {
+        return "exposed".to_string();
+    }
+    let (mut allow_any, mut allow_src, mut block_any, mut block_src) = (false, false, false, false);
+    for r in rules.iter().filter(|r| rule_port_matches(&r.to_port, &r.protocol, socket.port, &socket.protocol)) {
+        let allow = matches!(r.action.to_ascii_uppercase().as_str(), "ALLOW" | "LIMIT" | "ACCEPT");
+        match (allow, is_anywhere_source(&r.from_source)) {
+            (true, true) => allow_any = true,
+            (true, false) => allow_src = true,
+            (false, true) => block_any = true,
+            (false, false) => block_src = true,
+        }
+    }
+    // No rule for the port says nothing about the default: never claim "blocked" from silence.
+    match (block_any, allow_any, allow_src, block_src) {
+        (true, ..) => "blocked",
+        (_, true, _, false) => "exposed",
+        (_, true, _, true) | (_, false, true, _) => "restricted",
+        _ => "unknown",
     }
     .to_string()
 }
@@ -736,6 +768,9 @@ pub async fn get_firewall_snapshot(
     sudo_password: Option<String>,
 ) -> Result<FirewallSnapshot, String> {
     let probe = probe(host_id, pool, sudo_password.clone()).await?;
+    if probe.firewall_engine == FirewallEngine::Windows {
+        return crate::vps_windows::get_windows_firewall(host_id, pool, &probe).await;
+    }
     let raw = run_privileged_script(host_id, pool, sudo_password, &firewall_read_script(probe.firewall_engine), None).await?;
     Ok(snapshot_after(&raw, probe.firewall_engine))
 }

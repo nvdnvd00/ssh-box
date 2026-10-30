@@ -108,6 +108,28 @@ pub fn check_firewall_delete(
     Ok(())
 }
 
+// Windows Firewall: a block rule wins over any allow, so an allow only counts while no block covers the same ssh path.
+pub fn check_firewall_delete_windows(
+    ctx: &ConnectionContext,
+    rules: &[FirewallRuleItem],
+    target: &FirewallRuleItem,
+) -> Result<(), String> {
+    let removed = |r: &FirewallRuleItem| r.raw_spec == target.raw_spec;
+    let blocks_me = |r: &FirewallRuleItem| {
+        !is_allow(&r.action)
+            && r.v6 == ctx.client_ip.contains(':')
+            && rule_port_matches(&r.to_port, &r.protocol, ctx.server_port, "tcp")
+            && source_covers(&r.from_source, &ctx.client_ip)
+    };
+    let removes_mine = std::iter::once(target).chain(rules.iter().filter(|r| removed(r))).any(|r| allows_my_ssh(ctx, r));
+    let still_open = rules.iter().any(|r| !removed(r) && allows_my_ssh(ctx, r))
+        && !rules.iter().any(|r| !removed(r) && blocks_me(r));
+    if removes_mine && !still_open {
+        return block("only_ssh_rule");
+    }
+    Ok(())
+}
+
 pub fn check_firewall_add(
     ctx: &ConnectionContext,
     action: &str,
@@ -448,5 +470,20 @@ mod tests {
         assert!(source_covers("203.0.113.7", "203.0.113.7"));
         assert!(!source_covers("2001:db8::/32", "203.0.113.7"));
         assert!(source_covers("::/0", "2001:db8::7"));
+    }
+
+    // Windows: block thắng allow, nên allow bị block che không còn là đường vào; Linux thì vẫn còn.
+    #[test]
+    fn windows_delete_ignores_allow_shadowed_by_block() {
+        let c = deploy_key();
+        let rules = vec![
+            rule(1, "ALLOW", "2222/tcp", "Anywhere"),
+            { let mut r = rule(2, "ALLOW", "2222/tcp", "203.0.113.0/24"); r.raw_spec = "allowB".into(); r },
+            { let mut r = rule(3, "DENY", "2222/tcp", "Anywhere"); r.raw_spec = "blockC".into(); r },
+        ];
+        assert!(blocked(check_firewall_delete_windows(&c, &rules, &rules[0])));
+        assert!(check_firewall_delete(&c, &rules, &rules[0]).is_ok());
+        // Không có block thì allow còn lại vẫn là đường vào.
+        assert!(check_firewall_delete_windows(&c, &rules[..2], &rules[0]).is_ok());
     }
 }

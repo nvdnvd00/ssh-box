@@ -84,7 +84,7 @@ pub fn compute_support(p: &VpsProbe) -> VpsSupport {
             access: tab(ReadOnly, Some("read_only_os")),
             password_coupled: true,
         },
-        // Later tasks open the firewall tab.
+        // Task 9 opens the firewall tab for writes.
         OsFamily::Windows => VpsSupport {
             ssh: match (p.privilege == PrivilegeLevel::Admin, p.caps.sshd_running) {
                 (false, _) => tab(ReadOnly, Some("windows_not_admin")),
@@ -93,7 +93,11 @@ pub fn compute_support(p: &VpsProbe) -> VpsSupport {
                 _ => tab(ReadOnly, Some("windows_ssh_read_only")),
             },
             ssh_rows: SshRows { permit_root_login: false, allow_deny_users: false, ..all_rows },
-            firewall: tab(Hidden, None),
+            firewall: match (p.caps.has_net_security, p.privilege == PrivilegeLevel::Admin) {
+                (false, _) => tab(Hidden, None),
+                (_, false) => tab(ReadOnly, Some("windows_not_admin")),
+                _ => tab(ReadOnly, Some("firewall_read_only")),
+            },
             access: tab(ReadOnly, Some("read_only_os")),
             password_coupled: false,
         },
@@ -214,5 +218,18 @@ mod tests {
         let rows = SshRows { port: true, permit_root_login: true, allow_deny_users: false };
         let desired = SshdSettings { port: 2222, ..SshdSettings::default() };
         assert_eq!(check_hidden_rows(&rows, &SshdSettings::default(), &desired), Ok(()));
+    }
+
+    // Windows firewall is read-only (Task 9 opens writes); without NetSecurity it is hidden, without admin the reason is named.
+    #[test]
+    fn windows_firewall_is_read_only_when_net_security_present() {
+        let mut p = linux(true, "ufw");
+        p.os_family = OsFamily::Windows;
+        p.privilege = PrivilegeLevel::Admin;
+        assert_eq!(compute_support(&p).firewall.level, SupportLevel::Hidden);
+        p.caps.has_net_security = true;
+        assert_eq!(compute_support(&p).firewall, tab(SupportLevel::ReadOnly, Some("firewall_read_only")));
+        p.privilege = PrivilegeLevel::None;
+        assert_eq!(compute_support(&p).firewall, tab(SupportLevel::ReadOnly, Some("windows_not_admin")));
     }
 }

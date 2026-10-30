@@ -220,6 +220,7 @@ export interface AppI18nStrings {
   vpsPrivRoot: string;
   vpsPrivSudoNoPassword: string;
   vpsPrivSudoPassword: string;
+  vpsPrivAdmin: string;
   vpsPrivNone: string;
   vpsSudoTitle: string;
   vpsSudoHint: string;
@@ -371,7 +372,15 @@ const VI_STRINGS: AppI18nStrings = {
     key_in_use: "Đây là SSH key mà ứng dụng đang dùng để đăng nhập.",
   },
   vpsUnsupportedReasons: {
-    linux_only: "Chỉ hỗ trợ máy chủ Linux",
+    linux_only: "Cấu hình VPS không dùng cho máy local",
+    unsupported_os: "Hệ điều hành của máy này chưa được hỗ trợ",
+    windows_not_admin: "Tài khoản này không có quyền quản trị nên chỉ xem được.",
+    windows_no_sshd: "Dịch vụ OpenSSH Server (sshd) không chạy nên chỉ xem được.",
+    windows_ssh_read_only: "Trên Windows, cấu hình SSH hiện chỉ xem được.",
+    macos_no_dropin: "Bản macOS này không có thư mục sshd_config.d nên chỉ xem được.",
+    read_only_os: "Trên hệ điều hành này, mục này chỉ xem được.",
+    hidden_setting: "Cài đặt này không sửa được trên hệ điều hành này.",
+    windows_rule_not_managed: "Chỉ xoá được rule do SSH Box tạo.",
     no_ssh_connection: "Không đọc được thông tin kết nối SSH ($SSH_CONNECTION) trên máy chủ.",
     no_systemd: "Máy chủ không dùng systemd nên chỉ xem được, không sửa được.",
     firewall_read_only: "Firewall này chỉ xem được. Cài ufw để sửa rule.",
@@ -388,6 +397,7 @@ const VI_STRINGS: AppI18nStrings = {
   vpsPrivRoot: "Root",
   vpsPrivSudoNoPassword: "Sudo không cần mật khẩu",
   vpsPrivSudoPassword: "Sudo đã mở khoá",
+  vpsPrivAdmin: "Quản trị viên",
   vpsPrivNone: "Chưa có quyền sudo",
   vpsSudoTitle: "Mật khẩu sudo",
   vpsSudoHint: "Chỉ giữ trong bộ nhớ cho phiên làm việc này, không lưu lại.",
@@ -452,7 +462,7 @@ const VI_STRINGS: AppI18nStrings = {
   vpsFwAdd: "Thêm",
   vpsFwOn: "bật",
   vpsFwOff: "tắt",
-  vpsFwExposure: { exposed: "Mở công khai", restricted: "Giới hạn IP", blocked: "Bị chặn", loopback: "Chỉ nội bộ" },
+  vpsFwExposure: { exposed: "Mở công khai", restricted: "Giới hạn IP", blocked: "Bị chặn", loopback: "Chỉ nội bộ", unknown: "Không xác định" },
   vpsFwActions: { allow: "Cho phép", limit: "Cho phép, giới hạn tần suất", deny: "Chặn", reject: "Từ chối" },
   vpsUsersCreateTitle: "Tạo user mới",
   vpsUsersName: "Tên user",
@@ -621,7 +631,15 @@ const EN_STRINGS: AppI18nStrings = {
     key_in_use: "This is the SSH key the app signs in with.",
   },
   vpsUnsupportedReasons: {
-    linux_only: "Linux servers only",
+    linux_only: "Server Config is not available for the local machine",
+    unsupported_os: "This machine's operating system is not supported",
+    windows_not_admin: "This account is not an administrator, so settings are read only.",
+    windows_no_sshd: "The OpenSSH Server service (sshd) is not running, so settings are read only.",
+    windows_ssh_read_only: "On Windows, SSH settings are read only for now.",
+    macos_no_dropin: "This macOS version has no sshd_config.d folder, so settings are read only.",
+    read_only_os: "On this operating system, this section is read only.",
+    hidden_setting: "This setting cannot be changed on this operating system.",
+    windows_rule_not_managed: "Only rules created by SSH Box can be deleted.",
     no_ssh_connection: "Could not read the SSH connection details ($SSH_CONNECTION) on the server.",
     no_systemd: "This server does not use systemd, so settings are read only.",
     firewall_read_only: "This firewall is read only. Install ufw to edit rules.",
@@ -638,6 +656,7 @@ const EN_STRINGS: AppI18nStrings = {
   vpsPrivRoot: "Root",
   vpsPrivSudoNoPassword: "Sudo, no password",
   vpsPrivSudoPassword: "Sudo unlocked",
+  vpsPrivAdmin: "Administrator",
   vpsPrivNone: "No sudo yet",
   vpsSudoTitle: "Sudo password",
   vpsSudoHint: "Kept in memory for this session only, never saved.",
@@ -702,7 +721,7 @@ const EN_STRINGS: AppI18nStrings = {
   vpsFwAdd: "Add",
   vpsFwOn: "on",
   vpsFwOff: "off",
-  vpsFwExposure: { exposed: "Public", restricted: "Limited to some IPs", blocked: "Blocked", loopback: "Local only" },
+  vpsFwExposure: { exposed: "Public", restricted: "Limited to some IPs", blocked: "Blocked", loopback: "Local only", unknown: "Unknown" },
   vpsFwActions: { allow: "Allow", limit: "Allow, rate-limited", deny: "Deny", reject: "Reject" },
   vpsUsersCreateTitle: "Create a user",
   vpsUsersName: "Username",

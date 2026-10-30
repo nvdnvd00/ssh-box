@@ -47,7 +47,8 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
     return () => window.clearInterval(id);
   }, [progress?.phase]);
 
-  const readOnly = !probe.hasSystemd || !!res.data?.rollbackPending;
+  const { ssh, sshRows } = probe.support;
+  const readOnly = ssh.level === "readOnly" || !!res.data?.rollbackPending;
   const set = <K extends keyof SshdSettings>(key: K, value: SshdSettings[K]) =>
     setDraft((d) => (d ? { ...d, [key]: value } : d));
 
@@ -141,7 +142,7 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
 
   const checks = [
     { id: "row-password", label: t.vpsSshCheckPassword, ok: !current.passwordAuthentication },
-    { id: "row-root", label: t.vpsSshCheckRoot, ok: current.permitRootLogin !== "yes" },
+    ...(sshRows.permitRootLogin ? [{ id: "row-root", label: t.vpsSshCheckRoot, ok: current.permitRootLogin !== "yes" }] : []),
     { id: "row-maxauth", label: t.vpsSshCheckMaxAuth, ok: current.maxAuthTries <= 4 },
   ];
   const numberInput = (key: "port" | (typeof NUMBER_FIELDS)[number]) => (
@@ -168,7 +169,7 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
   return (
     <div className="space-y-5">
       {res.error && <Notice tone="danger">{res.error}</Notice>}
-      {!probe.hasSystemd && <Notice tone="warn">{t.vpsUnsupportedReasons.no_systemd}</Notice>}
+      {ssh.reason && <Notice tone="warn">{t.vpsUnsupportedReasons[ssh.reason] ?? ssh.reason}</Notice>}
       {res.data?.rollbackPending && (
         <Notice tone="warn">
           {t.vpsSshPending}{" "}
@@ -199,28 +200,34 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
 
       <fieldset disabled={readOnly} className="space-y-5 min-w-0">
         <SettingGroup title={t.vpsSshGroupLogin}>
-          <SettingRow label={t.vpsSshPort} description={t.vpsSshPortHint} directive="Port" effective={String(current.port)}>
-            {numberInput("port")}
-          </SettingRow>
+          {sshRows.port && (
+            <SettingRow label={t.vpsSshPort} description={t.vpsSshPortHint} directive="Port" effective={String(current.port)}>
+              {numberInput("port")}
+            </SettingRow>
+          )}
           <SettingRow id="row-password" label={t.vpsSshPassword} directive="PasswordAuthentication">
             <Switch label={t.vpsSshPassword} checked={draft.passwordAuthentication} onChange={(v) => set("passwordAuthentication", v)} />
           </SettingRow>
           <SettingRow label={t.vpsSshPubkey} directive="PubkeyAuthentication">
             <Switch label={t.vpsSshPubkey} checked={draft.pubkeyAuthentication} onChange={(v) => set("pubkeyAuthentication", v)} />
           </SettingRow>
-          <SettingRow id="row-root" label={t.vpsSshRoot} directive="PermitRootLogin">
-            <SelectField size="sm" className="w-full sm:w-52" value={draft.permitRootLogin} options={rootOptions} onChange={(v) => set("permitRootLogin", v)} />
-          </SettingRow>
+          {sshRows.permitRootLogin && (
+            <SettingRow id="row-root" label={t.vpsSshRoot} directive="PermitRootLogin">
+              <SelectField size="sm" className="w-full sm:w-52" value={draft.permitRootLogin} options={rootOptions} onChange={(v) => set("permitRootLogin", v)} />
+            </SettingRow>
+          )}
         </SettingGroup>
 
-        <SettingGroup title={t.vpsSshGroupWho}>
-          <SettingRow label={t.vpsSshAllowUsers} description={t.vpsSshUsersHint} directive="AllowUsers">
-            {usersInput("allowUsers")}
-          </SettingRow>
-          <SettingRow label={t.vpsSshDenyUsers} directive="DenyUsers">
-            {usersInput("denyUsers")}
-          </SettingRow>
-        </SettingGroup>
+        {sshRows.allowDenyUsers && (
+          <SettingGroup title={t.vpsSshGroupWho}>
+            <SettingRow label={t.vpsSshAllowUsers} description={t.vpsSshUsersHint} directive="AllowUsers">
+              {usersInput("allowUsers")}
+            </SettingRow>
+            <SettingRow label={t.vpsSshDenyUsers} directive="DenyUsers">
+              {usersInput("denyUsers")}
+            </SettingRow>
+          </SettingGroup>
+        )}
 
         <SettingGroup title={t.vpsSshGroupLimits}>
           <SettingRow id="row-maxauth" label={t.vpsSshMaxAuthTries} directive="MaxAuthTries">{numberInput("maxAuthTries")}</SettingRow>

@@ -35,6 +35,8 @@ export const AccessKeysStudio: React.FC<VpsStudioProps & { sshKeys: SshKeyItem[]
   const [newUser, setNewUser] = useState({ name: "", mode: "none" as SudoMode, password: "" });
   const [drafts, setDrafts] = useState<Record<string, { mode: SudoMode; password: string; keyId: string }>>({});
 
+  const { level, reason } = probe.support.access;
+  const readOnly = level === "readOnly";
   const ctx = probe.context;
   const appKey = ctx.auth.kind === "key" ? ctx.auth.publicKeyBody : null;
   const modeOptions = (["none", "noPassword", "withPassword"] as SudoMode[]).map((m) => ({ value: m, label: t.vpsUsersSudoModes[m] }));
@@ -77,7 +79,9 @@ export const AccessKeysStudio: React.FC<VpsStudioProps & { sshKeys: SshKeyItem[]
   return (
     <div className="space-y-5">
       {res.error && <Notice tone="danger">{res.error}</Notice>}
+      {reason && <Notice tone="warn">{t.vpsUnsupportedReasons[reason] ?? reason}</Notice>}
 
+      {!readOnly && (
       <SettingGroup title={t.vpsUsersCreateTitle}>
         <div className="px-4 py-3 grid gap-3 sm:grid-cols-2">
           <label className="space-y-1">
@@ -114,6 +118,7 @@ export const AccessKeysStudio: React.FC<VpsStudioProps & { sshKeys: SshKeyItem[]
           </div>
         </div>
       </SettingGroup>
+      )}
 
       {res.data.accounts.map((a) => {
         const isRoot = a.username === "root";
@@ -161,7 +166,7 @@ export const AccessKeysStudio: React.FC<VpsStudioProps & { sshKeys: SshKeyItem[]
                     <button type="button" className={buttonClass} onClick={() => act("vps_set_user_lock", { username: a.username, lock: false })}>
                       {t.vpsUsersUnlock}
                     </button>
-                  ) : (
+                  ) : !readOnly && (
                     <ConfirmButton
                       label={t.vpsUsersLock}
                       confirmLabel={t.vpsUsersLockConfirm}
@@ -177,7 +182,7 @@ export const AccessKeysStudio: React.FC<VpsStudioProps & { sshKeys: SshKeyItem[]
               <SettingRow key={k.rawLine} label={k.comment || k.shortPreview} directive={`${k.keyType} ${k.shortPreview}`}>
                 <div className="flex items-center gap-2">
                   {appKey === k.publicKeyBody && a.username === ctx.loginUser && <StatusBadge tone="ok">{t.vpsUsersKeyInUse}</StatusBadge>}
-                  {!isRoot && (
+                  {!isRoot && !readOnly && (
                     <ConfirmButton
                       label={t.vpsUsersRevoke}
                       confirmLabel={t.vpsUsersRevokeConfirm}

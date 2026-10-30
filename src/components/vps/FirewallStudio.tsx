@@ -16,6 +16,7 @@ const EXPOSURE_TONE: Record<string, StatusTone> = {
   restricted: "ok",
   blocked: "neutral",
   loopback: "neutral",
+  unknown: "neutral",
 };
 
 interface Pending {
@@ -34,7 +35,8 @@ export const FirewallStudio: React.FC<VpsStudioProps> = ({ vps, probe }) => {
   const [form, setForm] = useState({ action: "allow", source: "", port: "", proto: "tcp" });
 
   const engine = probe.firewallEngine;
-  const writable = engine === "ufw" || engine === "firewalld";
+  const { reason } = probe.support.firewall;
+  const writable = probe.support.firewall.level === "full";
   const snap = res.data;
   const anywhere = (src: string) => (/^(any|anywhere|0\.0\.0\.0\/0|::\/0)?$/i.test(src.trim()) ? t.vpsFwAnywhere : src);
 
@@ -82,7 +84,7 @@ export const FirewallStudio: React.FC<VpsStudioProps> = ({ vps, probe }) => {
     <div className="space-y-5">
       {res.error && <Notice tone="danger">{res.error}</Notice>}
       {engine === "none" && <Notice tone="warn">{t.vpsFwNoEngine}</Notice>}
-      {engine === "iptables" && <Notice tone="warn">{t.vpsUnsupportedReasons.firewall_read_only}</Notice>}
+      {reason && <Notice tone="warn">{t.vpsUnsupportedReasons[reason] ?? reason}</Notice>}
       {snap.enabled && !snap.ipv6Filtered && <Notice tone="warn">{t.vpsFwIpv6Off}</Notice>}
 
       <SettingGroup title={t.vpsFwStatusTitle}>

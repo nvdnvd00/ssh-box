@@ -1185,7 +1185,7 @@ elif sudo -n true 2>/dev/null; then
   sshbox_body | sudo -n sh -s 2>&1
   rc=$?
 elif [ -n "$SSHBOX_PW" ]; then
-  {{ printf '%s\n' "$SSHBOX_PW"; sshbox_body; }} | sudo -S -p '' sh -s 2>&1
+  {{ printf '%s\n' "$SSHBOX_PW"; sshbox_body; }} | sudo -k -S -p '' sh -s 2>&1
   rc=$?
 else
   echo "SSHBOX_ERR_SUDO_PASSWORD_REQUIRED"
@@ -2588,6 +2588,26 @@ exec sh -s"#;
             assert!(!dir.join("INJECTED").exists(), "password {pw:?} ran a command");
             assert!(classify_privileged_output(&out).unwrap().contains("SCRIPT_RAN"), "{out}");
         }
+    }
+
+    // With cached sudo credentials, plain `sudo -S` skips the password line and `sh -s` would run it as a command.
+    #[cfg(unix)]
+    #[test]
+    fn sudo_with_cached_credentials_never_feeds_the_password_to_the_shell() {
+        let dir = shell::temp_dir();
+        let bin = dir.join("bin");
+        shell::fake_bin(&bin, "id", "echo 1000");
+        // Cached creds: only `-k` makes it read the password line; otherwise it execs the shell on stdin as-is.
+        shell::fake_bin(
+            &bin,
+            "sudo",
+            "case \"$1\" in -n) exit 1;; -k) IFS= read -r _pw;; esac\nexec sh -s",
+        );
+        let pw = "S3cr3t-pw";
+        let stdin = privileged_stdin(Some(pw), None).unwrap();
+        let out = shell::run_local(&build_privileged_command("echo SCRIPT_RAN"), &stdin, &bin, &[], &dir);
+        assert!(out.contains("SCRIPT_RAN"), "{out}");
+        assert!(!out.contains(pw), "password reached the shell: {out}");
     }
 
     // New-user passwords and key lines must reach the script without being part of the command line.

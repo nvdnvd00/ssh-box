@@ -348,6 +348,49 @@ export interface KernelSysctlUpdate {
   ipForward: boolean;
 }
 
+export interface SwapFileItem {
+  filename: string;
+  swapType: string;
+  sizeMb: number;
+  usedMb: number;
+  priority: number;
+}
+
+export interface SystemdServiceItem {
+  unit: string;
+  loadState: string;
+  activeState: "active" | "inactive" | "failed" | "activating" | string;
+  subState: "running" | "exited" | "dead" | "failed" | string;
+  description: string;
+  enabled: boolean;
+}
+
+export interface CronJobItem {
+  index: number;
+  schedule: string;
+  command: string;
+  comment: string;
+  paused: boolean;
+  rawLine: string;
+}
+
+export interface SystemOpsSnapshot {
+  hostname: string;
+  timezone: string;
+  ntpSynchronized: boolean;
+  dnsServers: string[];
+  unattendedUpgradesEnabled: boolean;
+  ramTotalMb: number;
+  ramUsedMb: number;
+  diskTotalMb: number;
+  diskFreeMb: number;
+  swapTotalMb: number;
+  swapUsedMb: number;
+  swaps: SwapFileItem[];
+  services: SystemdServiceItem[];
+  cronJobs: CronJobItem[];
+}
+
 export interface KnownHostEntry {
   id: string;
   hostPattern: string;

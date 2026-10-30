@@ -303,6 +303,78 @@ pub struct KernelSysctlUpdate {
     pub ip_forward: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SwapFileItem {
+    pub filename: String,
+    pub swap_type: String,
+    pub size_mb: u64,
+    pub used_mb: u64,
+    pub priority: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemdServiceItem {
+    pub unit: String,
+    pub load_state: String,
+    pub active_state: String,
+    pub sub_state: String,
+    pub description: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CronJobItem {
+    pub index: u32,
+    pub schedule: String,
+    pub command: String,
+    pub comment: String,
+    pub paused: bool,
+    pub raw_line: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemOpsSnapshot {
+    pub hostname: String,
+    pub timezone: String,
+    pub ntp_synchronized: bool,
+    pub dns_servers: Vec<String>,
+    pub unattended_upgrades_enabled: bool,
+    pub ram_total_mb: u64,
+    pub ram_used_mb: u64,
+    pub disk_total_mb: u64,
+    pub disk_free_mb: u64,
+    pub swap_total_mb: u64,
+    pub swap_used_mb: u64,
+    pub swaps: Vec<SwapFileItem>,
+    pub services: Vec<SystemdServiceItem>,
+    pub cron_jobs: Vec<CronJobItem>,
+}
+
+impl Default for SystemOpsSnapshot {
+    fn default() -> Self {
+        Self {
+            hostname: "localhost".to_string(),
+            timezone: "UTC".to_string(),
+            ntp_synchronized: false,
+            dns_servers: Vec::new(),
+            unattended_upgrades_enabled: false,
+            ram_total_mb: 0,
+            ram_used_mb: 0,
+            disk_total_mb: 0,
+            disk_free_mb: 0,
+            swap_total_mb: 0,
+            swap_used_mb: 0,
+            swaps: Vec::new(),
+            services: Vec::new(),
+            cron_jobs: Vec::new(),
+        }
+    }
+}
+
 fn is_public_bind_address(bind_addr: &str) -> bool {
     let clean = bind_addr
         .trim()
@@ -3250,6 +3322,638 @@ pub async fn apply_kernel_tuning(
     get_kernel_snapshot(host_id, pool, sudo_password).await
 }
 
+fn is_valid_systemd_unit(unit: &str) -> bool {
+    let trimmed = unit.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        return false;
+    }
+    let stem = trimmed.strip_suffix(".service").unwrap_or(trimmed);
+    !stem.is_empty()
+        && stem.chars().all(|c| {
+            c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '@' || c == '-'
+        })
+}
+
+fn normalize_systemd_unit(unit: &str) -> Result<String, String> {
+    let trimmed = unit.trim();
+    if !is_valid_systemd_unit(trimmed) {
+        return Err(format!("Invalid systemd unit name: {unit}"));
+    }
+    if trimmed.ends_with(".service") {
+        Ok(trimmed.to_string())
+    } else {
+        Ok(format!("{trimmed}.service"))
+    }
+}
+
+fn is_cron_field_token(tok: &str) -> bool {
+    !tok.is_empty()
+        && tok.chars().all(|c| {
+            c.is_ascii_alphanumeric() || c == '*' || c == '/' || c == ',' || c == '-' || c == '?'
+        })
+}
+
+fn parse_cron_line_entry(
+    raw_content: &str,
+    paused: bool,
+    preceding_comment: Option<String>,
+    index: u32,
+    raw_line: &str,
+) -> Option<CronJobItem> {
+    let trimmed = raw_content.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    // Skip environment variable assignments in crontab (e.g. SHELL=/bin/sh, PATH=..., MAILTO=...)
+    if let Some((lhs, _)) = trimmed.split_once('=') {
+        if !lhs.is_empty()
+            && !lhs.contains(char::is_whitespace)
+            && lhs
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        {
+            return None;
+        }
+    }
+
+    let (schedule, rest) = if trimmed.starts_with('@') {
+        let mut parts = trimmed.splitn(2, char::is_whitespace);
+        let sched = parts.next()?.trim();
+        let cmd_part = parts.next()?.trim();
+        (sched.to_string(), cmd_part)
+    } else {
+        let mut iter = trimmed.split_whitespace();
+        let f1 = iter.next()?;
+        let f2 = iter.next()?;
+        let f3 = iter.next()?;
+        let f4 = iter.next()?;
+        let f5 = iter.next()?;
+        if ![f1, f2, f3, f4, f5].iter().all(|t| is_cron_field_token(t)) {
+            return None;
+        }
+        // Locate byte offset of the command after the 5th schedule token
+        let mut offset = 0usize;
+        for tok in [f1, f2, f3, f4, f5] {
+            let pos = trimmed[offset..].find(tok)? + offset;
+            offset = pos + tok.len();
+        }
+        let cmd_part = trimmed[offset..].trim();
+        if cmd_part.is_empty() {
+            return None;
+        }
+        (format!("{f1} {f2} {f3} {f4} {f5}"), cmd_part)
+    };
+
+    if rest.is_empty() {
+        return None;
+    }
+
+    let (command, inline_comment) = match rest.rsplit_once(" #") {
+        Some((cmd_before, cmt_after)) if !cmd_before.trim().is_empty() => (
+            cmd_before.trim().to_string(),
+            Some(cmt_after.trim().to_string()),
+        ),
+        _ => (rest.to_string(), None),
+    };
+
+    let comment = preceding_comment
+        .filter(|c| !c.trim().is_empty())
+        .or(inline_comment.filter(|c| !c.trim().is_empty()))
+        .unwrap_or_default();
+
+    Some(CronJobItem {
+        index,
+        schedule,
+        command,
+        comment,
+        paused,
+        raw_line: raw_line.trim().to_string(),
+    })
+}
+
+pub fn parse_system_ops_snapshot(raw: &str) -> SystemOpsSnapshot {
+    let mut snap = SystemOpsSnapshot::default();
+    let mut section = "";
+    let mut unit_enabled_map: std::collections::HashMap<String, bool> =
+        std::collections::HashMap::new();
+    let mut pending_cron_comment: Option<String> = None;
+    let mut cron_idx = 1u32;
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        match trimmed {
+            "---SYS_META---" => {
+                section = "meta";
+                continue;
+            }
+            "---RESOLV_CONF---" => {
+                section = "resolv";
+                continue;
+            }
+            "---SWAPS---" => {
+                section = "swaps";
+                continue;
+            }
+            "---SYSTEMD_UNIT_FILES---" => {
+                section = "unit_files";
+                continue;
+            }
+            "---SYSTEMD_SERVICES---" => {
+                section = "services";
+                continue;
+            }
+            "---CRONTAB---" => {
+                section = "crontab";
+                continue;
+            }
+            _ => {}
+        }
+
+        match section {
+            "meta" => {
+                if let Some(v) = trimmed.strip_prefix("HOSTNAME:") {
+                    let h = v.trim();
+                    if !h.is_empty() {
+                        snap.hostname = h.to_string();
+                    }
+                } else if let Some(v) = trimmed.strip_prefix("TIMEZONE:") {
+                    let tz = v.trim();
+                    if !tz.is_empty() {
+                        snap.timezone = tz.to_string();
+                    }
+                } else if let Some(v) = trimmed.strip_prefix("NTP_SYNC:") {
+                    snap.ntp_synchronized = parse_yes_no(v, false);
+                } else if let Some(v) = trimmed.strip_prefix("UNATTENDED_UPGRADES:") {
+                    snap.unattended_upgrades_enabled = parse_yes_no(v, false);
+                } else if let Some(v) = trimmed.strip_prefix("DNS_SERVERS:") {
+                    for tok in v.split(|c: char| c.is_whitespace() || c == ',') {
+                        let ip = tok.trim();
+                        if !ip.is_empty() && !snap.dns_servers.iter().any(|d| d == ip) {
+                            snap.dns_servers.push(ip.to_string());
+                        }
+                    }
+                } else if let Some(v) = trimmed.strip_prefix("MEM_MB:") {
+                    let nums: Vec<u64> = v
+                        .split_whitespace()
+                        .filter_map(|s| s.parse::<u64>().ok())
+                        .collect();
+                    if nums.len() >= 2 {
+                        snap.ram_total_mb = nums[0];
+                        snap.ram_used_mb = nums[1];
+                    }
+                    if nums.len() >= 4 {
+                        snap.swap_total_mb = nums[2];
+                        snap.swap_used_mb = nums[3];
+                    }
+                } else if let Some(v) = trimmed.strip_prefix("DISK_MB:") {
+                    let nums: Vec<u64> = v
+                        .split_whitespace()
+                        .filter_map(|s| s.parse::<u64>().ok())
+                        .collect();
+                    if nums.len() >= 2 {
+                        snap.disk_total_mb = nums[0];
+                        snap.disk_free_mb = nums[1];
+                    }
+                }
+            }
+            "resolv" => {
+                let without_comment = trimmed
+                    .split('#')
+                    .next()
+                    .unwrap_or("")
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                if let Some(rest) = without_comment.strip_prefix("nameserver") {
+                    if let Some(ip) = rest.split_whitespace().next() {
+                        let clean_ip = ip.trim();
+                        if !clean_ip.is_empty()
+                            && !snap.dns_servers.iter().any(|d| d == clean_ip)
+                        {
+                            snap.dns_servers.push(clean_ip.to_string());
+                        }
+                    }
+                }
+            }
+            "swaps" => {
+                if trimmed.is_empty() || trimmed.starts_with("Filename") {
+                    continue;
+                }
+                let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+                if tokens.len() >= 5 {
+                    let filename = tokens[0].to_string();
+                    let swap_type = tokens[1].to_string();
+                    let size_kb = tokens[2].parse::<u64>().unwrap_or(0);
+                    let used_kb = tokens[3].parse::<u64>().unwrap_or(0);
+                    let priority = tokens[4].parse::<i32>().unwrap_or(-2);
+                    snap.swaps.push(SwapFileItem {
+                        filename,
+                        swap_type,
+                        size_mb: (size_kb + 512) / 1024,
+                        used_mb: (used_kb + 512) / 1024,
+                        priority,
+                    });
+                }
+            }
+            "unit_files" => {
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+                if tokens.len() >= 2 && tokens[0].ends_with(".service") {
+                    let state = tokens[1].to_ascii_lowercase();
+                    let is_enabled = state == "enabled" || state == "enabled-runtime";
+                    unit_enabled_map.insert(tokens[0].to_string(), is_enabled);
+                }
+            }
+            "services" => {
+                let clean = trimmed
+                    .trim_start_matches('●')
+                    .trim_start_matches('*')
+                    .trim();
+                if clean.is_empty() {
+                    continue;
+                }
+                let tokens: Vec<&str> = clean.split_whitespace().collect();
+                if tokens.len() >= 4 && tokens[0].ends_with(".service") {
+                    let unit = tokens[0].to_string();
+                    let load_state = tokens[1].to_string();
+                    let active_state = tokens[2].to_string();
+                    let sub_state = tokens[3].to_string();
+                    if load_state == "not-found" && active_state == "inactive" {
+                        continue;
+                    }
+                    let description = if tokens.len() > 4 {
+                        tokens[4..].join(" ")
+                    } else {
+                        unit.clone()
+                    };
+                    let enabled = unit_enabled_map
+                        .get(&unit)
+                        .copied()
+                        .unwrap_or_else(|| active_state == "active");
+                    if !snap.services.iter().any(|s| s.unit == unit) {
+                        snap.services.push(SystemdServiceItem {
+                            unit,
+                            load_state,
+                            active_state,
+                            sub_state,
+                            description,
+                            enabled,
+                        });
+                    }
+                }
+            }
+            "crontab" => {
+                if trimmed.is_empty() {
+                    pending_cron_comment = None;
+                    continue;
+                }
+                if let Some(paused_rest) = trimmed
+                    .strip_prefix("# [SSHBOX_PAUSED]")
+                    .or_else(|| trimmed.strip_prefix("#[SSHBOX_PAUSED]"))
+                {
+                    if let Some(item) = parse_cron_line_entry(
+                        paused_rest,
+                        true,
+                        pending_cron_comment.take(),
+                        cron_idx,
+                        trimmed,
+                    ) {
+                        cron_idx += 1;
+                        snap.cron_jobs.push(item);
+                    }
+                } else if trimmed.starts_with('#') {
+                    let c = trimmed.trim_start_matches('#').trim();
+                    let c_lower = c.to_ascii_lowercase();
+                    if !c.is_empty()
+                        && !c_lower.starts_with("managed by ssh-box")
+                        && !c_lower.starts_with("edit this file")
+                        && !c_lower.starts_with("m h ")
+                        && !c_lower.starts_with("---")
+                    {
+                        pending_cron_comment = Some(c.to_string());
+                    }
+                } else if let Some(item) = parse_cron_line_entry(
+                    trimmed,
+                    false,
+                    pending_cron_comment.take(),
+                    cron_idx,
+                    trimmed,
+                ) {
+                    cron_idx += 1;
+                    snap.cron_jobs.push(item);
+                } else {
+                    pending_cron_comment = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if snap.swap_total_mb == 0 && !snap.swaps.is_empty() {
+        snap.swap_total_mb = snap.swaps.iter().map(|s| s.size_mb).sum();
+        snap.swap_used_mb = snap.swaps.iter().map(|s| s.used_mb).sum();
+    }
+
+    snap
+}
+
+pub fn render_crontab_content(jobs: &[CronJobItem]) -> String {
+    let mut lines: Vec<String> = vec![
+        "# Managed by SSH-Box System Operations Studio".to_string(),
+    ];
+
+    for job in jobs {
+        let schedule = job.schedule.trim();
+        let command = job
+            .command
+            .trim()
+            .replace('\n', " ")
+            .replace('\r', " ");
+        if schedule.is_empty() || command.is_empty() {
+            continue;
+        }
+        let comment = job
+            .comment
+            .trim()
+            .replace('\n', " ")
+            .replace('\r', " ");
+        if !comment.is_empty() {
+            lines.push(format!("# {comment}"));
+        }
+        if job.paused {
+            lines.push(format!("# [SSHBOX_PAUSED] {schedule} {command}"));
+        } else {
+            lines.push(format!("{schedule} {command}"));
+        }
+    }
+
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+pub fn build_configure_swapfile_script(size_mb: u64) -> String {
+    if size_mb == 0 {
+        r#"swapoff /swapfile 2>/dev/null || true
+rm -f /swapfile
+if [ -f /etc/fstab ]; then
+  grep -vE '^[[:space:]]*/swapfile[[:space:]]' /etc/fstab > /etc/fstab.sshbox.tmp || true
+  mv /etc/fstab.sshbox.tmp /etc/fstab
+fi"#
+        .to_string()
+    } else {
+        let clamped = size_mb.clamp(256, 32768);
+        format!(
+            r#"swapoff /swapfile 2>/dev/null || true
+rm -f /swapfile
+fallocate -l {clamped}M /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count={clamped} status=none
+chmod 600 /swapfile
+mkswap /swapfile >/dev/null
+swapon /swapfile
+if [ -f /etc/fstab ]; then
+  if ! grep -qE '^[[:space:]]*/swapfile[[:space:]]' /etc/fstab 2>/dev/null; then
+    printf '\n/swapfile none swap sw 0 0\n' >> /etc/fstab
+  fi
+else
+  printf '/swapfile none swap sw 0 0\n' > /etc/fstab
+fi"#
+        )
+    }
+}
+
+pub fn build_systemd_action_script(unit: &str, action: &str) -> Result<String, String> {
+    let unit_name = normalize_systemd_unit(unit)?;
+    let act = match action.trim().to_ascii_lowercase().as_str() {
+        "start" => "start",
+        "stop" => "stop",
+        "restart" => "restart",
+        "reload" => "reload",
+        "enable" => "enable",
+        "disable" => "disable",
+        other => return Err(format!("Unsupported systemd action: {other}")),
+    };
+    let unit_q = shell_single_quote(&unit_name);
+    Ok(format!("systemctl {act} {unit_q}"))
+}
+
+pub fn build_systemd_logs_script(unit: &str, lines: Option<u32>) -> Result<String, String> {
+    let unit_name = normalize_systemd_unit(unit)?;
+    let count = lines.unwrap_or(150).clamp(10, 1000);
+    let unit_q = shell_single_quote(&unit_name);
+    Ok(format!(
+        "journalctl -u {unit_q} -n {count} --no-pager -o short-iso 2>&1"
+    ))
+}
+
+pub fn build_save_cron_jobs_script(jobs: &[CronJobItem]) -> String {
+    if jobs.is_empty() {
+        "crontab -r 2>/dev/null || true".to_string()
+    } else {
+        let rendered = render_crontab_content(jobs);
+        format!(
+            r#"cat << 'SSHBOX_CRON_EOF' | crontab -
+{rendered}SSHBOX_CRON_EOF"#
+        )
+    }
+}
+
+pub fn build_update_host_identity_script(
+    hostname: &str,
+    timezone: &str,
+    dns_servers: &[String],
+) -> Result<String, String> {
+    let clean_host = hostname.trim();
+    if clean_host.is_empty()
+        || clean_host.len() > 64
+        || clean_host.starts_with('-')
+        || clean_host.ends_with('-')
+        || clean_host.starts_with('.')
+        || clean_host.ends_with('.')
+        || !clean_host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+    {
+        return Err(format!("Invalid hostname: {hostname}"));
+    }
+
+    let clean_tz = timezone.trim();
+    if clean_tz.is_empty()
+        || clean_tz.len() > 64
+        || clean_tz.contains("..")
+        || !clean_tz
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '/' || c == '_' || c == '-' || c == '+')
+    {
+        return Err(format!("Invalid timezone: {timezone}"));
+    }
+
+    let mut valid_dns: Vec<String> = Vec::new();
+    for srv in dns_servers {
+        let s = srv.trim();
+        if s.is_empty() {
+            continue;
+        }
+        if !s
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || c == '.' || c == ':')
+        {
+            return Err(format!("Invalid DNS resolver IP address: {s}"));
+        }
+        if !valid_dns.iter().any(|d| d == s) {
+            valid_dns.push(s.to_string());
+        }
+    }
+
+    let host_q = shell_single_quote(clean_host);
+    let tz_q = shell_single_quote(clean_tz);
+
+    let dns_step = if valid_dns.is_empty() {
+        String::new()
+    } else {
+        let ns_lines: String = valid_dns
+            .iter()
+            .map(|ip| format!("nameserver {ip}\n"))
+            .collect();
+        format!(
+            r#"
+resolv_extra=""
+if [ -f /etc/resolv.conf ]; then
+  resolv_extra=$(grep -E '^[[:space:]]*(search|domain|options)[[:space:]]+' /etc/resolv.conf 2>/dev/null || true)
+fi
+cat << 'SSHBOX_RESOLV_EOF' > /etc/resolv.conf.sshbox.tmp
+# Managed by SSH-Box System Operations Studio
+{ns_lines}SSHBOX_RESOLV_EOF
+if [ -n "$resolv_extra" ]; then
+  printf '%s\n' "$resolv_extra" >> /etc/resolv.conf.sshbox.tmp
+fi
+chmod 0644 /etc/resolv.conf.sshbox.tmp
+rm -f /etc/resolv.conf 2>/dev/null || true
+mv /etc/resolv.conf.sshbox.tmp /etc/resolv.conf"#
+        )
+    };
+
+    Ok(format!(
+        r#"hostnamectl set-hostname {host_q} 2>/dev/null || hostname {host_q} 2>/dev/null || true
+printf '%s\n' {host_q} > /etc/hostname 2>/dev/null || true
+timedatectl set-timezone {tz_q} 2>/dev/null || (
+  if [ -f "/usr/share/zoneinfo/{clean_tz}" ]; then
+    ln -sf "/usr/share/zoneinfo/{clean_tz}" /etc/localtime
+    printf '%s\n' {tz_q} > /etc/timezone 2>/dev/null || true
+  fi
+){dns_step}"#
+    ))
+}
+
+pub async fn get_system_ops_snapshot(
+    host_id: &str,
+    pool: &SshPool,
+    sudo_password: Option<String>,
+) -> Result<SystemOpsSnapshot, String> {
+    let script = r#"
+echo "---SYS_META---"
+hname=$(hostnamectl --static 2>/dev/null || hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo "localhost")
+echo "HOSTNAME:$hname"
+tz=$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || date +%Z 2>/dev/null || echo "UTC")
+echo "TIMEZONE:$tz"
+ntp_ok=0
+if timedatectl show -p NTPSynchronized --value 2>/dev/null | grep -qi '^yes'; then
+  ntp_ok=1
+elif timedatectl status 2>/dev/null | grep -qi 'synchronized:[[:space:]]*yes'; then
+  ntp_ok=1
+fi
+echo "NTP_SYNC:$ntp_ok"
+uu_ok=0
+if systemctl is-active --quiet unattended-upgrades 2>/dev/null; then
+  uu_ok=1
+elif grep -qE 'Unattended-Upgrade[[:space:]]+"1"' /etc/apt/apt.conf.d/20auto-upgrades 2>/dev/null; then
+  uu_ok=1
+fi
+echo "UNATTENDED_UPGRADES:$uu_ok"
+mem_line=$(free -m 2>/dev/null | awk '
+  /^Mem:/ { rt=$2; ru=$3 }
+  /^Swap:/ { st=$2; su=$3 }
+  END { printf "%d %d %d %d\n", rt+0, ru+0, st+0, su+0 }
+')
+echo "MEM_MB:$mem_line"
+disk_line=$(df -Pm / 2>/dev/null | awk 'NR==2 { printf "%d %d\n", $2+0, $4+0 }')
+echo "DISK_MB:$disk_line"
+echo "---RESOLV_CONF---"
+cat /etc/resolv.conf 2>/dev/null || true
+echo "---SWAPS---"
+cat /proc/swaps 2>/dev/null || true
+echo "---SYSTEMD_UNIT_FILES---"
+systemctl list-unit-files --type=service --no-pager --no-legend 2>/dev/null || true
+echo "---SYSTEMD_SERVICES---"
+systemctl list-units --type=service --all --no-pager --no-legend --plain 2>/dev/null || systemctl list-units --type=service --all --no-pager --no-legend 2>/dev/null || true
+echo "---CRONTAB---"
+crontab -l 2>/dev/null || true
+"#;
+    let raw = run_privileged_script(host_id, pool, sudo_password, script).await?;
+    Ok(parse_system_ops_snapshot(&raw))
+}
+
+pub async fn configure_swapfile(
+    host_id: &str,
+    pool: &SshPool,
+    size_mb: u64,
+    sudo_password: Option<String>,
+) -> Result<SystemOpsSnapshot, String> {
+    let script = build_configure_swapfile_script(size_mb);
+    run_privileged_script(host_id, pool, sudo_password.clone(), &script).await?;
+    get_system_ops_snapshot(host_id, pool, sudo_password).await
+}
+
+pub async fn systemd_action(
+    host_id: &str,
+    pool: &SshPool,
+    unit: String,
+    action: String,
+    sudo_password: Option<String>,
+) -> Result<SystemOpsSnapshot, String> {
+    let script = build_systemd_action_script(&unit, &action)?;
+    run_privileged_script(host_id, pool, sudo_password.clone(), &script).await?;
+    get_system_ops_snapshot(host_id, pool, sudo_password).await
+}
+
+pub async fn systemd_logs(
+    host_id: &str,
+    pool: &SshPool,
+    unit: String,
+    lines: Option<u32>,
+    sudo_password: Option<String>,
+) -> Result<String, String> {
+    let script = build_systemd_logs_script(&unit, lines)?;
+    let raw = run_privileged_script(host_id, pool, sudo_password, &script).await?;
+    Ok(raw.trim().to_string())
+}
+
+pub async fn save_cron_jobs(
+    host_id: &str,
+    pool: &SshPool,
+    jobs: Vec<CronJobItem>,
+    sudo_password: Option<String>,
+) -> Result<SystemOpsSnapshot, String> {
+    let script = build_save_cron_jobs_script(&jobs);
+    run_privileged_script(host_id, pool, sudo_password.clone(), &script).await?;
+    get_system_ops_snapshot(host_id, pool, sudo_password).await
+}
+
+pub async fn update_host_identity(
+    host_id: &str,
+    pool: &SshPool,
+    hostname: String,
+    timezone: String,
+    dns_servers: Vec<String>,
+    sudo_password: Option<String>,
+) -> Result<SystemOpsSnapshot, String> {
+    let script = build_update_host_identity_script(&hostname, &timezone, &dns_servers)?;
+    run_privileged_script(host_id, pool, sudo_password.clone(), &script).await?;
+    get_system_ops_snapshot(host_id, pool, sudo_password).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4016,5 +4720,207 @@ net.ipv4.tcp_congestion_control = bbr
         assert!(apply_script.contains("modprobe tcp_bbr 2>/dev/null || true"));
         assert!(apply_script.contains("/etc/sysctl.d/99-sshbox.conf"));
         assert!(apply_script.contains("sysctl -e -p /etc/sysctl.d/99-sshbox.conf"));
+    }
+
+    #[test]
+    fn parses_system_ops_snapshot_with_swap_systemd_and_crontab() {
+        let raw = r#"
+---SYS_META---
+HOSTNAME:prod-edge-01
+TIMEZONE:Asia/Ho_Chi_Minh
+NTP_SYNC:1
+UNATTENDED_UPGRADES:1
+MEM_MB:4096 1536 2048 512
+DISK_MB:81920 54200
+---RESOLV_CONF---
+# Generated by NetworkManager
+search internal.corp
+nameserver 1.1.1.1
+nameserver 1.0.0.1
+---SWAPS---
+Filename				Type		Size		Used		Priority
+/swapfile                               file            2097148         524288          -2
+---SYSTEMD_UNIT_FILES---
+ssh.service                                enabled         enabled
+nginx.service                              enabled         enabled
+docker.service                             disabled        enabled
+fail2ban.service                           enabled         enabled
+---SYSTEMD_SERVICES---
+  ssh.service loaded active running OpenBSD Secure Shell server
+  nginx.service loaded active running A high performance web server and a reverse proxy server
+  docker.service loaded inactive dead Docker Application Container Engine
+● fail2ban.service loaded failed failed Fail2Ban Service
+---CRONTAB---
+# Managed by SSH-Box System Operations Studio
+SHELL=/bin/sh
+# Nightly Postgres Backup
+0 2 * * * /usr/local/bin/pg_backup.sh >> /var/log/cron.log 2>&1
+# SSL Renew Check
+# [SSHBOX_PAUSED] 30 3 * * 1 certbot renew --quiet
+@reboot /usr/local/bin/boot-notify.sh # Boot Webhook
+"#;
+
+        let snap = parse_system_ops_snapshot(raw);
+        assert_eq!(snap.hostname, "prod-edge-01");
+        assert_eq!(snap.timezone, "Asia/Ho_Chi_Minh");
+        assert!(snap.ntp_synchronized);
+        assert!(snap.unattended_upgrades_enabled);
+        assert_eq!(
+            snap.dns_servers,
+            vec!["1.1.1.1".to_string(), "1.0.0.1".to_string()]
+        );
+        assert_eq!(snap.ram_total_mb, 4096);
+        assert_eq!(snap.ram_used_mb, 1536);
+        assert_eq!(snap.swap_total_mb, 2048);
+        assert_eq!(snap.swap_used_mb, 512);
+        assert_eq!(snap.disk_total_mb, 81920);
+        assert_eq!(snap.disk_free_mb, 54200);
+
+        assert_eq!(snap.swaps.len(), 1);
+        assert_eq!(snap.swaps[0].filename, "/swapfile");
+        assert_eq!(snap.swaps[0].swap_type, "file");
+        assert_eq!(snap.swaps[0].size_mb, 2048);
+        assert_eq!(snap.swaps[0].used_mb, 512);
+        assert_eq!(snap.swaps[0].priority, -2);
+
+        assert_eq!(snap.services.len(), 4);
+        assert_eq!(snap.services[0].unit, "ssh.service");
+        assert_eq!(snap.services[0].active_state, "active");
+        assert_eq!(snap.services[0].sub_state, "running");
+        assert!(snap.services[0].enabled);
+        assert_eq!(
+            snap.services[0].description,
+            "OpenBSD Secure Shell server"
+        );
+
+        assert_eq!(snap.services[2].unit, "docker.service");
+        assert_eq!(snap.services[2].active_state, "inactive");
+        assert_eq!(snap.services[2].sub_state, "dead");
+        assert!(!snap.services[2].enabled);
+
+        assert_eq!(snap.services[3].unit, "fail2ban.service");
+        assert_eq!(snap.services[3].active_state, "failed");
+        assert_eq!(snap.services[3].sub_state, "failed");
+        assert!(snap.services[3].enabled);
+
+        assert_eq!(snap.cron_jobs.len(), 3);
+        assert_eq!(snap.cron_jobs[0].index, 1);
+        assert_eq!(snap.cron_jobs[0].schedule, "0 2 * * *");
+        assert_eq!(
+            snap.cron_jobs[0].command,
+            "/usr/local/bin/pg_backup.sh >> /var/log/cron.log 2>&1"
+        );
+        assert_eq!(snap.cron_jobs[0].comment, "Nightly Postgres Backup");
+        assert!(!snap.cron_jobs[0].paused);
+
+        assert_eq!(snap.cron_jobs[1].index, 2);
+        assert_eq!(snap.cron_jobs[1].schedule, "30 3 * * 1");
+        assert_eq!(snap.cron_jobs[1].command, "certbot renew --quiet");
+        assert_eq!(snap.cron_jobs[1].comment, "SSL Renew Check");
+        assert!(snap.cron_jobs[1].paused);
+
+        assert_eq!(snap.cron_jobs[2].index, 3);
+        assert_eq!(snap.cron_jobs[2].schedule, "@reboot");
+        assert_eq!(snap.cron_jobs[2].command, "/usr/local/bin/boot-notify.sh");
+        assert_eq!(snap.cron_jobs[2].comment, "Boot Webhook");
+        assert!(!snap.cron_jobs[2].paused);
+    }
+
+    #[test]
+    fn renders_crontab_content_and_roundtrips_active_and_paused_jobs() {
+        let jobs = vec![
+            CronJobItem {
+                index: 1,
+                schedule: "*/5 * * * *".to_string(),
+                command: "/usr/local/bin/healthcheck.sh >> /var/log/cron.log 2>&1".to_string(),
+                comment: "Healthcheck Ping".to_string(),
+                paused: false,
+                raw_line: String::new(),
+            },
+            CronJobItem {
+                index: 2,
+                schedule: "0 3 * * 0".to_string(),
+                command: "docker system prune -af".to_string(),
+                comment: "Weekly Docker Prune".to_string(),
+                paused: true,
+                raw_line: String::new(),
+            },
+            CronJobItem {
+                index: 3,
+                schedule: "@reboot".to_string(),
+                command: "/opt/app/start.sh".to_string(),
+                comment: String::new(),
+                paused: false,
+                raw_line: String::new(),
+            },
+        ];
+
+        let rendered = render_crontab_content(&jobs);
+        assert!(rendered.contains("# Healthcheck Ping"));
+        assert!(rendered.contains("*/5 * * * * /usr/local/bin/healthcheck.sh >> /var/log/cron.log 2>&1"));
+        assert!(rendered.contains("# Weekly Docker Prune"));
+        assert!(rendered.contains("# [SSHBOX_PAUSED] 0 3 * * 0 docker system prune -af"));
+        assert!(rendered.contains("@reboot /opt/app/start.sh"));
+
+        let wrapped = format!("---CRONTAB---\n{rendered}");
+        let reparsed = parse_system_ops_snapshot(&wrapped);
+        assert_eq!(reparsed.cron_jobs.len(), 3);
+        assert_eq!(reparsed.cron_jobs[0].schedule, "*/5 * * * *");
+        assert_eq!(
+            reparsed.cron_jobs[0].command,
+            "/usr/local/bin/healthcheck.sh >> /var/log/cron.log 2>&1"
+        );
+        assert_eq!(reparsed.cron_jobs[0].comment, "Healthcheck Ping");
+        assert!(!reparsed.cron_jobs[0].paused);
+
+        assert_eq!(reparsed.cron_jobs[1].schedule, "0 3 * * 0");
+        assert_eq!(reparsed.cron_jobs[1].command, "docker system prune -af");
+        assert_eq!(reparsed.cron_jobs[1].comment, "Weekly Docker Prune");
+        assert!(reparsed.cron_jobs[1].paused);
+
+        assert_eq!(reparsed.cron_jobs[2].schedule, "@reboot");
+        assert_eq!(reparsed.cron_jobs[2].command, "/opt/app/start.sh");
+        assert_eq!(reparsed.cron_jobs[2].comment, "");
+        assert!(!reparsed.cron_jobs[2].paused);
+    }
+
+    #[test]
+    fn builds_swapfile_systemd_and_host_identity_scripts_with_validation() {
+        let alloc_swap = build_configure_swapfile_script(2048);
+        assert!(alloc_swap.contains("swapoff /swapfile 2>/dev/null || true"));
+        assert!(alloc_swap.contains("fallocate -l 2048M /swapfile"));
+        assert!(alloc_swap.contains("chmod 600 /swapfile"));
+        assert!(alloc_swap.contains("mkswap /swapfile"));
+        assert!(alloc_swap.contains("swapon /swapfile"));
+        assert!(alloc_swap.contains("/swapfile none swap sw 0 0"));
+
+        let disable_swap = build_configure_swapfile_script(0);
+        assert!(disable_swap.contains("swapoff /swapfile 2>/dev/null || true"));
+        assert!(disable_swap.contains("rm -f /swapfile"));
+        assert!(disable_swap.contains("/etc/fstab"));
+
+        let restart_nginx = build_systemd_action_script("nginx", "restart").unwrap();
+        assert_eq!(restart_nginx, "systemctl restart 'nginx.service'");
+        assert!(build_systemd_action_script("bad;unit", "restart").is_err());
+        assert!(build_systemd_action_script("nginx.service", "destroy").is_err());
+
+        let logs_cmd = build_systemd_logs_script("ssh.service", Some(150)).unwrap();
+        assert_eq!(
+            logs_cmd,
+            "journalctl -u 'ssh.service' -n 150 --no-pager -o short-iso 2>&1"
+        );
+
+        let id_script = build_update_host_identity_script(
+            "edge-node-01",
+            "Asia/Ho_Chi_Minh",
+            &["1.1.1.1".to_string(), "1.0.0.1".to_string()],
+        )
+        .unwrap();
+        assert!(id_script.contains("hostnamectl set-hostname 'edge-node-01'"));
+        assert!(id_script.contains("timedatectl set-timezone 'Asia/Ho_Chi_Minh'"));
+        assert!(id_script.contains("nameserver 1.1.1.1"));
+        assert!(id_script.contains("nameserver 1.0.0.1"));
+        assert!(build_update_host_identity_script("-badhost", "UTC", &[]).is_err());
+        assert!(build_update_host_identity_script("goodhost", "../etc/passwd", &[]).is_err());
     }
 }

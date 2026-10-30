@@ -25,8 +25,8 @@ use tauri::State;
 use telemetry::{DockerFullSnapshot, ServerMetrics};
 use tokio::sync::mpsc;
 use vps_config::{
-    AccessKeysSnapshot, Fail2banSnapshot, FirewallSnapshot, KernelSysctlSnapshot,
-    KernelSysctlUpdate, SshdConfigSnapshot, SshdConfigUpdate, VpsPrivilegeInfo,
+    AccessKeysSnapshot, CronJobItem, Fail2banSnapshot, FirewallSnapshot, KernelSysctlSnapshot,
+    KernelSysctlUpdate, SshdConfigSnapshot, SshdConfigUpdate, SystemOpsSnapshot, VpsPrivilegeInfo,
 };
 
 pub struct AppState {
@@ -1105,6 +1105,77 @@ async fn vps_apply_kernel_tuning(
     vps_config::apply_kernel_tuning(&host_id, &state.ssh_pool, update, sudo_password).await
 }
 
+#[tauri::command]
+async fn vps_get_system_ops_snapshot(
+    state: State<'_, AppState>,
+    host_id: String,
+    sudo_password: Option<String>,
+) -> Result<SystemOpsSnapshot, String> {
+    vps_config::get_system_ops_snapshot(&host_id, &state.ssh_pool, sudo_password).await
+}
+
+#[tauri::command]
+async fn vps_configure_swapfile(
+    state: State<'_, AppState>,
+    host_id: String,
+    size_mb: u64,
+    sudo_password: Option<String>,
+) -> Result<SystemOpsSnapshot, String> {
+    vps_config::configure_swapfile(&host_id, &state.ssh_pool, size_mb, sudo_password).await
+}
+
+#[tauri::command]
+async fn vps_systemd_action(
+    state: State<'_, AppState>,
+    host_id: String,
+    unit: String,
+    action: String,
+    sudo_password: Option<String>,
+) -> Result<SystemOpsSnapshot, String> {
+    vps_config::systemd_action(&host_id, &state.ssh_pool, unit, action, sudo_password).await
+}
+
+#[tauri::command]
+async fn vps_systemd_logs(
+    state: State<'_, AppState>,
+    host_id: String,
+    unit: String,
+    lines: Option<u32>,
+    sudo_password: Option<String>,
+) -> Result<String, String> {
+    vps_config::systemd_logs(&host_id, &state.ssh_pool, unit, lines, sudo_password).await
+}
+
+#[tauri::command]
+async fn vps_save_cron_jobs(
+    state: State<'_, AppState>,
+    host_id: String,
+    jobs: Vec<CronJobItem>,
+    sudo_password: Option<String>,
+) -> Result<SystemOpsSnapshot, String> {
+    vps_config::save_cron_jobs(&host_id, &state.ssh_pool, jobs, sudo_password).await
+}
+
+#[tauri::command]
+async fn vps_update_host_identity(
+    state: State<'_, AppState>,
+    host_id: String,
+    hostname: String,
+    timezone: String,
+    dns_servers: Vec<String>,
+    sudo_password: Option<String>,
+) -> Result<SystemOpsSnapshot, String> {
+    vps_config::update_host_identity(
+        &host_id,
+        &state.ssh_pool,
+        hostname,
+        timezone,
+        dns_servers,
+        sudo_password,
+    )
+    .await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1191,6 +1262,12 @@ pub fn run() {
             vps_update_linux_user_privilege,
             vps_get_kernel_snapshot,
             vps_apply_kernel_tuning,
+            vps_get_system_ops_snapshot,
+            vps_configure_swapfile,
+            vps_systemd_action,
+            vps_systemd_logs,
+            vps_save_cron_jobs,
+            vps_update_host_identity,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

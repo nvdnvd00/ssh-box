@@ -31,6 +31,7 @@ import { FirewallStudio } from "./vps/FirewallStudio";
 import { Fail2banStudio } from "./vps/Fail2banStudio";
 import { AccessKeysStudio } from "./vps/AccessKeysStudio";
 import { KernelTuningStudio } from "./vps/KernelTuningStudio";
+import { SystemOpsStudio } from "./vps/SystemOpsStudio";
 
 interface VpsConfigWorkspaceProps {
   hosts: HostEntry[];
@@ -481,21 +482,15 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
           />
         )}
 
-        {activeStudio !== "ssh" &&
-          activeStudio !== "firewall" &&
-          activeStudio !== "fail2ban" &&
-          activeStudio !== "access" &&
-          activeStudio !== "kernel" && (
-          <div className="rounded-2xl border border-border/80 bg-card/75 p-8 text-center space-y-2 max-w-xl mx-auto my-8">
-            <div className="text-sm font-bold text-foreground">
-              {studioTabs.find((s) => s.id === activeStudio)?.label}
-            </div>
-            <p className="text-xs text-muted-foreground">
-              {isVi
-                ? "Phân hệ chuyên sâu này sẽ được kích hoạt trong phiên tiếp theo."
-                : "This specialized studio module will be activated in the next session."}
-            </p>
-          </div>
+        {activeStudio === "system" && (
+          <SystemOpsStudio
+            key={`${selectedHost.id}-${refreshNonce}`}
+            host={selectedHost}
+            sudoPassword={currentSudoPassword}
+            privilegeInfo={currentPrivilege}
+            language={lang}
+            onRequireSudoUnlock={() => setSudoPopoverOpen(true)}
+          />
         )}
       </div>
     </div>

@@ -5,6 +5,9 @@
 //!   limactl start --name=u24 --vm-type=vz --network=vzNAT --plain template://ubuntu-24.04
 //!   (also template://debian-13 and template://rocky-9; ufw / firewalld + semanage may need installing)
 //! MX_DISTRO=macos runs the macOS scenarios M1,M2,M4,M5,M6 (VM user needs passwordless sudo).
+//! MX_DISTRO=windows runs W1-W12: MX_USER is an Administrator (key in administrators_authorized_keys),
+//! `sshbox-std` a standard account accepting the same key; W8-W11 (sshd writes) run only when
+//! WINDOWS_SSH_WRITE_VERIFIED is true; W7 reboots the VM (Restart-Computer).
 //! Run (MX_DISTRO = ubuntu | debian | rocky; MX_ONLY=S1,S5 runs a subset):
 //!   MX_VM=u24 MX_IP=<lima0 address> MX_USER=$USER MX_KEY=$HOME/.lima/_config/user MX_DISTRO=ubuntu \
 //!   env -u SSH_AUTH_SOCK cargo test --manifest-path src-tauri/Cargo.toml --test vps_matrix -- --ignored --nocapture
@@ -12,8 +15,9 @@
 use ssh_box_lib::host_store::{upsert_custom_host, HostEntry};
 use ssh_box_lib::ssh_pool::{AuthUsed, SshPool};
 use ssh_box_lib::vps_config::*;
-use ssh_box_lib::vps_support::{OsFamily, SupportLevel};
-use std::time::Duration;
+use ssh_box_lib::vps_support::{OsFamily, SupportLevel, WINDOWS_SSH_WRITE_VERIFIED};
+use ssh_box_lib::vps_windows::run_windows_script;
+use std::time::{Duration, Instant};
 
 fn env(k: &str) -> String {
     std::env::var(k).unwrap_or_else(|_| panic!("{k} not set"))
@@ -352,6 +356,349 @@ fn run_macos(only: &str) {
     });
 }
 
+// ---- Windows scenarios (MX_DISTRO=windows) ----
+
+// Bounded like the app's helper: this sshd.exe can hang on -T.
+const WIN_SSHD_T: &str = r#"$psi = New-Object Diagnostics.ProcessStartInfo "$env:WINDIR\System32\OpenSSH\sshd.exe", '-T'
+$psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true
+$p = [Diagnostics.Process]::Start($psi); $o = $p.StandardOutput.ReadToEndAsync()
+if ($p.WaitForExit(15000)) { $o.Result } else { $p.Kill(); 'SSHD_T_TIMEOUT' }
+"#;
+const WIN_LEFTOVERS: &str = r#"if (Get-ScheduledTask -TaskName sshbox-rollback -ErrorAction SilentlyContinue) { 'TASK' }
+Get-ChildItem C:\ProgramData\ssh -Filter 'sshbox-rollback.ps1' | ForEach-Object Name
+Get-ChildItem C:\ProgramData\ssh -Filter 'sshd_config.sshbox*' | ForEach-Object Name
+"#;
+const WIN_INBOX_RULE: &str = "OpenSSH SSH Server (sshd)";
+
+// PowerShell on the VM through the app's own runner and pooled session.
+async fn ps(pool: &SshPool, h: &HostEntry, script: &str) -> String {
+    run_windows_script(&h.id, pool, script, None).await.map(|o| o.trim().to_string()).unwrap_or_else(|e| format!("PS ERROR: {e}"))
+}
+
+// `sshd -T` lines for the given keys (`a|b`), joined with "; ".
+async fn win_effective(pool: &SshPool, h: &HostEntry, keys: &str) -> String {
+    let out = ps(pool, h, WIN_SSHD_T).await;
+    let hits: Vec<&str> = out.lines().map(str::trim).filter(|l| keys.split('|').any(|k| l.starts_with(&format!("{k} ")))).collect();
+    if hits.is_empty() { out } else { hits.join("; ") }
+}
+
+async fn win_leftovers(pool: &SshPool, h: &HostEntry) -> String {
+    ps(pool, h, WIN_LEFTOVERS).await.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+async fn win_config(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    use base64::Engine;
+    let b64 = ps(pool, h, r"[Convert]::ToBase64String([IO.File]::ReadAllBytes('C:\ProgramData\ssh\sshd_config'))").await;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64.trim()).map_err(|e| format!("sshd_config read: {e}: {b64}"))?;
+    String::from_utf8(bytes).map_err(|e| e.to_string())
+}
+
+async fn ssh_works(h: &HostEntry, after: &str) -> Result<(), String> {
+    SshPool::default().test_exec(h, "exit 0").await.map(|_| ()).map_err(|e| format!("new SSH login after {after}: {e}"))
+}
+
+async fn wait_port(h: &HostEntry, up: bool, secs: u64) -> Result<(), String> {
+    let addr = format!("{}:{}", h.hostname, h.port).parse().unwrap();
+    let t = Instant::now();
+    while t.elapsed().as_secs() < secs {
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_ok() == up {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    Err(format!("port {} not {} after {secs}s", h.port, if up { "up" } else { "down" }))
+}
+
+// Right after boot sshd accepts logins before PowerShell runs: ready means a PowerShell command answered.
+async fn win_ready_pool(h: &HostEntry) -> Result<SshPool, String> {
+    let mut last = String::new();
+    for _ in 0..18 {
+        let pool = SshPool::default();
+        match pool.get_or_connect(h, None).await {
+            Ok(_) if ps(&pool, h, "'READY'").await == "READY" => return Ok(pool),
+            Ok(_) => last = "PowerShell not answering yet".into(),
+            Err(e) => last = e,
+        }
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+    Err(format!("VM not ready after reboot: {last}"))
+}
+
+fn vm_key_body() -> Result<String, String> {
+    let pubkey = std::fs::read_to_string(format!("{}.pub", env("MX_KEY"))).map_err(|e| e.to_string())?;
+    pubkey.split_whitespace().nth(1).map(str::to_string).ok_or("bad pub key".into())
+}
+
+async fn w1_probe(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let p = probe(&h.id, pool, None).await?;
+    ensure(p.os_family == OsFamily::Windows && p.os_id == "Windows" && p.os_version.contains("11"), format!("os {:?} {} '{}'", p.os_family, p.os_id, p.os_version))?;
+    ensure(p.privilege == PrivilegeLevel::Admin, format!("privilege {:?}", p.privilege))?;
+    ensure(p.firewall_engine == FirewallEngine::Windows, format!("firewall engine {:?}", p.firewall_engine))?;
+    let s = &p.support;
+    let want = if WINDOWS_SSH_WRITE_VERIFIED { (SupportLevel::Full, None) } else { (SupportLevel::ReadOnly, Some("windows_ssh_read_only")) };
+    ensure((s.ssh.level, s.ssh.reason.as_deref()) == want, format!("ssh {:?}", s.ssh))?;
+    ensure(s.ssh_rows.port && !s.ssh_rows.permit_root_login && !s.ssh_rows.allow_deny_users && s.password_coupled, format!("rows {:?} coupled {}", s.ssh_rows, s.password_coupled))?;
+    ensure(s.firewall.level == SupportLevel::Full, format!("firewall {:?}", s.firewall))?;
+    ensure(s.access.level == SupportLevel::ReadOnly && s.access.reason.as_deref() == Some("read_only_os"), format!("access {:?}", s.access))?;
+    Ok(format!("{} '{}' OpenSSH {} user '{}' Admin; ssh {:?}; rows root/users hidden, port shown; coupled; firewall Full; access ReadOnly read_only_os",
+        p.os_id, p.os_version, p.openssh_version, p.context.login_user, s.ssh))
+}
+
+async fn w2_standard_account(pool: &SshPool, std_host: &HostEntry) -> Result<String, String> {
+    pool.get_or_connect(std_host, None).await?;
+    let p = probe(&std_host.id, pool, None).await?;
+    ensure(p.privilege == PrivilegeLevel::None, format!("privilege {:?}", p.privilege))?;
+    for (name, t) in [("ssh", &p.support.ssh), ("firewall", &p.support.firewall), ("access", &p.support.access)] {
+        ensure(t.level == SupportLevel::ReadOnly && t.reason.as_deref() == Some("windows_not_admin"), format!("{name} {t:?}"))?;
+    }
+    let v = get_sshd_view(&std_host.id, pool, None).await;
+    ensure(matches!(&v, Err(e) if e.starts_with("UNSUPPORTED: windows_not_admin")), format!("sshd view: {:?}", v.map(|v| v.settings.port)))?;
+    ensure(p.os_version.contains("11 "), format!("os_version '{}'", p.os_version))?;
+    Ok(format!("'{}' None; ssh/firewall/access ReadOnly windows_not_admin; sshd view refused; os '{}'", p.context.login_user, p.os_version))
+}
+
+async fn w3_sshd_view(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let v = get_sshd_view(&h.id, pool, None).await?;
+    ensure(v.write_target == WriteTarget::MainFile && !v.rollback_pending && v.settings.port == 22, format!("target {:?} pending {} port {}", v.write_target, v.rollback_pending, v.settings.port))?;
+    ensure(v.main_raw.contains("Match Group administrators") && v.main_raw.contains("Match User sshbox-std"), "main_raw lacks the Match blocks".into())?;
+    let st = &v.settings;
+    Ok(format!("MainFile, no pending rollback, port {} maxauthtries {} password {} kbd {} pubkey {}", st.port, st.max_auth_tries, st.password_authentication, st.kbd_interactive_authentication, st.pubkey_authentication))
+}
+
+async fn w4_users_keys(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let t = Instant::now();
+    let snap = get_access_keys_snapshot(&h.id, pool, None).await?;
+    let secs = t.elapsed().as_secs_f32();
+    let find = |n: &str| snap.accounts.iter().find(|a| a.username == n).ok_or(format!("{n} missing"));
+    let me = find(&h.user)?;
+    ensure(me.has_sudo && me.keys_file == r"C:\ProgramData\ssh\administrators_authorized_keys", format!("{} sudo {} file {}", me.username, me.has_sudo, me.keys_file))?;
+    let body = vm_key_body()?;
+    ensure(me.authorized_keys.iter().any(|k| k.public_key_body == body), "vm key not listed".into())?;
+    let std_acc = find("sshbox-std")?;
+    ensure(!std_acc.has_sudo && !std_acc.locked, format!("sshbox-std sudo {} locked {}", std_acc.has_sudo, std_acc.locked))?;
+    for b in ["Administrator", "Guest"] {
+        ensure(find(b)?.locked, format!("{b} not shown disabled"))?;
+    }
+    ensure(secs < 20.0, format!("took {secs:.1}s"))?;
+    Ok(format!("{} accounts in {secs:.1}s; '{}' admin, key from {}; sshbox-std standard ({}); Administrator/Guest disabled",
+        snap.accounts.len(), me.username, me.keys_file, std_acc.keys_file))
+}
+
+async fn w5_firewall_read(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let t = Instant::now();
+    let snap = get_firewall_snapshot(&h.id, pool, None).await?;
+    let secs = t.elapsed().as_secs_f32();
+    ensure(snap.engine == "windows" && snap.enabled, format!("engine {} enabled {}", snap.engine, snap.enabled))?;
+    let inbox: Vec<_> = snap.rules.iter().filter(|r| r.raw_spec == WIN_INBOX_RULE).collect();
+    let shown: Vec<_> = inbox.iter().map(|r| format!("{}/{} {} from {} group '{}' effective {}", r.to_port, r.protocol, r.action, r.from_source, r.comment, r.effective)).collect();
+    ensure(!inbox.is_empty() && inbox.iter().all(|r| r.effective), format!("inbox rule: {shown:?}"))?;
+    let s22: Vec<_> = snap.listening_sockets.iter().filter(|s| s.port == 22 && s.protocol == "tcp" && s.is_public).map(|s| format!("{} {} {}", s.bind_addr, s.process_name, s.exposure)).collect();
+    ensure(!s22.is_empty() && s22.iter().all(|e| e.ends_with(" exposed")), format!("port 22: {s22:?}"))?;
+    ensure(secs < 10.0, format!("took {secs:.1}s"))?;
+    Ok(format!("{} rules, {} sockets in {secs:.1}s; {shown:?}; port 22 {s22:?}", snap.rules.len(), snap.listening_sockets.len()))
+}
+
+async fn w6_firewall_writes(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let snap = add_firewall_rule(&h.id, pool, None, "allow".into(), "10.0.0.0/8".into(), "8080".into(), "tcp".into()).await?;
+    let mine: Vec<_> = snap.rules.iter().filter(|r| r.to_port == "8080" && r.from_source == "10.0.0.0/8").cloned().collect();
+    ensure(mine.len() == 1 && mine[0].comment == "ssh-box" && mine[0].action == "ALLOW", format!("added: {mine:?}"))?;
+    let snap = delete_firewall_rule(&h.id, pool, None, mine[0].clone()).await?;
+    ensure(!snap.rules.iter().any(|r| r.raw_spec == mine[0].raw_spec), "rule still listed after delete".into())?;
+    let inbox = snap.rules.iter().find(|r| r.raw_spec == WIN_INBOX_RULE).cloned().ok_or("inbox rule missing")?;
+    let del = delete_firewall_rule(&h.id, pool, None, inbox).await;
+    ensure(del == Err("UNSUPPORTED: windows_rule_not_managed".into()), format!("delete inbox: {del:?}"))?;
+    let deny = add_firewall_rule(&h.id, pool, None, "deny".into(), "any".into(), "22".into(), "tcp".into()).await;
+    let deny_e = deny.err().unwrap_or_else(|| "Ok(snapshot)".into());
+    ensure(deny_e.starts_with("LOCKOUT_BLOCKED"), format!("deny 22 from anywhere: {deny_e}"))?;
+    let noport = add_firewall_rule(&h.id, pool, None, "allow".into(), "any".into(), "".into(), "tcp".into()).await;
+    ensure(noport == Err("UNSUPPORTED: windows_port_required".into()), format!("no port: {noport:?}"))?;
+    let left = ps(pool, h, "Get-NetFirewallRule -Group 'ssh-box' -ErrorAction SilentlyContinue | ForEach-Object DisplayName").await;
+    ensure(!left.contains("8080") && !left.contains("DENY"), format!("ssh-box rules left: {left}"))?;
+    Ok(format!("added+deleted '{}'; inbox delete -> windows_rule_not_managed; deny 22 -> {deny_e}; no port -> windows_port_required", mine[0].raw_spec))
+}
+
+async fn w7_firewall_toggle_reboot(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let off = set_firewall_state(&h.id, pool, None, false).await?;
+    ensure(!off.enabled, "still enabled after disable".into())?;
+    ssh_works(h, "disable").await?;
+    let on = set_firewall_state(&h.id, pool, None, true).await?;
+    ensure(on.enabled, "not enabled after enable".into())?;
+    ssh_works(h, "enable").await?;
+    let auto: Vec<String> = on.rules.iter().filter(|r| r.comment == "ssh-box" && !r.v6).map(|r| r.raw_spec.clone()).collect();
+    // A rule the app adds must survive the reboot as well.
+    let snap = add_firewall_rule(&h.id, pool, None, "allow".into(), "10.0.0.0/8".into(), "8081".into(), "tcp".into()).await?;
+    let managed = |s: &FirewallSnapshot| s.rules.iter().filter(|r| r.comment == "ssh-box").map(|r| r.raw_spec.clone()).collect::<std::collections::BTreeSet<_>>();
+    let before = managed(&snap);
+    let t = Instant::now();
+    let _ = tokio::time::timeout(Duration::from_secs(60), ps(pool, h, "Restart-Computer -Force")).await;
+    wait_port(h, false, 180).await?;
+    wait_port(h, true, 300).await?;
+    let fresh = win_ready_pool(h).await?;
+    let up = t.elapsed().as_secs();
+    let snap = get_firewall_snapshot(&h.id, &fresh, None).await?;
+    ensure(snap.enabled, "firewall off after reboot".into())?;
+    let after = managed(&snap);
+    ensure(before == after, format!("ssh-box rules before {before:?} after {after:?}"))?;
+    ensure(snap.rules.iter().any(|r| r.raw_spec == WIN_INBOX_RULE), "inbox rule gone after reboot".into())?;
+    ssh_works(h, "reboot").await?;
+    let probe_rule = snap.rules.iter().find(|r| r.to_port == "8081").cloned().ok_or("8081 rule missing")?;
+    delete_firewall_rule(&h.id, &fresh, None, probe_rule).await?;
+    Ok(format!("off/on with SSH after each; enable auto-added {auto:?}; PowerShell answering {up}s after Restart-Computer; on after reboot, ssh-box rules kept {after:?}"))
+}
+
+async fn win_apply_finish(pool: &SshPool, h: &HostEntry, desired: SshdSettings) -> Result<SshdView, String> {
+    let s = apply_sshd_settings(&h.id, pool, None, desired).await?;
+    let armed = win_leftovers(pool, h).await;
+    ensure(armed.contains("TASK"), format!("rollback not armed after apply: '{armed}'"))?;
+    finish_sshd_apply(&h.id, pool, None, s.new_port).await
+}
+
+async fn w8_max_auth_tries(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let before = win_config(pool, h).await?;
+    let view = get_sshd_view(&h.id, pool, None).await?;
+    let orig = view.settings.max_auth_tries;
+    let want = if orig > 3 { orig - 1 } else { orig + 1 };
+    let kept = win_apply_finish(pool, h, SshdSettings { max_auth_tries: want, ..view.settings.clone() }).await?;
+    ensure(kept.settings.max_auth_tries == want, format!("view maxauthtries {}", kept.settings.max_auth_tries))?;
+    let t = win_effective(pool, h, "maxauthtries").await;
+    ensure(t == format!("maxauthtries {want}"), format!("sshd -T: {t}"))?;
+    let left = win_leftovers(pool, h).await;
+    ensure(left.is_empty(), format!("rollback leftovers: {left}"))?;
+    let after = win_config(pool, h).await?;
+    ensure(!after.replace("\r\n", "").contains('\n'), "bare LF in sshd_config".into())?;
+    let (b, a): (Vec<&str>, Vec<&str>) = (before.split("\r\n").collect(), after.split("\r\n").collect());
+    let directive = format!("MaxAuthTries {want}");
+    let at = a.iter().position(|l| *l == directive).ok_or("directive missing")?;
+    let first_match = a.iter().position(|l| l.starts_with("Match ")).ok_or("no Match line")?;
+    ensure(at < first_match, format!("directive at line {at}, first Match at {first_match}"))?;
+    let mut rest = a.iter();
+    ensure(b.iter().all(|l| rest.any(|x| x == l)), "original lines lost or reordered".into())?;
+    let blank = |v: &[&str]| v.iter().filter(|l| l.trim().is_empty()).count();
+    let (added, added_blank) = (a.len() - b.len(), blank(&a) - blank(&b));
+    ensure(added - added_blank <= 2 && added_blank <= 2, format!("{added} lines added, {added_blank} blank"))?;
+    win_apply_finish(pool, h, SshdSettings { max_auth_tries: orig, ..kept.settings }).await?;
+    let back = win_effective(pool, h, "maxauthtries").await;
+    ensure(back == format!("maxauthtries {orig}"), format!("set back: {back}"))?;
+    Ok(format!("{orig}->{want} kept (sshd -T '{t}'), no task/script/markers, CRLF kept, +{added} lines ({added_blank} blank), directive line {at} < Match line {first_match}; set back to {orig}"))
+}
+
+async fn w9_password_off_on(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let view = get_sshd_view(&h.id, pool, None).await?;
+    let off = SshdSettings { password_authentication: false, kbd_interactive_authentication: false, ..view.settings };
+    let kept = win_apply_finish(pool, h, off).await?;
+    let t = win_effective(pool, h, "passwordauthentication|kbdinteractiveauthentication").await;
+    ensure(t.contains("passwordauthentication no") && t.contains("kbdinteractiveauthentication no"), format!("sshd -T: {t}"))?;
+    let m_off = offered_methods();
+    ensure(m_off == "publickey", format!("methods off: {m_off}"))?;
+    let on = SshdSettings { password_authentication: true, kbd_interactive_authentication: true, ..kept.settings };
+    win_apply_finish(pool, h, on).await?;
+    let m_on = offered_methods();
+    ensure(m_on.contains("password") && m_on.contains("keyboard-interactive"), format!("methods on: {m_on}"))?;
+    let left = win_leftovers(pool, h).await;
+    ensure(left.is_empty(), format!("rollback leftovers: {left}"))?;
+    Ok(format!("off: '{t}', methods '{m_off}'; on: methods '{m_on}'"))
+}
+
+async fn w10_apply_then_disconnect(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let view = get_sshd_view(&h.id, pool, None).await?;
+    let off = SshdSettings { password_authentication: false, kbd_interactive_authentication: false, ..view.settings };
+    apply_sshd_settings(&h.id, pool, None, off).await?;
+    let armed = win_leftovers(pool, h).await;
+    ensure(armed.contains("TASK"), format!("rollback not armed: '{armed}'"))?;
+    let m_mid = offered_methods();
+    ensure(m_mid == "publickey", format!("methods right after apply: {m_mid}"))?;
+    tokio::time::sleep(Duration::from_secs(75)).await;
+    let fresh = SshPool::default();
+    fresh.get_or_connect(h, None).await.map_err(|e| format!("key login after timeout: {e}"))?;
+    let m_after = offered_methods();
+    ensure(m_after.contains("password") && m_after.contains("keyboard-interactive"), format!("methods after rollback: {m_after}"))?;
+    let t = win_effective(&fresh, h, "passwordauthentication|kbdinteractiveauthentication").await;
+    ensure(t.contains("passwordauthentication yes") && t.contains("kbdinteractiveauthentication yes"), format!("sshd -T: {t}"))?;
+    let left = win_leftovers(&fresh, h).await;
+    ensure(left.is_empty(), format!("rollback leftovers: {left}"))?;
+    Ok(format!("armed ({armed}); mid '{m_mid}' -> after 75s '{m_after}'; key login ok; no task/script/markers"))
+}
+
+async fn w11_blocked_port(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    // Block beats the app's own allow for the new port, so only the new-connection check can catch it.
+    ps(pool, h, "New-NetFirewallRule -DisplayName 'mx-block-2222' -Direction Inbound -Action Block -Protocol TCP -LocalPort 2222 | Out-Null").await;
+    let view = get_sshd_view(&h.id, pool, None).await?;
+    let result = match apply_sshd_settings(&h.id, pool, None, SshdSettings { port: 2222, ..view.settings }).await {
+        Err(e) => Err(format!("apply failed before verify: {e}")),
+        Ok(s) => match finish_sshd_apply(&h.id, pool, None, s.new_port).await {
+            Ok(_) => Err("verify passed through a blocked port".into()),
+            Err(e) if e.starts_with("VERIFY_FAILED") => Ok(e),
+            Err(e) => Err(format!("unexpected: {e}")),
+        },
+    };
+    ps(pool, h, "Get-NetFirewallRule -DisplayName 'mx-block-2222' | Remove-NetFirewallRule").await;
+    let err = result?;
+    let port = win_effective(pool, h, "port").await;
+    ensure(port == "port 22", format!("after rollback sshd -T: {port}"))?;
+    let rules = ps(pool, h, "Get-NetFirewallRule -Group 'ssh-box' -ErrorAction SilentlyContinue | ForEach-Object DisplayName").await;
+    ensure(!rules.contains("2222"), format!("2222 rule left: {rules}"))?;
+    let left = win_leftovers(pool, h).await;
+    ensure(left.is_empty(), format!("rollback leftovers: {left}"))?;
+    ssh_works(h, "rollback").await?;
+    Ok(format!("rolled back ({}), port 22 reachable, no 2222 rule", err.chars().take(70).collect::<String>()))
+}
+
+async fn w12_powershell_default_shell(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    ps(pool, h, r"New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -Value 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -PropertyType String -Force | Out-Null").await;
+    let fresh = SshPool::default();
+    let r = async {
+        let shell = fresh.exec_on_host(h, "$PSVersionTable.PSVersion.Major").await?;
+        ensure(shell.trim().parse::<u32>().is_ok(), format!("default shell is not PowerShell: '{}'", shell.trim()))?;
+        Ok::<_, String>(format!("PS {} as DefaultShell | {} | {}", shell.trim(), w1_probe(&fresh, h).await?, w3_sshd_view(&fresh, h).await?))
+    }
+    .await;
+    let unset = ps(pool, h, r"Remove-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell; 'UNSET'").await;
+    ensure(unset.ends_with("UNSET"), format!("DefaultShell not removed: {unset}"))?;
+    r
+}
+
+fn run_windows(only: &str) {
+    let h = host("mx-main", &env("MX_USER"), Some(env("MX_KEY")), 22);
+    let std_host = host("mx-std", "sshbox-std", Some(env("MX_KEY")), 22);
+    upsert_custom_host(h.clone()).unwrap();
+    upsert_custom_host(std_host.clone()).unwrap();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let pool = SshPool::default();
+        pool.get_or_connect(&h, None).await.expect("connect to VM");
+        let mut failed = 0;
+        macro_rules! run {
+            ($name:expr, $f:expr) => {
+                let id = $name.split(' ').next().unwrap();
+                if only.is_empty() || only.split(',').any(|s| s == id) {
+                    let t = Instant::now();
+                    let r = $f.await;
+                    println!("{} {} ({}s): {:?}", if r.is_ok() { "PASS" } else { "FAIL" }, $name, t.elapsed().as_secs(), r);
+                    failed += r.is_err() as u32;
+                }
+            };
+        }
+        run!("W1 probe as admin", w1_probe(&pool, &h));
+        run!("W2 probe as standard account", w2_standard_account(&pool, &std_host));
+        run!("W3 sshd view as admin", w3_sshd_view(&pool, &h));
+        run!("W4 users & keys read-only", w4_users_keys(&pool, &h));
+        run!("W5 firewall read", w5_firewall_read(&pool, &h));
+        run!("W6 firewall writes", w6_firewall_writes(&pool, &h));
+        run!("W7 firewall off/on + reboot", w7_firewall_toggle_reboot(&pool, &h));
+        // W7 reboots the VM: start over with a fresh session.
+        let pool = win_ready_pool(&h).await.expect("reconnect");
+        if WINDOWS_SSH_WRITE_VERIFIED {
+            run!("W8 MaxAuthTries change kept", w8_max_auth_tries(&pool, &h));
+            run!("W9 password off/on (coupled)", w9_password_off_on(&pool, &h));
+            run!("W10 apply then disconnect -> rollback", w10_apply_then_disconnect(&pool, &h));
+            run!("W11 blocked port -> rollback", w11_blocked_port(&pool, &h));
+        } else {
+            println!("SKIP W8-W11: WINDOWS_SSH_WRITE_VERIFIED is false");
+        }
+        run!("W12 PowerShell DefaultShell", w12_powershell_default_shell(&pool, &h));
+        assert_eq!(failed, 0);
+    });
+}
+
 #[test]
 #[ignore]
 fn matrix() {
@@ -364,6 +711,9 @@ fn matrix() {
     let only = std::env::var("MX_ONLY").unwrap_or_default();
     if distro == "macos" {
         return run_macos(&only);
+    }
+    if distro == "windows" {
+        return run_windows(&only);
     }
     let mut h = host("mx-main", &env("MX_USER"), Some(env("MX_KEY")), 22);
     upsert_custom_host(h.clone()).unwrap();

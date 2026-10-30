@@ -384,7 +384,8 @@ const VI_STRINGS: AppI18nStrings = {
     no_ssh_connection: "Không đọc được thông tin kết nối SSH ($SSH_CONNECTION) trên máy chủ.",
     no_systemd: "Máy chủ không dùng systemd nên chỉ xem được, không sửa được.",
     firewall_read_only: "Firewall này chỉ xem được. Cài ufw để sửa rule.",
-    windows_firewall_read_only: "Trên Windows, firewall hiện chỉ xem được.",
+    windows_port_required: "Trên Windows cần nhập cổng cụ thể cho rule.",
+    windows_action_unsupported: "Windows Firewall không hỗ trợ hành động này.",
     set_in_main_file:
       "Port, AllowUsers hoặc DenyUsers đang được đặt trong /etc/ssh/sshd_config. Hãy xoá dòng đó trong file chính rồi thử lại, nếu không giá trị cũ vẫn còn hiệu lực.",
     multiple_ports: "SSH đang nghe trên nhiều cổng. Hãy để lại một cổng trước khi đổi cổng từ đây.",
@@ -644,7 +645,8 @@ const EN_STRINGS: AppI18nStrings = {
     no_ssh_connection: "Could not read the SSH connection details ($SSH_CONNECTION) on the server.",
     no_systemd: "This server does not use systemd, so settings are read only.",
     firewall_read_only: "This firewall is read only. Install ufw to edit rules.",
-    windows_firewall_read_only: "On Windows, the firewall is read only for now.",
+    windows_port_required: "On Windows, a rule needs a specific port.",
+    windows_action_unsupported: "Windows Firewall does not support this action.",
     set_in_main_file:
       "Port, AllowUsers or DenyUsers is set in /etc/ssh/sshd_config. Remove that line from the main file and try again, or the old value stays in effect.",
     multiple_ports: "SSH listens on more than one port. Keep a single port before changing it here.",

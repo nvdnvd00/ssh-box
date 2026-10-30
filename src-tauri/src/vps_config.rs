@@ -981,11 +981,12 @@ pub async fn set_firewall_state(
     let probe = probe(host_id, pool, sudo_password.clone()).await?;
     writable_engine(probe.firewall_engine)?;
     let current = get_firewall_snapshot(host_id, pool, sudo_password.clone()).await?;
-    let ensure = crate::vps_guard::ssh_allow_needed(&probe.context, &current.rules).then_some(probe.context.server_port);
     if probe.firewall_engine == FirewallEngine::Windows {
+        let ensure = crate::vps_windows::windows_ensure_port(&probe.context, &current.rules);
         let script = crate::vps_windows::build_windows_firewall_state_script(enable, ensure);
         return crate::vps_windows::run_windows_firewall_write(host_id, pool, &script).await;
     }
+    let ensure = crate::vps_guard::ssh_allow_needed(&probe.context, &current.rules).then_some(probe.context.server_port);
     let script = build_set_firewall_state_script(probe.firewall_engine, enable, ensure)?;
     run_firewall_write(host_id, pool, sudo_password, probe.firewall_engine, &script).await
 }

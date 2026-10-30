@@ -387,6 +387,9 @@ fn new_rule_cmd(action: &str, source: &str, port: &str, name_proto: &str, proto:
 
 pub fn build_windows_add_rule_script(action: &str, source: &str, port: &str, proto: &str) -> Result<String, String> {
     let a = crate::vps_config::validate_rule_args(action, source, port, proto)?;
+    if a.port == "any" {
+        return Err(vps_err(ERR_UNSUPPORTED, "windows_port_required"));
+    }
     let act = match a.action {
         "allow" => "allow",
         "deny" | "reject" => "deny",
@@ -403,13 +406,19 @@ pub fn build_windows_delete_rule_script(rule: &FirewallRuleItem) -> Result<Strin
         return Err(vps_err(ERR_UNSUPPORTED, "windows_rule_not_managed"));
     }
     Ok(format!(
-        "$r = @(Get-NetFirewallRule -Group {} -DisplayName {} -ErrorAction SilentlyContinue)\nif ($r.Count -eq 0) {{ throw 'rule not found' }}\n$r | Remove-NetFirewallRule\n",
+        "$r = @(Get-NetFirewallRule -Group {} -ErrorAction Stop | Where-Object {{ $_.DisplayName -ceq {} }})\nif ($r.Count -eq 0) {{ throw 'rule not found' }}\n$r | Remove-NetFirewallRule\n",
         ps_quote(WINDOWS_RULE_GROUP),
         ps_quote(&rule.raw_spec)
     ))
 }
 
 // Enabling first creates the SSH allow, otherwise the profile switch can cut the current session.
+// Only rules that really apply count; an ineffective allow would suppress the auto-allow and enabling would lock us out.
+pub fn windows_ensure_port(ctx: &ConnectionContext, rules: &[FirewallRuleItem]) -> Option<u16> {
+    let effective: Vec<FirewallRuleItem> = rules.iter().filter(|r| r.effective).cloned().collect();
+    crate::vps_guard::ssh_allow_needed(ctx, &effective).then_some(ctx.server_port)
+}
+
 pub fn build_windows_firewall_state_script(enable: bool, ensure_port: Option<u16>) -> String {
     let mut s = String::new();
     if let (true, Some(p)) = (enable, ensure_port) {
@@ -752,7 +761,8 @@ mod tests {
     fn windows_delete_refuses_unmanaged_rule() {
         assert_eq!(build_windows_delete_rule_script(&win_rule("")), Err("UNSUPPORTED: windows_rule_not_managed".to_string()));
         let s = build_windows_delete_rule_script(&win_rule("ssh-box")).unwrap();
-        assert!(s.contains("throw") && s.contains("-Group 'ssh-box'"));
+        assert!(s.contains("throw") && s.contains("-Group 'ssh-box'") && s.contains("-ceq 'ssh-box: ALLOW 22/tcp from any'"));
+        assert!(!s.contains("-DisplayName"), "DisplayName parameter set is wildcard and cannot mix with -Group");
     }
 
     // Bật firewall mà chưa có rule allow SSH sẽ tự cắt kết nối; rule phải có trước lệnh bật.
@@ -773,5 +783,24 @@ mod tests {
             crate::vps_guard::check_firewall_add(&ctx, "deny", "Anywhere", "22"),
             Err("LOCKOUT_BLOCKED: closes_ssh_for_everyone".to_string())
         );
+    }
+
+    // Rule without a port is invisible to the read script, so it could open every port unseen; Windows must demand a port.
+    #[test]
+    fn windows_add_requires_a_port() {
+        for port in ["", "any"] {
+            assert_eq!(build_windows_add_rule_script("allow", "any", port, "tcp"), Err("UNSUPPORTED: windows_port_required".to_string()));
+        }
+    }
+
+    // An allow that does not apply (other profile) must not suppress the auto-allow, or enabling cuts SSH.
+    #[test]
+    fn windows_enable_ignores_ineffective_ssh_allow() {
+        let ctx = parse_windows_probe(&raw("1", "admin", CONN), key_auth()).unwrap().context;
+        let mut r = win_rule("");
+        r.effective = false;
+        assert_eq!(windows_ensure_port(&ctx, &[r.clone()]), Some(22));
+        r.effective = true;
+        assert_eq!(windows_ensure_port(&ctx, &[r]), None);
     }
 }

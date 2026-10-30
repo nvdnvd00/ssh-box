@@ -101,7 +101,7 @@ fn compute_support_with(p: &VpsProbe, windows_ssh_write: bool) -> VpsSupport {
                 (_, false) => tab(ReadOnly, Some("windows_not_admin")),
                 _ => tab(Full, None),
             },
-            access: tab(ReadOnly, Some("read_only_os")),
+            access: if p.privilege == PrivilegeLevel::Admin { tab(ReadOnly, Some("read_only_os")) } else { tab(ReadOnly, Some("windows_not_admin")) },
             // Windows sshd keeps offering keyboard-interactive when only PasswordAuthentication is off.
             password_coupled: true,
         },
@@ -192,6 +192,16 @@ mod tests {
         assert_eq!(why(&p), "windows_no_sshd");
         p.caps.sshd_running = true;
         assert_eq!(why(&p), "windows_ssh_read_only");
+        assert_eq!(compute_support(&p).access, tab(SupportLevel::ReadOnly, Some("read_only_os")));
+    }
+
+    // Spec §4: a non-admin Windows login names the same reason on every tab; admin keys are unreadable to it.
+    #[test]
+    fn windows_non_admin_access_names_not_admin() {
+        let mut p = linux(true, "ufw");
+        p.os_family = OsFamily::Windows;
+        assert_eq!(compute_support(&p).access, tab(SupportLevel::ReadOnly, Some("windows_not_admin")));
+        p.privilege = PrivilegeLevel::Admin;
         assert_eq!(compute_support(&p).access, tab(SupportLevel::ReadOnly, Some("read_only_os")));
     }
 

@@ -78,7 +78,7 @@ pub fn compute_support(p: &VpsProbe) -> VpsSupport {
             ssh: if p.caps.sshd_dropin { tab(Full, None) } else { tab(ReadOnly, Some("macos_no_dropin")) },
             ssh_rows: SshRows { port: false, ..all_rows },
             firewall: tab(Hidden, None),
-            access: tab(Hidden, None),
+            access: tab(ReadOnly, Some("read_only_os")),
             password_coupled: true,
         },
         // Later tasks open these tab by tab.
@@ -118,6 +118,14 @@ mod tests {
     use super::*;
     use crate::ssh_pool::AuthUsed;
     use crate::vps_config::parse_probe_output;
+
+    // macOS Users & Keys is view-only, with the reason the UI shows as a notice.
+    #[test]
+    fn macos_support_access_read_only() {
+        let mut p = linux(true, "none");
+        p.os_family = OsFamily::Macos;
+        assert_eq!(compute_support(&p).access, tab(SupportLevel::ReadOnly, Some("read_only_os")));
+    }
 
     fn linux(systemd: bool, fw: &str) -> VpsProbe {
         let raw = format!(

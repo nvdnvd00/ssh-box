@@ -1942,8 +1942,15 @@ pub fn parse_access_keys_snapshot(raw: &str) -> AccessKeysSnapshot {
         .find_map(|l| l.trim().strip_prefix("TODAY:"))
         .and_then(|v| v.trim().parse().ok());
 
+    // macOS regular users start at 501; Linux scripts omit the line and keep 1000.
+    let min_uid: u32 = raw
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("MIN_UID:"))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(1000);
+
     let push_if_eligible = |acc: LinuxAccountItem, out: &mut Vec<LinuxAccountItem>| {
-        if !acc.username.is_empty() && (acc.uid == 0 || (acc.uid >= 1000 && acc.uid < 65534)) {
+        if !acc.username.is_empty() && (acc.uid == 0 || (acc.uid >= min_uid && acc.uid < 65534)) {
             out.push(acc);
         }
     };
@@ -2111,7 +2118,9 @@ pub async fn get_access_keys_snapshot(
     pool: &SshPool,
     sudo_password: Option<String>,
 ) -> Result<AccessKeysSnapshot, String> {
-    let raw = run_privileged_script(host_id, pool, sudo_password, ACCOUNTS_READ_SCRIPT, None).await?;
+    let os = probe(host_id, pool, sudo_password.clone()).await?.os_family;
+    let script = if os == OsFamily::Macos { crate::vps_macos::MACOS_ACCOUNTS_READ_SCRIPT } else { ACCOUNTS_READ_SCRIPT };
+    let raw = run_privileged_script(host_id, pool, sudo_password, script, None).await?;
     Ok(parse_access_keys_snapshot(&raw))
 }
 
@@ -2250,6 +2259,21 @@ pub fn build_revoke_key_script(username: &str, key_body: &str) -> Result<String,
     )
 }
 
+// Users & Keys can only be edited on Linux; macOS/Windows are read-only.
+fn check_access_writable(os: OsFamily) -> Result<(), String> {
+    if os == OsFamily::Linux {
+        Ok(())
+    } else {
+        Err(vps_err(ERR_UNSUPPORTED, "read_only_os"))
+    }
+}
+
+async fn require_linux(host_id: &str, pool: &SshPool, sudo_password: Option<String>) -> Result<VpsProbe, String> {
+    let p = probe(host_id, pool, sudo_password).await?;
+    check_access_writable(p.os_family)?;
+    Ok(p)
+}
+
 async fn run_access_write(
     host_id: &str,
     pool: &SshPool,
@@ -2270,6 +2294,7 @@ pub async fn create_linux_user(
     sudo: SudoMode,
     password: Option<String>,
 ) -> Result<AccessKeysSnapshot, String> {
+    require_linux(host_id, pool, sudo_password.clone()).await?;
     validate_user_password(&username, password.as_deref(), &sudo)?;
     let script = build_create_user_script(&username, sudo)?;
     let secret = password.filter(|_| sudo == SudoMode::WithPassword).map(|p| format!("{}:{p}\n", username.trim()));
@@ -2283,8 +2308,8 @@ pub async fn set_user_lock(
     username: String,
     lock: bool,
 ) -> Result<AccessKeysSnapshot, String> {
+    let probe = require_linux(host_id, pool, sudo_password.clone()).await?;
     if lock {
-        let probe = probe(host_id, pool, sudo_password.clone()).await?;
         let current = get_access_keys_snapshot(host_id, pool, sudo_password.clone()).await?;
         crate::vps_guard::check_user_change(&probe.context, &current.accounts, &username, crate::vps_guard::UserChange::Lock)?;
     }
@@ -2300,9 +2325,9 @@ pub async fn set_user_sudo(
     sudo: SudoMode,
     password: Option<String>,
 ) -> Result<AccessKeysSnapshot, String> {
+    let probe = require_linux(host_id, pool, sudo_password.clone()).await?;
     validate_user_password(&username, password.as_deref(), &sudo)?;
     if sudo == SudoMode::None {
-        let probe = probe(host_id, pool, sudo_password.clone()).await?;
         let current = get_access_keys_snapshot(host_id, pool, sudo_password.clone()).await?;
         crate::vps_guard::check_user_change(&probe.context, &current.accounts, &username, crate::vps_guard::UserChange::RemoveSudo)?;
     }
@@ -2318,6 +2343,7 @@ pub async fn authorize_ssh_key(
     username: String,
     key_line: String,
 ) -> Result<AccessKeysSnapshot, String> {
+    require_linux(host_id, pool, sudo_password.clone()).await?;
     let line = key_line
         .lines()
         .map(str::trim)
@@ -2335,7 +2361,7 @@ pub async fn revoke_ssh_key(
     username: String,
     key_body: String,
 ) -> Result<AccessKeysSnapshot, String> {
-    let probe = probe(host_id, pool, sudo_password.clone()).await?;
+    let probe = require_linux(host_id, pool, sudo_password.clone()).await?;
     crate::vps_guard::check_key_revoke(&probe.context, &username, &key_body)?;
     let script = build_revoke_key_script(&username, &key_body)?;
     run_access_write(host_id, pool, sudo_password, &script, None).await
@@ -3036,6 +3062,45 @@ SSH_CONNECTION:203.0.113.7 51000 198.51.100.2 2222\nSYSTEMD:1\nSSH_SOCKET:active
     fn probe_rejects_unknown_unix() {
         let raw = PROBE_UBUNTU.replace("UNAME:Linux", "UNAME:FreeBSD");
         assert!(parse_probe_output(&raw, key_auth()).unwrap_err().starts_with("UNSUPPORTED: unsupported_os"));
+    }
+
+    // macOS users have UID 501+; the parser must keep them, treat the admin group as sudo, and still drop _service accounts.
+    #[test]
+    fn macos_accounts_parse_admin_as_sudo() {
+        let raw = "MIN_UID:501\n---SUDOERS---\n%admin ALL = (ALL) ALL\nroot ALL = (ALL) ALL\n\
+---ACCOUNT---\nPASSWD:me:*:501:20::/Users/me:/bin/zsh\nGROUPS:staff admin\nSHADOW:\n---AUTHORIZED_KEYS---\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHkeyone me@mac\n\
+---ACCOUNT---\nPASSWD:guest:*:502:20::/Users/guest:/bin/zsh\nGROUPS:staff\nSHADOW:\n---AUTHORIZED_KEYS---\n\
+---ACCOUNT---\nPASSWD:_spotlight:*:89:89::/var/empty:/usr/bin/false\nGROUPS:\nSHADOW:\n---AUTHORIZED_KEYS---\n";
+        let s = parse_access_keys_snapshot(raw);
+        let by = |n: &str| s.accounts.iter().find(|a| a.username == n).unwrap();
+        assert!(by("me").has_sudo && !by("guest").has_sudo);
+        assert_eq!(by("me").authorized_keys.len(), 1);
+        assert!(s.accounts.iter().all(|a| a.username != "_spotlight"));
+    }
+
+    // Without MIN_UID (Linux) a UID 501 system-range account must stay hidden.
+    #[test]
+    fn linux_snapshot_still_hides_uid_501() {
+        let raw = "---SUDOERS---\n---ACCOUNT---\nPASSWD:svc:x:501:501::/home/svc:/bin/sh\nGROUPS:svc\nSHADOW:\n---AUTHORIZED_KEYS---\n";
+        assert!(parse_access_keys_snapshot(raw).accounts.is_empty());
+    }
+
+    // Writes would corrupt a macOS/Windows host; every non-Linux OS must be refused with the code the UI translates.
+    #[test]
+    fn macos_access_writes_are_refused() {
+        for os in [OsFamily::Macos, OsFamily::Windows] {
+            assert_eq!(check_access_writable(os).unwrap_err(), "UNSUPPORTED: read_only_os");
+        }
+        assert!(check_access_writable(OsFamily::Linux).is_ok());
+    }
+
+    // The script is what feeds the shared parser; it must emit the agreed sections and skip service accounts.
+    #[test]
+    fn macos_accounts_script_emits_parser_sections() {
+        let s = crate::vps_macos::MACOS_ACCOUNTS_READ_SCRIPT;
+        for m in ["MIN_UID:501", "---SUDOERS---", "---ACCOUNT---", "PASSWD:", "GROUPS:", "SHADOW:", "---AUTHORIZED_KEYS---", "dscl", "_*)"] {
+            assert!(s.contains(m), "{m}");
+        }
     }
 
     const PROBE_MAC: &str = "UNAME:Darwin\nUSER:me\nUID:501\nSUDO:none\nSSH_CONNECTION:203.0.113.7 51000 198.51.100.2 22\nSYSTEMD:0\nFW:none\nMAC_VERSION:15.1\n---SSHD_MAIN---\n";

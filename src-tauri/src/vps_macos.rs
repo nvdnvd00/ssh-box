@@ -52,3 +52,22 @@ echo "ROLLBACK_AT:$(( $(date +%s) + 60 ))"
         rollback = build_sshd_rollback_script_macos(file, plist_path),
     )
 }
+
+// Same sections as the Linux ACCOUNTS_READ_SCRIPT so parse_access_keys_snapshot is reused; macOS has no shadow file.
+pub const MACOS_ACCOUNTS_READ_SCRIPT: &str = r#"echo "TODAY:$(( $(date +%s) / 86400 ))"
+echo "MIN_UID:501"
+echo "---SUDOERS---"
+grep -vhE '^[[:space:]]*(#|$)' /etc/sudoers /etc/sudoers.d/* 2>/dev/null || true
+dscl . -list /Users UniqueID 2>/dev/null | while read -r usr uid; do
+  case "$usr" in _*) continue ;; esac
+  [ "$usr" = root ] || [ "$uid" -ge 501 ] 2>/dev/null || continue
+  dsget() { dscl . -read "/Users/$usr" "$1" 2>/dev/null | sed -n "s/^$1: //p"; }
+  home=$(dsget NFSHomeDirectory)
+  echo "---ACCOUNT---"
+  echo "PASSWD:$usr:*:$uid:$(dsget PrimaryGroupID)::$home:$(dsget UserShell)"
+  echo "GROUPS:$(id -Gn "$usr" 2>/dev/null | tr '\n' ' ')"
+  echo "SHADOW:"
+  echo "---AUTHORIZED_KEYS---"
+  if [ -n "$home" ] && [ -f "$home/.ssh/authorized_keys" ]; then cat "$home/.ssh/authorized_keys" 2>/dev/null || true; fi
+done
+"#;

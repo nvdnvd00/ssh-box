@@ -27,6 +27,7 @@ import {
 import { AppSettingsConfig } from "../themes";
 import { SelectField } from "./SelectField";
 import { SshHardeningStudio } from "./vps/SshHardeningStudio";
+import { FirewallStudio } from "./vps/FirewallStudio";
 
 interface VpsConfigWorkspaceProps {
   hosts: HostEntry[];
@@ -431,7 +432,18 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
           />
         )}
 
-        {activeStudio !== "ssh" && (
+        {activeStudio === "firewall" && (
+          <FirewallStudio
+            key={`${selectedHost.id}-${refreshNonce}`}
+            host={selectedHost}
+            sudoPassword={currentSudoPassword}
+            privilegeInfo={currentPrivilege}
+            language={lang}
+            onRequireSudoUnlock={() => setSudoPopoverOpen(true)}
+          />
+        )}
+
+        {activeStudio !== "ssh" && activeStudio !== "firewall" && (
           <div className="rounded-2xl border border-border/80 bg-card/75 p-8 text-center space-y-2 max-w-xl mx-auto my-8">
             <div className="text-sm font-bold text-foreground">
               {studioTabs.find((s) => s.id === activeStudio)?.label}

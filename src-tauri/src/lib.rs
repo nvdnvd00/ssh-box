@@ -24,7 +24,9 @@ use tauri::ipc::Channel;
 use tauri::State;
 use telemetry::{DockerFullSnapshot, ServerMetrics};
 use tokio::sync::mpsc;
-use vps_config::{SshdConfigSnapshot, SshdConfigUpdate, VpsPrivilegeInfo};
+use vps_config::{
+    FirewallSnapshot, SshdConfigSnapshot, SshdConfigUpdate, VpsPrivilegeInfo,
+};
 
 pub struct AppState {
     pub local_pty: LocalPtyManager,
@@ -873,6 +875,77 @@ async fn vps_revert_sshd_config(
     vps_config::revert_sshd_config(&host_id, &state.ssh_pool, sudo_password).await
 }
 
+#[tauri::command]
+async fn vps_get_firewall_snapshot(
+    state: State<'_, AppState>,
+    host_id: String,
+    sudo_password: Option<String>,
+) -> Result<FirewallSnapshot, String> {
+    vps_config::get_firewall_snapshot(&host_id, &state.ssh_pool, sudo_password).await
+}
+
+#[tauri::command]
+async fn vps_add_firewall_rule(
+    state: State<'_, AppState>,
+    host_id: String,
+    action: String,
+    port_spec: String,
+    protocol: String,
+    source_ip: String,
+    comment: String,
+    sudo_password: Option<String>,
+) -> Result<FirewallSnapshot, String> {
+    vps_config::add_firewall_rule(
+        &host_id,
+        &state.ssh_pool,
+        action,
+        port_spec,
+        protocol,
+        source_ip,
+        comment,
+        sudo_password,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn vps_delete_firewall_rule(
+    state: State<'_, AppState>,
+    host_id: String,
+    rule_index: u32,
+    raw_spec: String,
+    sudo_password: Option<String>,
+) -> Result<FirewallSnapshot, String> {
+    vps_config::delete_firewall_rule(
+        &host_id,
+        &state.ssh_pool,
+        rule_index,
+        raw_spec,
+        sudo_password,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn vps_set_firewall_state(
+    state: State<'_, AppState>,
+    host_id: String,
+    enabled: bool,
+    default_incoming: String,
+    ssh_port: u16,
+    sudo_password: Option<String>,
+) -> Result<FirewallSnapshot, String> {
+    vps_config::set_firewall_state(
+        &host_id,
+        &state.ssh_pool,
+        enabled,
+        default_incoming,
+        ssh_port,
+        sudo_password,
+    )
+    .await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -944,6 +1017,10 @@ pub fn run() {
             vps_apply_sshd_config,
             vps_confirm_sshd_config,
             vps_revert_sshd_config,
+            vps_get_firewall_snapshot,
+            vps_add_firewall_rule,
+            vps_delete_firewall_rule,
+            vps_set_firewall_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

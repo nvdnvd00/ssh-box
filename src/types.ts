@@ -208,6 +208,38 @@ export interface SshdConfigUpdate {
   addressFamily: string;
 }
 
+export interface ListeningSocketItem {
+  protocol: string;
+  bindAddr: string;
+  port: number;
+  isPublic: boolean;
+  processName: string;
+  pid?: number | null;
+  exposure: string;
+}
+
+export interface FirewallRuleItem {
+  index: number;
+  toPort: string;
+  protocol: string;
+  action: string;
+  fromSource: string;
+  v6: boolean;
+  comment: string;
+  rawSpec: string;
+}
+
+export interface FirewallSnapshot {
+  engine: string;
+  enabled: boolean;
+  defaultIncoming: string;
+  defaultOutgoing: string;
+  detectedClientIp: string;
+  sshPort: number;
+  rules: FirewallRuleItem[];
+  listeningSockets: ListeningSocketItem[];
+}
+
 export interface KnownHostEntry {
   id: string;
   hostPattern: string;

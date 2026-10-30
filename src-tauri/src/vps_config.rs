@@ -127,8 +127,7 @@ pub struct FirewallSnapshot {
     pub enabled: bool,
     pub default_incoming: String,
     pub default_outgoing: String,
-    pub detected_client_ip: String,
-    pub ssh_port: u16,
+    pub ipv6_filtered: bool,
     pub rules: Vec<FirewallRuleItem>,
     pub listening_sockets: Vec<ListeningSocketItem>,
 }
@@ -140,8 +139,7 @@ impl Default for FirewallSnapshot {
             enabled: false,
             default_incoming: "deny".to_string(),
             default_outgoing: "allow".to_string(),
-            detected_client_ip: String::new(),
-            ssh_port: 22,
+            ipv6_filtered: true,
             rules: Vec::new(),
             listening_sockets: Vec::new(),
         }
@@ -231,10 +229,12 @@ pub(crate) fn is_anywhere_source(src: &str) -> bool {
     s.is_empty() || s == "anywhere" || s == "any" || s == "0.0.0.0/0" || s == "::/0" || s == "*"
 }
 
+// Rules are evaluated top-down per address family; the first rule matching a source decides.
 pub fn compute_socket_exposure(
     socket: &ListeningSocketItem,
     firewall_enabled: bool,
     default_incoming: &str,
+    ipv6_filtered: bool,
     rules: &[FirewallRuleItem],
 ) -> String {
     if !socket.is_public {
@@ -243,41 +243,42 @@ pub fn compute_socket_exposure(
     if !firewall_enabled {
         return "exposed".to_string();
     }
-
-    let matching: Vec<&FirewallRuleItem> = rules
-        .iter()
-        .filter(|r| rule_port_matches(&r.to_port, &r.protocol, socket.port, &socket.protocol))
-        .collect();
-
-    let mut has_anywhere_allow = false;
-    let mut has_restricted_allow = false;
-    let mut has_deny = false;
-
-    for r in &matching {
-        let act = r.action.to_ascii_uppercase();
-        if act == "ALLOW" || act == "LIMIT" {
-            if is_anywhere_source(&r.from_source) {
-                has_anywhere_allow = true;
-            } else {
-                has_restricted_allow = true;
-            }
-        } else if act == "DENY" || act == "REJECT" {
-            has_deny = true;
+    let bind = socket.bind_addr.trim_matches(|c| c == '[' || c == ']');
+    // "::" and "*" are dual-stack on Linux; a specific IPv6 address is IPv6 only.
+    let families: &[bool] = match bind {
+        "*" | "::" => &[false, true],
+        b if b.contains(':') => &[true],
+        _ => &[false],
+    };
+    let default_blocks = matches!(default_incoming.to_ascii_lowercase().as_str(), "deny" | "reject" | "drop");
+    let family = |v6: bool| -> u8 {
+        if v6 && !ipv6_filtered {
+            return 2;
         }
+        let mut restricted = false;
+        for r in rules.iter().filter(|r| {
+            r.v6 == v6 && rule_port_matches(&r.to_port, &r.protocol, socket.port, &socket.protocol)
+        }) {
+            let allow = matches!(r.action.to_ascii_uppercase().as_str(), "ALLOW" | "LIMIT" | "ACCEPT");
+            match (is_anywhere_source(&r.from_source), allow) {
+                (true, true) => return 2,
+                (true, false) => return u8::from(restricted),
+                (false, true) => restricted = true,
+                (false, false) => {}
+            }
+        }
+        if !default_blocks {
+            2
+        } else {
+            u8::from(restricted)
+        }
+    };
+    match families.iter().map(|v6| family(*v6)).max().unwrap_or(2) {
+        2 => "exposed",
+        1 => "restricted",
+        _ => "blocked",
     }
-
-    if has_anywhere_allow {
-        "exposed".to_string()
-    } else if has_restricted_allow {
-        "restricted".to_string()
-    } else if has_deny
-        || default_incoming.eq_ignore_ascii_case("deny")
-        || default_incoming.eq_ignore_ascii_case("reject")
-    {
-        "blocked".to_string()
-    } else {
-        "exposed".to_string()
-    }
+    .to_string()
 }
 
 fn parse_ufw_numbered_line(line: &str) -> Option<FirewallRuleItem> {
@@ -594,14 +595,8 @@ pub fn parse_firewall_snapshot(raw: &str) -> FirewallSnapshot {
                     if !d.is_empty() {
                         snap.default_outgoing = d;
                     }
-                } else if let Some(v) = trimmed.strip_prefix("CLIENT_IP:") {
-                    snap.detected_client_ip = v.trim().to_string();
-                } else if let Some(v) = trimmed.strip_prefix("SSH_PORT:") {
-                    if let Ok(p) = v.trim().parse::<u16>() {
-                        if p > 0 {
-                            snap.ssh_port = p;
-                        }
-                    }
+                } else if let Some(v) = trimmed.strip_prefix("IPV6:") {
+                    snap.ipv6_filtered = parse_yes_no(v, true);
                 }
             }
             "ufw" => {
@@ -636,6 +631,7 @@ pub fn parse_firewall_snapshot(raw: &str) -> FirewallSnapshot {
                             &sock,
                             snap.enabled,
                             &snap.default_incoming,
+                            snap.ipv6_filtered,
                             &snap.rules,
                         );
                         snap.listening_sockets.push(sock);
@@ -647,10 +643,57 @@ pub fn parse_firewall_snapshot(raw: &str) -> FirewallSnapshot {
     }
 
     for sock in &mut snap.listening_sockets {
-        sock.exposure =
-            compute_socket_exposure(sock, snap.enabled, &snap.default_incoming, &snap.rules);
+        sock.exposure = compute_socket_exposure(
+            sock,
+            snap.enabled,
+            &snap.default_incoming,
+            snap.ipv6_filtered,
+            &snap.rules,
+        );
     }
 
+    snap
+}
+
+// Read-only snapshot script for the engine the probe found.
+fn firewall_read_script(engine: FirewallEngine) -> String {
+    let meta = match engine {
+        FirewallEngine::Ufw => r#"v=$(ufw status verbose 2>/dev/null || true)
+if printf '%s\n' "$v" | grep -qi '^Status:[[:space:]]*active'; then echo ENABLED:1; else echo ENABLED:0; fi
+if printf '%s\n' "$v" | grep -qi 'allow (incoming)'; then echo DEFAULT_INCOMING:allow; else echo DEFAULT_INCOMING:deny; fi
+if grep -q '^IPV6=yes' /etc/default/ufw 2>/dev/null; then echo IPV6:1; else echo IPV6:0; fi
+echo ---UFW---
+ufw status numbered 2>/dev/null || true"#,
+        FirewallEngine::Firewalld => r#"if firewall-cmd --state >/dev/null 2>&1; then echo ENABLED:1; else echo ENABLED:0; fi
+echo DEFAULT_INCOMING:deny
+echo IPV6:1
+echo ---FIREWALLD---
+firewall-cmd --list-all 2>/dev/null || firewall-offline-cmd --list-all 2>/dev/null || true"#,
+        FirewallEngine::Iptables => r#"if iptables -S INPUT 2>/dev/null | grep -qE -- '-P INPUT (DROP|REJECT)|^-A INPUT'; then echo ENABLED:1; else echo ENABLED:0; fi
+if iptables -S INPUT 2>/dev/null | grep -qE -- '-P INPUT (DROP|REJECT)'; then echo DEFAULT_INCOMING:deny; else echo DEFAULT_INCOMING:allow; fi
+if ip6tables -S INPUT 2>/dev/null | grep -qE -- '-P INPUT (DROP|REJECT)|^-A INPUT'; then echo IPV6:1; else echo IPV6:0; fi
+echo ---IPTABLES---
+iptables -S INPUT 2>/dev/null || true"#,
+        FirewallEngine::None => "echo ENABLED:0\necho DEFAULT_INCOMING:allow\necho IPV6:0",
+    };
+    format!(
+        "echo ---META---\n{meta}\necho ---SOCKETS---\nss -tulpnH 2>/dev/null || ss -tulpn 2>/dev/null || true\n"
+    )
+}
+
+fn engine_name(engine: FirewallEngine) -> &'static str {
+    match engine {
+        FirewallEngine::Ufw => "ufw",
+        FirewallEngine::Firewalld => "firewalld",
+        FirewallEngine::Iptables => "iptables",
+        FirewallEngine::None => "none",
+    }
+}
+
+fn snapshot_after(raw: &str, engine: FirewallEngine) -> FirewallSnapshot {
+    let body = raw.rsplit("SSHBOX_SNAPSHOT_BEGIN").next().unwrap_or(raw);
+    let mut snap = parse_firewall_snapshot(body);
+    snap.engine = engine_name(engine).to_string();
     snap
 }
 
@@ -659,330 +702,196 @@ pub async fn get_firewall_snapshot(
     pool: &SshPool,
     sudo_password: Option<String>,
 ) -> Result<FirewallSnapshot, String> {
-    let script = r#"
-engine="none"
-enabled=0
-def_in="allow"
-def_out="allow"
-if command -v ufw >/dev/null 2>&1; then
-  engine="ufw"
-  ufw_verbose=$(ufw status verbose 2>/dev/null || true)
-  if printf '%s\n' "$ufw_verbose" | grep -qi '^Status:[[:space:]]*active'; then
-    enabled=1
-  fi
-  if printf '%s\n' "$ufw_verbose" | grep -qi 'deny (incoming)'; then
-    def_in="deny"
-  elif printf '%s\n' "$ufw_verbose" | grep -qi 'reject (incoming)'; then
-    def_in="reject"
-  elif printf '%s\n' "$ufw_verbose" | grep -qi 'allow (incoming)'; then
-    def_in="allow"
-  elif [ -f /etc/default/ufw ]; then
-    if grep -qi '^DEFAULT_INPUT_POLICY="DROP"' /etc/default/ufw 2>/dev/null; then
-      def_in="deny"
-    elif grep -qi '^DEFAULT_INPUT_POLICY="REJECT"' /etc/default/ufw 2>/dev/null; then
-      def_in="reject"
-    fi
-  fi
-  if printf '%s\n' "$ufw_verbose" | grep -qi 'deny (outgoing)'; then
-    def_out="deny"
-  fi
-elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-  engine="firewalld"
-  enabled=1
-  def_in="deny"
-elif command -v iptables >/dev/null 2>&1; then
-  engine="iptables"
-  ipt_pol=$(iptables -S INPUT 2>/dev/null | head -n 1 || true)
-  if printf '%s\n' "$ipt_pol" | grep -q -- '-P INPUT DROP'; then
-    enabled=1
-    def_in="deny"
-  elif printf '%s\n' "$ipt_pol" | grep -q -- '-P INPUT REJECT'; then
-    enabled=1
-    def_in="reject"
-  else
-    rcount=$(iptables -S INPUT 2>/dev/null | grep -c '^-A INPUT' || true)
-    if [ "${rcount:-0}" -gt 0 ] 2>/dev/null; then
-      enabled=1
-    fi
-  fi
-fi
-ssh_p=$(grep -iE '^[[:space:]]*Port[[:space:]]+[0-9]+' /etc/ssh/sshd_config 2>/dev/null | head -n 1 | awk '{print $2}')
-[ -z "$ssh_p" ] && ssh_p=22
-cip=$(echo "${SSH_CLIENT%% *}")
-[ -z "$cip" ] && cip=$(echo "${SSH_CONNECTION%% *}")
-if [ -z "$cip" ] && command -v ss >/dev/null 2>&1; then
-  cip=$(ss -tnH state established "( sport = :$ssh_p or sport = :22 )" 2>/dev/null | awk 'NR==1 {print $4}' | sed 's/^\[//;s/\]:[0-9]*$//;s/:[0-9]*$//')
-fi
-echo "---META---"
-echo "ENGINE:$engine"
-echo "ENABLED:$enabled"
-echo "DEFAULT_INCOMING:$def_in"
-echo "DEFAULT_OUTGOING:$def_out"
-echo "CLIENT_IP:$cip"
-echo "SSH_PORT:$ssh_p"
-echo "---UFW---"
-if [ "$engine" = "ufw" ]; then
-  ufw status numbered 2>/dev/null || true
-fi
-echo "---IPTABLES---"
-if [ "$engine" != "ufw" ] && command -v iptables >/dev/null 2>&1; then
-  iptables -S INPUT 2>/dev/null || true
-fi
-echo "---SOCKETS---"
-if command -v ss >/dev/null 2>&1; then
-  ss -tulpnH 2>/dev/null || ss -tulpn 2>/dev/null || true
-elif command -v netstat >/dev/null 2>&1; then
-  netstat -tulpn 2>/dev/null || true
-fi
-"#;
-    let raw = run_privileged_script(host_id, pool, sudo_password, script, None).await?;
-    Ok(parse_firewall_snapshot(&raw))
+    let probe = probe(host_id, pool, sudo_password.clone()).await?;
+    let raw = run_privileged_script(host_id, pool, sudo_password, &firewall_read_script(probe.firewall_engine), None).await?;
+    Ok(snapshot_after(&raw, probe.firewall_engine))
 }
 
-pub fn build_add_firewall_rule_script(
-    action: &str,
-    port_spec: &str,
-    protocol: &str,
-    source_ip: &str,
-    comment: &str,
-) -> Result<String, String> {
-    let act_lower = match action.trim().to_ascii_lowercase().as_str() {
+struct UfwRuleArgs {
+    action: &'static str,
+    source: String,
+    port: String,
+    proto: &'static str,
+}
+
+fn validate_rule_args(action: &str, source: &str, port: &str, proto: &str) -> Result<UfwRuleArgs, String> {
+    let action = match action.trim().to_ascii_lowercase().as_str() {
         "allow" => "allow",
         "limit" => "limit",
         "deny" => "deny",
         "reject" => "reject",
-        other => return Err(format!("Unsupported firewall action: {other}")),
+        other => return Err(vps_err(ERR_COMMAND_FAILED, format!("unsupported action {other}"))),
     };
-
-    let proto_lower = match protocol.trim().to_ascii_lowercase().as_str() {
+    let proto = match proto.trim().to_ascii_lowercase().as_str() {
         "tcp" => "tcp",
         "udp" => "udp",
         _ => "any",
     };
-
-    let clean_port = {
-        let p = port_spec
-            .trim()
-            .trim_end_matches("/tcp")
-            .trim_end_matches("/udp")
-            .replace('-', ":");
-        if p.is_empty() || p.eq_ignore_ascii_case("any") || p.eq_ignore_ascii_case("anywhere") {
-            "any".to_string()
-        } else {
-            if !p
-                .chars()
-                .all(|c| c.is_ascii_digit() || c == ',' || c == ':')
-            {
-                return Err(format!("Invalid port specification: {port_spec}"));
-            }
-            p
-        }
-    };
-
-    let clean_source = {
-        let s = source_ip.trim();
-        if is_anywhere_source(s) {
-            "any".to_string()
-        } else {
-            if !s
-                .chars()
-                .all(|c| c.is_ascii_hexdigit() || c == '.' || c == ':' || c == '/')
-            {
-                return Err(format!("Invalid source IP / CIDR: {source_ip}"));
-            }
-            s.to_string()
-        }
-    };
-
-    let clean_comment = comment.trim().replace('\n', " ").replace('\r', " ");
-    let comment_ufw_arg = if clean_comment.is_empty() {
-        String::new()
-    } else {
-        format!(" comment {}", shell_single_quote(&clean_comment))
-    };
-
-    // Build UFW command(s)
-    // Note: UFW requires explicit `proto tcp` or `proto udp` when port_spec has `,` or `:`.
-    let ufw_protos: Vec<&str> =
-        if clean_port != "any" && (clean_port.contains(',') || clean_port.contains(':')) && proto_lower == "any" {
-            vec!["tcp", "udp"]
-        } else {
-            vec![proto_lower]
-        };
-
-    let mut ufw_cmds: Vec<String> = Vec::new();
-    for pr in ufw_protos {
-        let base_cmd = if clean_port == "any" {
-            if pr == "any" {
-                format!("ufw {act_lower} from {clean_source} to any")
-            } else {
-                format!("ufw {act_lower} from {clean_source} to any proto {pr}")
-            }
-        } else if pr == "any" {
-            format!("ufw {act_lower} from {clean_source} to any port {clean_port}")
-        } else {
-            format!("ufw {act_lower} from {clean_source} to any port {clean_port} proto {pr}")
-        };
-        if comment_ufw_arg.is_empty() {
-            ufw_cmds.push(base_cmd);
-        } else {
-            ufw_cmds.push(format!("{base_cmd}{comment_ufw_arg} || {base_cmd}"));
-        }
+    let port = port.trim().trim_end_matches("/tcp").trim_end_matches("/udp").replace('-', ":");
+    let port = if port.is_empty() || port.eq_ignore_ascii_case("any") { "any".to_string() } else { port };
+    if port != "any" && !port.chars().all(|c| c.is_ascii_digit() || c == ',' || c == ':') {
+        return Err(vps_err(ERR_COMMAND_FAILED, format!("invalid port {port}")));
     }
-    let ufw_block = ufw_cmds.join("\n  ");
-
-    // Build iptables fallback command
-    let ipt_target = match act_lower {
-        "allow" | "limit" => "ACCEPT",
-        "deny" => "DROP",
-        "reject" => "REJECT",
-        _ => "ACCEPT",
-    };
-    let ipt_src = if clean_source == "any" {
-        String::new()
-    } else {
-        format!(" -s {clean_source}")
-    };
-    let ipt_proto = if proto_lower == "any" {
-        if clean_port != "any" {
-            " -p tcp".to_string()
-        } else {
-            String::new()
-        }
-    } else {
-        format!(" -p {proto_lower}")
-    };
-    let ipt_port = if clean_port == "any" {
-        String::new()
-    } else if clean_port.contains(',') {
-        format!(" -m multiport --dports {clean_port}")
-    } else {
-        format!(" --dport {clean_port}")
-    };
-    let ipt_comment = if clean_comment.is_empty() {
-        String::new()
-    } else {
-        format!(" -m comment --comment {}", shell_single_quote(&clean_comment))
-    };
-
-    Ok(format!(
-        r#"if command -v ufw >/dev/null 2>&1; then
-  {ufw_block}
-elif command -v iptables >/dev/null 2>&1; then
-  iptables -A INPUT{ipt_src}{ipt_proto}{ipt_port}{ipt_comment} -j {ipt_target}
-else
-  echo "Neither ufw nor iptables found on this server."
-  exit 1
-fi"#
-    ))
+    let source = source.trim();
+    let source = if is_anywhere_source(source) { "any".to_string() } else { source.to_string() };
+    if source != "any" && !source.chars().all(|c| c.is_ascii_hexdigit() || c == '.' || c == ':' || c == '/') {
+        return Err(vps_err(ERR_COMMAND_FAILED, format!("invalid source {source}")));
+    }
+    Ok(UfwRuleArgs { action, source, port, proto })
 }
 
-pub fn build_delete_firewall_rule_script(rule_index: u32, raw_spec: &str) -> String {
-    let safe_spec: String = raw_spec
-        .chars()
-        .filter(|c| *c != '\n' && *c != '\r' && *c != ';' && *c != '`' && *c != '$')
-        .collect();
+// deny/reject go to the top (`ufw prepend` handles IPv4 and IPv6 positions); allow appends.
+pub fn build_ufw_add_rule_script(action: &str, source: &str, port: &str, proto: &str) -> Result<String, String> {
+    let a = validate_rule_args(action, source, port, proto)?;
+    let mut target = format!("from {} to any", a.source);
+    if a.port != "any" {
+        target.push_str(&format!(" port {}", a.port));
+    }
+    // ufw needs an explicit proto for port lists and ranges.
+    let protos: Vec<&str> = match a.proto {
+        "any" if a.port.contains(',') || a.port.contains(':') => vec!["tcp", "udp"],
+        p => vec![p],
+    };
+    let verb = if matches!(a.action, "deny" | "reject") { "prepend " } else { "" };
+    Ok(protos
+        .iter()
+        .map(|p| {
+            let proto = if *p == "any" { String::new() } else { format!(" proto {p}") };
+            format!("ufw {verb}{} {target}{proto}\n", a.action)
+        })
+        .collect())
+}
+
+fn normalize_spaces(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+// Looks the rule up by its text in the current numbered list, so shifted numbers cannot hit another rule.
+pub fn build_ufw_delete_rule_script(rule: &FirewallRuleItem) -> String {
     format!(
-        r#"if command -v ufw >/dev/null 2>&1; then
-  yes | ufw --force delete {rule_index}
-elif command -v iptables >/dev/null 2>&1; then
-  if [ -n {quoted_spec} ]; then
-    iptables -D INPUT {safe_spec} 2>/dev/null || iptables -D INPUT {rule_index}
-  else
-    iptables -D INPUT {rule_index}
-  fi
-else
-  echo "Neither ufw nor iptables found on this server."
-  exit 1
-fi"#,
-        quoted_spec = shell_single_quote(&safe_spec)
+        r#"want={want}
+n=$(ufw status numbered | awk -v want="$want" '/^\[ *[0-9]+\]/ {{
+  num = $0; sub(/^\[ */, "", num); sub(/\].*/, "", num)
+  rest = $0; sub(/^\[ *[0-9]+\] */, "", rest); gsub(/[ \t]+/, " ", rest); sub(/ $/, "", rest)
+  if (rest == want) {{ print num; exit }}
+}}')
+if [ -z "$n" ]; then echo SSHBOX_RULE_NOT_FOUND; exit 3; fi
+ufw --force delete "$n"
+"#,
+        want = shell_single_quote(&normalize_spaces(&rule.raw_spec))
     )
 }
 
 pub fn build_set_firewall_state_script(
-    enabled: bool,
-    default_incoming: &str,
-    ssh_port: u16,
-) -> String {
-    let safe_port = if ssh_port == 0 { 22 } else { ssh_port };
-    let norm_incoming = match default_incoming.trim().to_ascii_lowercase().as_str() {
-        "allow" => "allow",
-        "reject" => "reject",
-        _ => "deny",
-    };
-    let extra_ssh_22 = if safe_port != 22 {
-        "\n  ufw allow 22/tcp >/dev/null 2>&1 || true"
-    } else {
-        ""
-    };
-    let ufw_toggle_cmd = if enabled {
-        "ufw --force enable"
-    } else {
-        "ufw disable"
-    };
-    let ipt_policy = if enabled && (norm_incoming == "deny" || norm_incoming == "reject") {
-        "DROP"
-    } else {
-        "ACCEPT"
-    };
+    engine: FirewallEngine,
+    enable: bool,
+    ensure_ssh_port: Option<u16>,
+) -> Result<String, String> {
+    let mut script = String::new();
+    match engine {
+        FirewallEngine::Ufw => {
+            if let (true, Some(p)) = (enable, ensure_ssh_port) {
+                script.push_str(&format!("ufw allow {p}/tcp\n"));
+            }
+            script.push_str(if enable { "ufw --force enable\n" } else { "ufw disable\n" });
+        }
+        FirewallEngine::Firewalld => {
+            if let (true, Some(p)) = (enable, ensure_ssh_port) {
+                script.push_str(&format!("firewall-offline-cmd --add-port={p}/tcp\n"));
+            }
+            script.push_str(if enable {
+                "systemctl enable --now firewalld\n"
+            } else {
+                "systemctl disable --now firewalld\n"
+            });
+        }
+        FirewallEngine::Iptables | FirewallEngine::None => {
+            return Err(vps_err(ERR_UNSUPPORTED, "firewall_read_only"))
+        }
+    }
+    Ok(script)
+}
 
-    format!(
-        r#"if command -v ufw >/dev/null 2>&1; then
-  ufw allow {safe_port}/tcp >/dev/null 2>&1 || true{extra_ssh_22}
-  ufw default {norm_incoming} incoming
-  ufw default allow outgoing
-  {ufw_toggle_cmd}
-elif command -v iptables >/dev/null 2>&1; then
-  iptables -C INPUT -i lo -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i lo -j ACCEPT
-  iptables -C INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I INPUT 2 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-  iptables -C INPUT -p tcp --dport {safe_port} -j ACCEPT 2>/dev/null || iptables -I INPUT 3 -p tcp --dport {safe_port} -j ACCEPT
-  iptables -P INPUT {ipt_policy}
-else
-  echo "Neither ufw nor iptables found on this server."
-  exit 1
-fi"#
-    )
+// Runs a write and returns the fresh snapshot from the same script run (spec §5).
+async fn run_firewall_write(
+    host_id: &str,
+    pool: &SshPool,
+    sudo_password: Option<String>,
+    engine: FirewallEngine,
+    write: &str,
+) -> Result<FirewallSnapshot, String> {
+    let script = format!(
+        "set -eu\n{write}set +eu\necho SSHBOX_SNAPSHOT_BEGIN\n{}",
+        firewall_read_script(engine)
+    );
+    let raw = run_privileged_script(host_id, pool, sudo_password, &script, None).await?;
+    Ok(snapshot_after(&raw, engine))
+}
+
+fn writable_engine(engine: FirewallEngine) -> Result<(), String> {
+    match engine {
+        FirewallEngine::Ufw | FirewallEngine::Firewalld => Ok(()),
+        _ => Err(vps_err(ERR_UNSUPPORTED, "firewall_read_only")),
+    }
 }
 
 pub async fn add_firewall_rule(
     host_id: &str,
     pool: &SshPool,
-    action: String,
-    port_spec: String,
-    protocol: String,
-    source_ip: String,
-    comment: String,
     sudo_password: Option<String>,
+    action: String,
+    source: String,
+    port: String,
+    proto: String,
 ) -> Result<FirewallSnapshot, String> {
-    let script =
-        build_add_firewall_rule_script(&action, &port_spec, &protocol, &source_ip, &comment)?;
-    run_privileged_script(host_id, pool, sudo_password.clone(), &script, None).await?;
-    get_firewall_snapshot(host_id, pool, sudo_password).await
+    let probe = probe(host_id, pool, sudo_password.clone()).await?;
+    writable_engine(probe.firewall_engine)?;
+    crate::vps_guard::check_firewall_add(&probe.context, &action, &source, &port)?;
+    let script = match probe.firewall_engine {
+        FirewallEngine::Firewalld => build_firewalld_add_rule_script(&action, &source, &port, &proto)?,
+        _ => build_ufw_add_rule_script(&action, &source, &port, &proto)?,
+    };
+    run_firewall_write(host_id, pool, sudo_password, probe.firewall_engine, &script).await
 }
 
 pub async fn delete_firewall_rule(
     host_id: &str,
     pool: &SshPool,
-    rule_index: u32,
-    raw_spec: String,
     sudo_password: Option<String>,
+    rule: FirewallRuleItem,
 ) -> Result<FirewallSnapshot, String> {
-    let script = build_delete_firewall_rule_script(rule_index, &raw_spec);
-    run_privileged_script(host_id, pool, sudo_password.clone(), &script, None).await?;
-    get_firewall_snapshot(host_id, pool, sudo_password).await
+    let probe = probe(host_id, pool, sudo_password.clone()).await?;
+    writable_engine(probe.firewall_engine)?;
+    let current = get_firewall_snapshot(host_id, pool, sudo_password.clone()).await?;
+    crate::vps_guard::check_firewall_delete(&probe.context, &current.rules, &rule)?;
+    let script = match probe.firewall_engine {
+        FirewallEngine::Firewalld => build_firewalld_delete_rule_script(&rule),
+        _ => build_ufw_delete_rule_script(&rule),
+    };
+    run_firewall_write(host_id, pool, sudo_password, probe.firewall_engine, &script).await
 }
 
 pub async fn set_firewall_state(
     host_id: &str,
     pool: &SshPool,
-    enabled: bool,
-    default_incoming: String,
-    ssh_port: u16,
     sudo_password: Option<String>,
+    enable: bool,
 ) -> Result<FirewallSnapshot, String> {
-    let script = build_set_firewall_state_script(enabled, &default_incoming, ssh_port);
-    run_privileged_script(host_id, pool, sudo_password.clone(), &script, None).await?;
-    get_firewall_snapshot(host_id, pool, sudo_password).await
+    let probe = probe(host_id, pool, sudo_password.clone()).await?;
+    writable_engine(probe.firewall_engine)?;
+    let current = get_firewall_snapshot(host_id, pool, sudo_password.clone()).await?;
+    let ensure = crate::vps_guard::ssh_allow_needed(&probe.context, &current.rules).then_some(probe.context.server_port);
+    let script = build_set_firewall_state_script(probe.firewall_engine, enable, ensure)?;
+    run_firewall_write(host_id, pool, sudo_password, probe.firewall_engine, &script).await
+}
+
+// firewalld writes arrive in Task 10.
+pub fn build_firewalld_add_rule_script(_action: &str, _source: &str, _port: &str, _proto: &str) -> Result<String, String> {
+    Err(vps_err(ERR_UNSUPPORTED, "firewall_read_only"))
+}
+
+pub fn build_firewalld_delete_rule_script(_rule: &FirewallRuleItem) -> String {
+    "echo SSHBOX_RULE_NOT_FOUND; exit 3\n".to_string()
 }
 
 pub fn shell_single_quote(s: &str) -> String {
@@ -2742,8 +2651,7 @@ ENGINE:ufw
 ENABLED:1
 DEFAULT_INCOMING:deny
 DEFAULT_OUTGOING:allow
-CLIENT_IP:203.0.113.42
-SSH_PORT:2222
+IPV6:1
 ---UFW---
 Status: active
 
@@ -2770,8 +2678,7 @@ udp   UNCONN 0      0      127.0.0.53%lo:53          0.0.0.0:*    users:(("syste
         assert!(snap.enabled);
         assert_eq!(snap.default_incoming, "deny");
         assert_eq!(snap.default_outgoing, "allow");
-        assert_eq!(snap.detected_client_ip, "203.0.113.42");
-        assert_eq!(snap.ssh_port, 2222);
+        assert!(snap.ipv6_filtered);
         assert_eq!(snap.rules.len(), 5);
 
         assert_eq!(snap.rules[0].index, 1);
@@ -2911,37 +2818,126 @@ tcp        0      0 127.0.0.1:6379          0.0.0.0:*               LISTEN      
         assert_eq!(redis_sock.exposure, "loopback");
     }
 
+    // Runs `script` with fake binaries that log "<name> <args>" in call order.
+    #[cfg(unix)]
+    fn run_with_fakes(script: &str, fakes: &[(&str, &str)]) -> (String, String) {
+        let dir = shell::temp_dir();
+        let bin = dir.join("bin");
+        let log = dir.join("calls.log");
+        for (name, extra) in fakes {
+            shell::fake_bin(&bin, name, &format!("echo \"{name} $*\" >> \"$FAKE_LOG\"\n{extra}\nexit 0"));
+        }
+        let out = shell::run_local(script, b"", &bin, &[("FAKE_LOG", log.to_str().unwrap())], &dir);
+        (out, std::fs::read_to_string(&log).unwrap_or_default())
+    }
+
+    fn fw_rule(index: u32, action: &str, to: &str, from: &str, v6: bool) -> FirewallRuleItem {
+        FirewallRuleItem {
+            index,
+            to_port: to.to_string(),
+            protocol: if to.ends_with("/tcp") { "tcp" } else { "any" }.to_string(),
+            action: action.to_string(),
+            from_source: from.to_string(),
+            v6,
+            comment: String::new(),
+            raw_spec: format!("{to} {action} IN {from}"),
+        }
+    }
+
+    const UFW_SHIFTED: &str = r#"if [ "$1" = "status" ]; then cat <<'UFW'
+Status: active
+
+     To                         Action      From
+     --                         ------      ----
+[ 1] 2222/tcp                   LIMIT IN    Anywhere
+[ 2] 5432/tcp                   ALLOW IN    203.0.113.42               # Postgres Admin
+[ 3] 6379/tcp                   DENY IN     Anywhere
+UFW
+fi"#;
+
+    // Rule numbers shift when another rule is added or deleted; deleting by number hits the wrong rule.
+    #[cfg(unix)]
     #[test]
-    fn enforces_anti_lockout_ssh_rules_before_ufw_enable_and_builds_rule_commands() {
-        let script = build_set_firewall_state_script(true, "deny", 2244);
-        let allow_custom_pos = script.find("ufw allow 2244/tcp").unwrap();
-        let allow_22_pos = script.find("ufw allow 22/tcp").unwrap();
-        let default_deny_pos = script.find("ufw default deny incoming").unwrap();
-        let enable_pos = script.find("ufw --force enable").unwrap();
-        assert!(allow_custom_pos < default_deny_pos);
-        assert!(allow_22_pos < default_deny_pos);
-        assert!(default_deny_pos < enable_pos);
+    fn ufw_delete_matches_content_after_numbers_shift() {
+        let mut target = fw_rule(3, "ALLOW", "5432/tcp", "203.0.113.42", false);
+        target.raw_spec = "5432/tcp   ALLOW IN    203.0.113.42     # Postgres Admin".to_string();
+        let (out, log) = run_with_fakes(&build_ufw_delete_rule_script(&target), &[("ufw", UFW_SHIFTED)]);
+        assert!(log.contains("ufw --force delete 2"), "{out}\n{log}");
+        assert!(!log.contains("delete 3"), "{log}");
+    }
 
-        let add_ip_rule = build_add_firewall_rule_script(
-            "ALLOW",
-            "5432",
-            "tcp",
-            "203.0.113.42",
-            "Postgres Admin",
-        )
-        .unwrap();
-        assert!(add_ip_rule.contains("from 203.0.113.42 to any port 5432 proto tcp"));
-        assert!(add_ip_rule.contains("Postgres Admin"));
+    #[cfg(unix)]
+    #[test]
+    fn ufw_delete_missing_rule_deletes_nothing() {
+        let gone = fw_rule(9, "ALLOW", "8080/tcp", "Anywhere", false);
+        let (out, log) = run_with_fakes(&build_ufw_delete_rule_script(&gone), &[("ufw", UFW_SHIFTED)]);
+        assert!(out.contains("SSHBOX_RULE_NOT_FOUND"), "{out}");
+        assert!(!log.contains("delete"), "{log}");
+    }
 
-        let whitelist_all = build_add_firewall_rule_script(
-            "ALLOW",
-            "any",
-            "any",
-            "203.0.113.42",
-            "Admin Whitelist",
-        )
-        .unwrap();
-        assert!(whitelist_all.contains("ufw allow from 203.0.113.42 to any"));
+    // ufw evaluates rules top-down; an appended deny below an allow never applies.
+    #[cfg(unix)]
+    #[test]
+    fn deny_rules_are_inserted_first() {
+        let script = build_ufw_add_rule_script("deny", "198.51.100.9", "80", "tcp").unwrap();
+        let (_, log) = run_with_fakes(&script, &[("ufw", "")]);
+        assert!(log.contains("ufw prepend deny from 198.51.100.9 to any port 80 proto tcp"), "{log}");
+        let script = build_ufw_add_rule_script("allow", "203.0.113.42", "5432", "tcp").unwrap();
+        let (_, log) = run_with_fakes(&script, &[("ufw", "")]);
+        assert!(log.contains("ufw allow from 203.0.113.42 to any port 5432 proto tcp"), "{log}");
+        assert!(build_ufw_add_rule_script("allow", "1.2.3.4; rm -rf /", "22", "tcp").is_err());
+    }
+
+    #[test]
+    fn exposure_is_first_match_per_family() {
+        let sock = |bind: &str| ListeningSocketItem {
+            protocol: "tcp".to_string(),
+            bind_addr: bind.to_string(),
+            port: 3306,
+            is_public: true,
+            process_name: "mysqld".to_string(),
+            pid: None,
+            exposure: String::new(),
+        };
+        let deny = fw_rule(1, "DENY", "3306/tcp", "Anywhere", false);
+        let allow = fw_rule(2, "ALLOW", "3306/tcp", "Anywhere", false);
+        let v4 = sock("0.0.0.0");
+        assert_eq!(compute_socket_exposure(&v4, true, "deny", true, &[deny.clone(), allow.clone()]), "blocked");
+        assert_eq!(compute_socket_exposure(&v4, true, "deny", true, &[allow.clone(), deny.clone()]), "exposed");
+        let only_me = fw_rule(1, "ALLOW", "3306/tcp", "203.0.113.42", false);
+        assert_eq!(compute_socket_exposure(&v4, true, "deny", true, &[only_me]), "restricted");
+        // An IPv4-only allow does not cover an IPv6-only socket; unfiltered IPv6 is exposed.
+        let v6 = sock("2001:db8::1");
+        assert_eq!(compute_socket_exposure(&v6, true, "deny", true, &[allow.clone()]), "blocked");
+        assert_eq!(compute_socket_exposure(&v6, true, "deny", false, &[allow]), "exposed");
+    }
+
+    #[test]
+    fn iptables_engine_is_read_only() {
+        for engine in [FirewallEngine::Iptables, FirewallEngine::None] {
+            let err = build_set_firewall_state_script(engine, true, None).unwrap_err();
+            assert!(err.starts_with("UNSUPPORTED"), "{err}");
+        }
+    }
+
+    // Enabling ufw with incoming deny must open the app's SSH port first.
+    #[cfg(unix)]
+    #[test]
+    fn enable_adds_ssh_allow_first_when_missing() {
+        let script = build_set_firewall_state_script(FirewallEngine::Ufw, true, Some(2222)).unwrap();
+        let (_, log) = run_with_fakes(&script, &[("ufw", "")]);
+        let allow = log.find("ufw allow 2222/tcp").expect(&log);
+        assert!(allow < log.find("ufw --force enable").expect(&log), "{log}");
+        let script = build_set_firewall_state_script(FirewallEngine::Ufw, true, None).unwrap();
+        let (_, log) = run_with_fakes(&script, &[("ufw", "")]);
+        assert!(!log.contains("allow") && log.contains("ufw --force enable"), "{log}");
+    }
+
+    #[test]
+    fn ufw_ipv6_disabled_is_reported() {
+        let raw = "---META---\nENGINE:ufw\nENABLED:1\nDEFAULT_INCOMING:deny\nIPV6:0\n---UFW---\n";
+        assert!(!parse_firewall_snapshot(raw).ipv6_filtered);
+        assert!(parse_firewall_snapshot(&raw.replace("IPV6:0", "IPV6:1")).ipv6_filtered);
     }
 
     #[test]

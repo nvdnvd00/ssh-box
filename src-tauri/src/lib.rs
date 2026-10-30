@@ -26,7 +26,7 @@ use tauri::State;
 use telemetry::{DockerFullSnapshot, ServerMetrics};
 use tokio::sync::mpsc;
 use vps_config::{
-    AccessKeysSnapshot, FirewallSnapshot, SshdApplyStarted, SshdSettings, SshdView, VpsProbe,
+    AccessKeysSnapshot, FirewallRuleItem, FirewallSnapshot, SshdApplyStarted, SshdSettings, SshdView, VpsProbe,
 };
 
 pub struct AppState {
@@ -883,61 +883,32 @@ async fn vps_add_firewall_rule(
     state: State<'_, AppState>,
     host_id: String,
     action: String,
-    port_spec: String,
-    protocol: String,
-    source_ip: String,
-    comment: String,
+    source: String,
+    port: String,
+    proto: String,
     sudo_password: Option<String>,
 ) -> Result<FirewallSnapshot, String> {
-    vps_config::add_firewall_rule(
-        &host_id,
-        &state.ssh_pool,
-        action,
-        port_spec,
-        protocol,
-        source_ip,
-        comment,
-        sudo_password,
-    )
-    .await
+    vps_config::add_firewall_rule(&host_id, &state.ssh_pool, sudo_password, action, source, port, proto).await
 }
 
 #[tauri::command]
 async fn vps_delete_firewall_rule(
     state: State<'_, AppState>,
     host_id: String,
-    rule_index: u32,
-    raw_spec: String,
+    rule: FirewallRuleItem,
     sudo_password: Option<String>,
 ) -> Result<FirewallSnapshot, String> {
-    vps_config::delete_firewall_rule(
-        &host_id,
-        &state.ssh_pool,
-        rule_index,
-        raw_spec,
-        sudo_password,
-    )
-    .await
+    vps_config::delete_firewall_rule(&host_id, &state.ssh_pool, sudo_password, rule).await
 }
 
 #[tauri::command]
 async fn vps_set_firewall_state(
     state: State<'_, AppState>,
     host_id: String,
-    enabled: bool,
-    default_incoming: String,
-    ssh_port: u16,
+    enable: bool,
     sudo_password: Option<String>,
 ) -> Result<FirewallSnapshot, String> {
-    vps_config::set_firewall_state(
-        &host_id,
-        &state.ssh_pool,
-        enabled,
-        default_incoming,
-        ssh_port,
-        sudo_password,
-    )
-    .await
+    vps_config::set_firewall_state(&host_id, &state.ssh_pool, sudo_password, enable).await
 }
 
 #[tauri::command]

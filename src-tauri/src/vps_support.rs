@@ -55,8 +55,8 @@ pub struct OsCaps {
     pub has_net_security: bool,
 }
 
-// Flipped only once the Windows write path is verified on a real host (Task 10).
-pub const WINDOWS_SSH_WRITE_VERIFIED: bool = false;
+// Verified on the Windows 11 VM matrix (W8-W11: kept change, password off/on, timed rollback, blocked port).
+pub const WINDOWS_SSH_WRITE_VERIFIED: bool = true;
 
 fn tab(level: SupportLevel, reason: Option<&str>) -> TabSupport {
     TabSupport { level, reason: reason.map(str::to_string) }
@@ -164,7 +164,7 @@ mod tests {
         assert_eq!(compute_support(&linux(true, "firewalld")).firewall.level, SupportLevel::Full);
     }
 
-    // Windows ssh stays read-only until the VM matrix flips the flag; with it, Full needs admin + sshd + scheduled tasks, and password is coupled.
+    // The VM matrix (W8-W11) verified the Windows rollback, so the flag is on; Full still needs admin + sshd + scheduled tasks, and password is coupled.
     #[test]
     fn windows_ssh_is_full_only_with_rollback_prerequisites() {
         let mut p = linux(true, "ufw");
@@ -172,9 +172,9 @@ mod tests {
         p.privilege = PrivilegeLevel::Admin;
         p.caps.sshd_running = true;
         p.caps.has_scheduled_tasks = true;
-        assert!(!WINDOWS_SSH_WRITE_VERIFIED);
-        assert_eq!(compute_support(&p).ssh, tab(SupportLevel::ReadOnly, Some("windows_ssh_read_only")));
-        let s = compute_support_with(&p, true);
+        assert!(WINDOWS_SSH_WRITE_VERIFIED);
+        assert_eq!(compute_support_with(&p, false).ssh, tab(SupportLevel::ReadOnly, Some("windows_ssh_read_only")));
+        let s = compute_support(&p);
         assert_eq!((s.ssh, s.access.level, s.firewall.level), (tab(SupportLevel::Full, None), SupportLevel::ReadOnly, SupportLevel::Hidden));
         assert!(!s.ssh_rows.permit_root_login && !s.ssh_rows.allow_deny_users && s.ssh_rows.port && s.password_coupled);
         p.caps.has_scheduled_tasks = false;

@@ -141,10 +141,10 @@ pub fn scan_script(os: HostOs) -> String {
             .flat_map(|t| os_methods(t, os).filter(|m| m.manager == "winget").map(|m| ps_quote(&m.package)))
             .collect();
         s += &format!(
-            "$w = winget list --source winget --accept-source-agreements --disable-interactivity 2>$null | Out-String\nforeach ($id in @({})) {{ if ($w -match ('(?m)(^|\\s)' + [regex]::Escape($id) + '(\\s|$)')) {{ ('PKG:winget:' + $id) }} }}\n",
+            "if (Get-Command winget -ErrorAction SilentlyContinue) {{ $w = winget list --source winget --accept-source-agreements --disable-interactivity 2>$null | Out-String\nforeach ($id in @({})) {{ if ($w -match ('(?m)(^|\\s)' + [regex]::Escape($id) + '(\\s|$)')) {{ ('PKG:winget:' + $id) }} }} }}\n",
             ids.join(",")
         );
-        s += "npm ls -g --depth=0 --parseable 2>$null | ForEach-Object { if ($_ -match 'node_modules[\\\\/](.+)$') { 'PKG:npm:' + ($Matches[1] -replace '\\\\','/') } }\n";
+        s += "if (Get-Command npm -ErrorAction SilentlyContinue) { npm ls -g --depth=0 --parseable 2>$null | ForEach-Object { if ($_ -match 'node_modules[\\\\/](.+)$') { 'PKG:npm:' + ($Matches[1] -replace '\\\\','/') } } }\n";
         for t in tools() {
             let k = bin_key(t);
             s += &format!("{} + [int][bool](Get-Command {} -ErrorAction SilentlyContinue)\n", ps_quote(&format!("BIN:{k}:")), ps_quote(k));
@@ -251,7 +251,9 @@ pub enum InstallAction {
     Refresh,
 }
 
-const WINGET_FLAGS: &str = "--silent --disable-interactivity --accept-package-agreements --accept-source-agreements";
+// Native commands don't throw under $ErrorActionPreference='Stop'; the bootstrap's catch turns this into SSHBOX_EXIT_CODE:1.
+const PS_CHK: &str = "; if ($LASTEXITCODE -ne 0) { throw \"exit $LASTEXITCODE\" }";
+const WINGET_FLAGS: &str = "--source winget --silent --disable-interactivity --accept-package-agreements --accept-source-agreements";
 
 fn checked<'a>(os: HostOs, manager: &str, name: &'a str) -> Result<&'a str, String> {
     if !managers_for(os).contains(&manager) {
@@ -279,10 +281,10 @@ pub fn action_script(os: HostOs, a: &InstallAction) -> Result<String, String> {
                 ("snap", false) => format!("snap remove {q}"),
                 ("brew", true) => format!("NONINTERACTIVE=1 brew install {q}"),
                 ("brew", false) => format!("NONINTERACTIVE=1 brew uninstall {q}"),
-                ("winget", true) => format!("winget install --id {pq} -e {WINGET_FLAGS}"),
-                ("winget", false) => format!("winget uninstall --id {pq} -e --silent --disable-interactivity"),
-                ("npm", true) => format!("npm install -g {}", if os == HostOs::Windows { pq } else { q }),
-                ("npm", _) => format!("npm uninstall -g {}", if os == HostOs::Windows { pq } else { q }),
+                ("winget", true) => format!("winget install --id {pq} -e {WINGET_FLAGS}{PS_CHK}"),
+                ("winget", false) => format!("winget uninstall --id {pq} -e --source winget --silent --disable-interactivity{PS_CHK}"),
+                ("npm", true) => if os == HostOs::Windows { format!("npm install -g {pq}{PS_CHK}") } else { format!("npm install -g {q}") },
+                ("npm", _) => if os == HostOs::Windows { format!("npm uninstall -g {pq}{PS_CHK}") } else { format!("npm uninstall -g {q}") },
                 _ => return Err(format!("unsupported manager {manager}")),
             })
         }
@@ -304,7 +306,7 @@ pub fn action_script(os: HostOs, a: &InstallAction) -> Result<String, String> {
             ("snap", HostOs::Linux) => Ok("DEBIAN_FRONTEND=noninteractive apt-get install -y snapd".into()),
             ("npm", HostOs::Linux) => Ok("if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs npm; else dnf install -y nodejs npm; fi".into()),
             ("npm", HostOs::Macos) => Ok("brew install node".into()),
-            ("npm", HostOs::Windows) => Ok(format!("winget install --id OpenJS.NodeJS.LTS -e {WINGET_FLAGS}")),
+            ("npm", HostOs::Windows) => Ok(format!("winget install --id OpenJS.NodeJS.LTS -e {WINGET_FLAGS}{PS_CHK}")),
             ("winget", HostOs::Windows) => Err("WINGET_MANUAL".into()),
             _ => Err(format!("cannot install manager {manager} on this OS")),
         },
@@ -346,11 +348,11 @@ pub fn search_script(os: HostOs, present: &[String], query: &str) -> Result<Stri
             ("snap", _) => format!("snap find {q} 2>/dev/null | awk 'NR>1{{n=$1; $1=$2=$3=$4=\"\"; sub(/^ +/,\"\"); print \"HIT:snap:\" n \":\" $0}}' | head -n 20\n"),
             ("brew", _) => format!("brew search {q} 2>/dev/null | grep -v '^==>' | head -n 20 | sed 's/^/HIT:brew:/; s/$/:/'\n"),
             ("winget", _) => format!(
-                "winget search --source winget --accept-source-agreements --disable-interactivity {} | Out-String -Stream | ForEach-Object {{ if ($_ -match '^(.+?)\\s{{2,}}([A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+)\\s') {{ 'HIT:winget:' + $Matches[2] + ':' + $Matches[1].Trim() }} }} | Select-Object -First 20\n",
+                "if (Get-Command winget -ErrorAction SilentlyContinue) {{ winget search --source winget --accept-source-agreements --disable-interactivity {} | Out-String -Stream | ForEach-Object {{ if ($_ -match '^(.+?)\\s{{2,}}([A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+)\\s') {{ 'HIT:winget:' + $Matches[2] + ':' + $Matches[1].Trim() }} }} | Select-Object -First 20 }}\n",
                 ps_quote(query)
             ),
             // npm search --parseable: name<TAB>description<TAB>...
-            (_, HostOs::Windows) => format!("npm search --parseable {} | Select-Object -First 20 | ForEach-Object {{ $p = $_ -split [char]9; 'HIT:npm:' + $p[0] + ':' + $p[1] }}\n", ps_quote(query)),
+            (_, HostOs::Windows) => format!("if (Get-Command npm -ErrorAction SilentlyContinue) {{ npm search --parseable {} | Select-Object -First 20 | ForEach-Object {{ $p = $_ -split [char]9; 'HIT:npm:' + $p[0] + ':' + $p[1] }} }}\n", ps_quote(query)),
             _ => format!("npm search --parseable {q} 2>/dev/null | head -n 20 | awk -F'\\t' '{{print \"HIT:npm:\" $1 \":\" $2}}'\n"),
         };
     }
@@ -688,6 +690,21 @@ mod tests {
         assert!(s.contains("brew uninstall") && !s.contains("npm"));
     }
 
+    // A missing tool must yield no lines, and a failed native command must fail the script.
+    #[test]
+    fn windows_scan_guarded_and_actions_check_exit_code() {
+        let scan = scan_script(HostOs::Windows);
+        assert!(scan.contains("if (Get-Command npm -ErrorAction SilentlyContinue) { npm ls"), "{scan}");
+        assert!(scan.contains("if (Get-Command winget -ErrorAction SilentlyContinue) { $w = winget list"), "{scan}");
+        for (m, a) in [("winget", "install"), ("winget", "uninstall"), ("npm", "install"), ("npm", "uninstall")] {
+            let s = action_script(HostOs::Windows, &act(a, m, "x.y")).unwrap();
+            assert!(s.contains("$LASTEXITCODE -ne 0"), "{s}");
+        }
+        assert!(!action_script(HostOs::Linux, &act("install", "npm", "x")).unwrap().contains("LASTEXITCODE"));
+        let q = search_script(HostOs::Windows, &["winget".into(), "npm".into()], "git").unwrap();
+        assert!(q.contains("Get-Command winget") && q.contains("Get-Command npm"));
+    }
+
     #[test]
     fn winget_flags_present() {
         let s = action_script(HostOs::Windows, &act("install", "winget", "Tailscale.Tailscale")).unwrap();
@@ -698,6 +715,7 @@ mod tests {
         assert!(scan.contains("winget list --source winget --accept-source-agreements --disable-interactivity"));
         // whole-token: 'Git.Git' must not match 'Git.Git.LFS' or 'XGit.Git'
         assert!(scan.contains(r"-match ('(?m)(^|\s)' + [regex]::Escape($id) + '(\s|$)')"), "{scan}");
+        assert!(u.contains("--source winget"), "{u}");
         let q = search_script(HostOs::Windows, &["winget".into()], "git").unwrap();
         assert!(q.contains("winget search --source winget --accept-source-agreements --disable-interactivity"));
         assert_eq!(action_script(HostOs::Windows, &InstallAction::InstallManager { manager: "winget".into() }), Err("WINGET_MANUAL".into()));

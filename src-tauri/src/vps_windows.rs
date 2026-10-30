@@ -530,10 +530,10 @@ pub fn parse_windows_firewall(json: &str, server_port: u16) -> Result<FirewallSn
     // unknown) stay out of it, so a port never reads safer than it is.
     let (mut rules, mut unlisted_blocks, mut counted) = (Vec::new(), Vec::new(), Vec::new());
     for r in &w.rules {
-        // ICMPv4/ICMPv6/protocol-number rules (only port-less blocks reach here) never touch a TCP/UDP port: skip them.
-        let protocol = match r.protocol.to_ascii_lowercase().as_str() {
-            "tcp" => "tcp",
-            "udp" => "udp",
+        // ICMPv4/ICMPv6/other protocol numbers (only port-less blocks reach here) never touch a TCP/UDP port: skip them.
+        let protocol = match r.protocol.trim().to_ascii_lowercase().as_str() {
+            "tcp" | "6" => "tcp",
+            "udp" | "17" => "udp",
             "any" => "any",
             _ => continue,
         };
@@ -1339,6 +1339,18 @@ mod tests {
         assert_eq!(build_windows_set_state(&admin_ctx(), &snap, true), Err("LOCKOUT_BLOCKED: windows_block_covers_me".to_string()));
         assert!(snap.rules.iter().all(|r| !r.effective), "the Private-only allow still does not count");
         assert!(build_windows_set_state(&admin_ctx(), &fw_off(blk), true).is_ok(), "known Private SSH NIC: the Public block is elsewhere");
+    }
+
+    // Should Windows report TCP/UDP by number, a 22/TCP block must not vanish from the list and the guard.
+    #[test]
+    fn windows_protocol_numbers_6_and_17_are_tcp_and_udp() {
+        let blk = |proto: &str| format!(r#",{{"displayName":"blk {proto}","service":"Any","group":"tmp","program":"Any","profile":"Any","action":"Block","localPort":"22","protocol":"{proto}","remoteAddress":"Any"}}"#);
+        let tcp = fw_off(&blk("6"));
+        assert_eq!(build_windows_set_state(&admin_ctx(), &tcp, true), Err("LOCKOUT_BLOCKED: windows_block_covers_me".to_string()));
+        assert!(tcp.rules.iter().any(|r| r.raw_spec == "blk 6" && r.protocol == "tcp"));
+        let udp = fw_off(&blk("17"));
+        assert!(udp.rules.iter().any(|r| r.raw_spec == "blk 17" && r.protocol == "udp"));
+        assert!(build_windows_set_state(&admin_ctx(), &udp, true).is_ok(), "a UDP block does not touch SSH");
     }
 
     // The wider "a block of any profile" rule is for the guard only: with the SSH profile unknown, a Public-only block must not

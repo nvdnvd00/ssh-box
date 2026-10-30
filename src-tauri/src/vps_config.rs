@@ -750,7 +750,13 @@ fn validate_rule_args(action: &str, source: &str, port: &str, proto: &str) -> Re
     Ok(UfwRuleArgs { action, source, port, proto })
 }
 
-// deny/reject go to the top (`ufw prepend` handles IPv4 and IPv6 positions); allow appends.
+// Puts a rule at the top. `ufw prepend` handles IPv4/IPv6 positions but fails on an empty list,
+// where a plain add is already on top. `ufw show added` also lists rules while ufw is off.
+fn ufw_on_top(rule: &str) -> String {
+    format!("if ufw show added 2>/dev/null | grep -q '^ufw '; then ufw prepend {rule}; else ufw {rule}; fi\n")
+}
+
+// deny/reject go to the top; allow appends.
 pub fn build_ufw_add_rule_script(action: &str, source: &str, port: &str, proto: &str) -> Result<String, String> {
     let a = validate_rule_args(action, source, port, proto)?;
     let mut target = format!("from {} to any", a.source);
@@ -762,12 +768,13 @@ pub fn build_ufw_add_rule_script(action: &str, source: &str, port: &str, proto: 
         "any" if a.port.contains(',') || a.port.contains(':') => vec!["tcp", "udp"],
         p => vec![p],
     };
-    let verb = if matches!(a.action, "deny" | "reject") { "prepend " } else { "" };
+    let on_top = matches!(a.action, "deny" | "reject");
     Ok(protos
         .iter()
         .map(|p| {
             let proto = if *p == "any" { String::new() } else { format!(" proto {p}") };
-            format!("ufw {verb}{} {target}{proto}\n", a.action)
+            let rule = format!("{} {target}{proto}", a.action);
+            if on_top { ufw_on_top(&rule) } else { format!("ufw {rule}\n") }
         })
         .collect())
 }
@@ -801,7 +808,8 @@ pub fn build_set_firewall_state_script(
     match engine {
         FirewallEngine::Ufw => {
             if let (true, Some(p)) = (enable, ensure_ssh_port) {
-                script.push_str(&format!("ufw allow {p}/tcp\n"));
+                // Above any saved deny the guard could not see while ufw was off.
+                script.push_str(&ufw_on_top(&format!("allow {p}/tcp")));
             }
             script.push_str(if enable { "ufw --force enable\n" } else { "ufw disable\n" });
         }
@@ -1171,6 +1179,7 @@ echo "SSH_SOCKET:$(systemctl is-active ssh.socket 2>/dev/null)"
 echo "SELINUX:$(getenforce 2>/dev/null)"
 if systemctl is-active --quiet firewalld 2>/dev/null; then fw=firewalld
 elif command -v ufw >/dev/null 2>&1; then fw=ufw
+elif command -v firewall-cmd >/dev/null 2>&1; then fw=firewalld
 elif command -v iptables >/dev/null 2>&1; then fw=iptables
 else fw=none
 fi
@@ -2322,6 +2331,23 @@ exec sh -s"#;
         assert!(classify_privileged_output(&out).unwrap_err().starts_with("COMMAND_FAILED"), "{out}");
     }
 
+    // A stopped firewalld must still be found, or the app can never turn it back on.
+    #[cfg(unix)]
+    #[test]
+    fn probe_finds_installed_but_stopped_firewalld() {
+        let dir = shell::temp_dir();
+        let bin = shell::fake_sudo_env(&dir);
+        shell::fake_bin(&bin, "firewall-cmd", "exit 252");
+        let out = shell::run_local(
+            PROBE_SCRIPT,
+            b"\n",
+            &bin,
+            &[("SSH_CONNECTION", "203.0.113.7 51000 198.51.100.2 22")],
+            &dir,
+        );
+        assert!(out.contains("FW:firewalld"), "{out}");
+    }
+
     // The UI asks for a password on SUDO_REQUIRED and shows an error on SUDO_DENIED.
     #[cfg(unix)]
     #[test]
@@ -2927,13 +2953,19 @@ fi"#;
         assert!(!log.contains("delete"), "{log}");
     }
 
+    // `ufw show added` lists saved rules even while ufw is off; FAKE_UFW_RULES=1 simulates some.
+    const FAKE_UFW_SAVED: &str = r#"if [ "$1 $2" = "show added" ] && [ -n "${FAKE_UFW_RULES:-}" ]; then printf 'Added user rules:\nufw deny from 203.0.113.7\n'; fi"#;
+
     // ufw evaluates rules top-down; an appended deny below an allow never applies.
     #[cfg(unix)]
     #[test]
     fn deny_rules_are_inserted_first() {
         let script = build_ufw_add_rule_script("deny", "198.51.100.9", "80", "tcp").unwrap();
-        let (_, log) = run_with_fakes(&script, &[("ufw", "")]);
+        let (_, log) = run_with_fakes(&format!("FAKE_UFW_RULES=1; export FAKE_UFW_RULES\n{script}"), &[("ufw", FAKE_UFW_SAVED)]);
         assert!(log.contains("ufw prepend deny from 198.51.100.9 to any port 80 proto tcp"), "{log}");
+        // ufw prepend fails on an empty list; there a plain add is already on top.
+        let (_, log) = run_with_fakes(&script, &[("ufw", FAKE_UFW_SAVED)]);
+        assert!(log.contains("ufw deny from 198.51.100.9 to any port 80 proto tcp"), "{log}");
         let script = build_ufw_add_rule_script("allow", "203.0.113.42", "5432", "tcp").unwrap();
         let (_, log) = run_with_fakes(&script, &[("ufw", "")]);
         assert!(log.contains("ufw allow from 203.0.113.42 to any port 5432 proto tcp"), "{log}");
@@ -2972,14 +3004,16 @@ fi"#;
         }
     }
 
-    // Enabling ufw with incoming deny must open the app's SSH port first.
+    // While ufw is off the guard cannot see saved rules, so the SSH allow must go above them.
     #[cfg(unix)]
     #[test]
     fn enable_adds_ssh_allow_first_when_missing() {
         let script = build_set_firewall_state_script(FirewallEngine::Ufw, true, Some(2222)).unwrap();
-        let (_, log) = run_with_fakes(&script, &[("ufw", "")]);
-        let allow = log.find("ufw allow 2222/tcp").expect(&log);
+        let (_, log) = run_with_fakes(&format!("FAKE_UFW_RULES=1; export FAKE_UFW_RULES\n{script}"), &[("ufw", FAKE_UFW_SAVED)]);
+        let allow = log.find("ufw prepend allow 2222/tcp").expect(&log);
         assert!(allow < log.find("ufw --force enable").expect(&log), "{log}");
+        let (_, log) = run_with_fakes(&script, &[("ufw", FAKE_UFW_SAVED)]);
+        assert!(log.contains("ufw allow 2222/tcp"), "{log}");
         let script = build_set_firewall_state_script(FirewallEngine::Ufw, true, None).unwrap();
         let (_, log) = run_with_fakes(&script, &[("ufw", "")]);
         assert!(!log.contains("allow") && log.contains("ufw --force enable"), "{log}");

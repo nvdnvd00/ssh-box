@@ -374,19 +374,21 @@ pub async fn get_windows_accounts(host_id: &str, pool: &SshPool) -> Result<Acces
 
 pub const WINDOWS_RULE_GROUP: &str = "ssh-box";
 
+// Reads the effective policy (ActiveStore, Group Policy included) so a GPO-overridden setting shows as it really is;
+// writes go to the default persistent store, and the re-read after a write shows whether it took effect.
 // $ErrorActionPreference is Stop (bootstrap), so a failing cmdlet fails the read instead of showing a false "safe" state.
 // Only the process-name lookup is lenient: a process can exit between listing the socket and naming it.
 // The SSH interface's profile lookup is lenient too: unknown ('') only narrows which rules count.
-const WINDOWS_FIREWALL_READ_SCRIPT: &str = r#"$profiles = @(Get-NetFirewallProfile | ForEach-Object { [ordered]@{ name = [string]$_.Name; enabled = ([string]$_.Enabled -eq 'True'); defaultInbound = [string]$_.DefaultInboundAction } })
+const WINDOWS_FIREWALL_READ_SCRIPT: &str = r#"$profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore | ForEach-Object { [ordered]@{ name = [string]$_.Name; enabled = ([string]$_.Enabled -eq 'True'); defaultInbound = [string]$_.DefaultInboundAction } })
 $active = @(Get-NetConnectionProfile | ForEach-Object { [string]$_.NetworkCategory -replace 'Authenticated','' } | Select-Object -Unique)
 $sshProfile = ''
 if ($sshIp) { try { $ifx = @(Get-NetIPAddress -IPAddress $sshIp -ErrorAction Stop)[0].InterfaceIndex; $sshProfile = ([string]@(Get-NetConnectionProfile -InterfaceIndex $ifx -ErrorAction Stop)[0].NetworkCategory) -replace 'Authenticated','' } catch { $sshProfile = '' } }
-$ports = @{}; Get-NetFirewallPortFilter -All | ForEach-Object { $ports[$_.InstanceID] = $_ }
-$addrs = @{}; Get-NetFirewallAddressFilter -All | ForEach-Object { $addrs[$_.InstanceID] = $_ }
-$apps = @{}; Get-NetFirewallApplicationFilter -All | ForEach-Object { $apps[$_.InstanceID] = $_ }
-$svcs = @{}; Get-NetFirewallServiceFilter -All | ForEach-Object { $svcs[$_.InstanceID] = $_ }
-$ifs = @{}; Get-NetFirewallInterfaceTypeFilter -All | ForEach-Object { $ifs[$_.InstanceID] = $_ }
-$rules = @(Get-NetFirewallRule -Direction Inbound -Enabled True | ForEach-Object {
+$ports = @{}; Get-NetFirewallPortFilter -All -PolicyStore ActiveStore | ForEach-Object { $ports[$_.InstanceID] = $_ }
+$addrs = @{}; Get-NetFirewallAddressFilter -All -PolicyStore ActiveStore | ForEach-Object { $addrs[$_.InstanceID] = $_ }
+$apps = @{}; Get-NetFirewallApplicationFilter -All -PolicyStore ActiveStore | ForEach-Object { $apps[$_.InstanceID] = $_ }
+$svcs = @{}; Get-NetFirewallServiceFilter -All -PolicyStore ActiveStore | ForEach-Object { $svcs[$_.InstanceID] = $_ }
+$ifs = @{}; Get-NetFirewallInterfaceTypeFilter -All -PolicyStore ActiveStore | ForEach-Object { $ifs[$_.InstanceID] = $_ }
+$rules = @(Get-NetFirewallRule -PolicyStore ActiveStore -Direction Inbound -Enabled True | ForEach-Object {
   $p = $ports[$_.InstanceID]; $a = $addrs[$_.InstanceID]
   # Port rules are listed. A block without a port filter is returned too: it is not listed, but it beats any allow.
   if ($p -and $a -and (((@($p.LocalPort) -join ',') -ne 'Any') -or ([string]$_.Action -eq 'Block'))) {
@@ -975,6 +977,21 @@ mod tests {
         assert!(s.contains("ConvertTo-Json") && s.contains("-Compress"));
         assert!(!s.contains("Get-NetFirewallRule -ErrorAction SilentlyContinue"));
         assert_eq!(s.matches("SilentlyContinue").count(), 1); // chỉ tra tên tiến trình
+    }
+
+    // Group Policy can override local firewall settings: display and guard must read the effective policy (ActiveStore),
+    // while writes stay in the persistent store where a local change can live.
+    #[test]
+    fn windows_firewall_reads_active_store_and_writes_persistent_store() {
+        let s = windows_firewall_read_script("10.0.0.9");
+        assert_eq!(s.matches("Get-NetFirewall").count(), 7);
+        assert_eq!(s.matches("-PolicyStore ActiveStore").count(), 7, "{s}");
+        let writes = [
+            build_windows_firewall_state_script(true, Some(22)),
+            build_windows_add_rule_script("allow", "any", "8080", "tcp").unwrap(),
+            build_windows_delete_rule_script(&win_rule("ssh-box")).unwrap(),
+        ];
+        assert!(writes.iter().all(|w| !w.contains("PolicyStore")));
     }
 
     // JSON hỏng phải ra COMMAND_FAILED, không phải một danh sách rỗng trông như "an toàn".

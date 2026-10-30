@@ -74,8 +74,15 @@ pub fn compute_support(p: &VpsProbe) -> VpsSupport {
             access: tab(Full, None),
             password_coupled: false,
         },
+        OsFamily::Macos => VpsSupport {
+            ssh: if p.caps.sshd_dropin { tab(Full, None) } else { tab(ReadOnly, Some("macos_no_dropin")) },
+            ssh_rows: SshRows { port: false, ..all_rows },
+            firewall: tab(Hidden, None),
+            access: tab(Hidden, None),
+            password_coupled: true,
+        },
         // Later tasks open these tab by tab.
-        OsFamily::Macos | OsFamily::Windows => VpsSupport {
+        OsFamily::Windows => VpsSupport {
             ssh: tab(Hidden, None),
             ssh_rows: all_rows,
             firewall: tab(Hidden, None),
@@ -136,12 +143,10 @@ mod tests {
     // Until later tasks add real probes, a non-Linux host must not expose any write path.
     #[test]
     fn macos_and_windows_start_hidden() {
-        for family in [OsFamily::Macos, OsFamily::Windows] {
-            let mut p = linux(true, "ufw");
-            p.os_family = family;
-            let s = compute_support(&p);
-            assert!([s.ssh.level, s.firewall.level, s.access.level].iter().all(|l| *l == SupportLevel::Hidden));
-        }
+        let mut p = linux(true, "ufw");
+        p.os_family = OsFamily::Windows;
+        let s = compute_support(&p);
+        assert!([s.ssh.level, s.firewall.level, s.access.level].iter().all(|l| *l == SupportLevel::Hidden));
     }
 
     // Git for Windows answers `uname`; it must still reach the Windows probe, not be treated as unix.

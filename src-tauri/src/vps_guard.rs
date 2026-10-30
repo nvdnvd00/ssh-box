@@ -228,6 +228,7 @@ mod tests {
             login_grace_time: 120,
             client_alive_interval: 0,
             client_alive_count_max: 3,
+            kbd_interactive_authentication: true,
         }
     }
     fn rule(index: u32, action: &str, to: &str, from: &str) -> FirewallRuleItem {

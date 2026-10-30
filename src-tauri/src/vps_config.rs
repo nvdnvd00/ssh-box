@@ -1,4 +1,5 @@
 use crate::ssh_pool::{AuthUsed, SshPool};
+use crate::vps_macos::{build_sshd_apply_script_macos, MACOS_ROLLBACK_LABEL, MACOS_ROLLBACK_PLIST};
 use crate::vps_support::{check_hidden_rows, compute_support, unix_family, OsCaps, OsFamily, SupportLevel, VpsSupport};
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +67,8 @@ pub struct SshdSettings {
     pub login_grace_time: u32,
     pub client_alive_interval: u32,
     pub client_alive_count_max: u32,
+    // macOS: password login also goes through keyboard-interactive, so the UI toggles both together.
+    pub kbd_interactive_authentication: bool,
 }
 
 // OpenSSH defaults, used when `sshd -T` omits a directive.
@@ -83,6 +86,7 @@ impl Default for SshdSettings {
             login_grace_time: 120,
             client_alive_interval: 0,
             client_alive_count_max: 3,
+            kbd_interactive_authentication: true,
         }
     }
 }
@@ -1371,6 +1375,9 @@ pub fn parse_sshd_t(raw: &str) -> SshdSettings {
             }
             "permitrootlogin" => s.permit_root_login = normalize_permit_root_login(val),
             "passwordauthentication" => s.password_authentication = parse_yes_no(val, true),
+            "kbdinteractiveauthentication" | "challengeresponseauthentication" => {
+                s.kbd_interactive_authentication = parse_yes_no(val, true)
+            }
             "pubkeyauthentication" => s.pubkey_authentication = parse_yes_no(val, true),
             "allowusers" => allow.extend(val.split_whitespace().map(str::to_string)),
             "denyusers" => deny.extend(val.split_whitespace().map(str::to_string)),
@@ -1408,6 +1415,7 @@ fn sshd_directives(s: &SshdSettings) -> Vec<(&'static str, Option<String>)> {
         ("port", Some(format!("Port {}", s.port.max(1)))),
         ("permitrootlogin", Some(format!("PermitRootLogin {}", normalize_permit_root_login(&s.permit_root_login)))),
         ("passwordauthentication", Some(format!("PasswordAuthentication {}", yes_no(s.password_authentication)))),
+        ("kbdinteractiveauthentication", Some(format!("KbdInteractiveAuthentication {}", yes_no(s.kbd_interactive_authentication)))),
         ("pubkeyauthentication", Some(format!("PubkeyAuthentication {}", yes_no(s.pubkey_authentication)))),
         ("maxauthtries", Some(format!("MaxAuthTries {}", s.max_auth_tries.max(1)))),
         ("maxsessions", Some(format!("MaxSessions {}", s.max_sessions))),
@@ -1488,6 +1496,20 @@ pub fn render_sshd_config(base_raw: &str, managed: &[(&'static str, Option<Strin
     out
 }
 
+pub(crate) fn rollback_pending_cmd(os: OsFamily) -> String {
+    match os {
+        OsFamily::Macos => format!("launchctl print system/{MACOS_ROLLBACK_LABEL} >/dev/null 2>&1 && echo active || true"),
+        _ => "systemctl is-active sshbox-rollback.timer 2>/dev/null || true".to_string(),
+    }
+}
+
+fn stop_rollback_timer_cmd(os: OsFamily) -> String {
+    match os {
+        OsFamily::Macos => format!("launchctl bootout system/{MACOS_ROLLBACK_LABEL} 2>/dev/null || true; rm -f {MACOS_ROLLBACK_PLIST}"),
+        _ => "systemctl stop sshbox-rollback.timer 2>/dev/null || true".to_string(),
+    }
+}
+
 const SSHD_PART: &str = "---SSHBOX-PART---";
 
 pub fn parse_sshd_view(raw: &str) -> Result<SshdView, String> {
@@ -1522,8 +1544,9 @@ pub async fn get_sshd_view(
     );
     let script = format!(
         "sshd -T -C {spec} || exit 1\necho {SSHD_PART}\ncat {SSHD_MAIN_CONFIG}\necho {SSHD_PART}\n\
-cat {SSHD_DROPIN} 2>/dev/null || true\necho {SSHD_PART}\nsystemctl is-active sshbox-rollback.timer 2>/dev/null || true\n",
+cat {SSHD_DROPIN} 2>/dev/null || true\necho {SSHD_PART}\n{pending}\n",
         spec = shell_single_quote(&spec),
+        pending = rollback_pending_cmd(probe.os_family),
     );
     let raw = run_privileged_script(host_id, pool, sudo_password, &script, None).await?;
     parse_sshd_view(&raw)
@@ -1578,7 +1601,7 @@ fn sshd_firewall_cmd(plan: &ReloadPlan, open: bool) -> String {
     }
 }
 
-fn sshd_restore_fn(file: &str) -> String {
+pub(crate) fn sshd_restore_fn(file: &str) -> String {
     format!(
         "F={f}\nsshbox_restore() {{\n  if [ -e \"$F.sshbox.bak\" ]; then mv -f \"$F.sshbox.bak\" \"$F\";\n  \
 elif [ -e \"$F.sshbox.absent\" ]; then rm -f \"$F\" \"$F.sshbox.absent\"; fi\n}}\n",
@@ -1725,7 +1748,10 @@ pub async fn apply_sshd_settings(
     let probe = probe(host_id, pool, sudo_password.clone()).await?;
     let view = get_sshd_view(host_id, pool, sudo_password.clone()).await?;
     let plan = plan_sshd_apply(&probe, &view, &desired)?;
-    let script = build_sshd_apply_script(plan.file, SSHD_ROLLBACK_SCRIPT, &plan.reload);
+    let script = match probe.os_family {
+        OsFamily::Macos => build_sshd_apply_script_macos(plan.file, SSHD_ROLLBACK_SCRIPT, MACOS_ROLLBACK_PLIST),
+        _ => build_sshd_apply_script(plan.file, SSHD_ROLLBACK_SCRIPT, &plan.reload),
+    };
     let raw = run_privileged_script(host_id, pool, sudo_password, &script, Some(&plan.content)).await?;
     parse_apply_started(&raw, plan.reload.new_port)
 }
@@ -1759,7 +1785,7 @@ pub async fn verify_new_connection(
 }
 
 // Keeps the change. Fails if the rollback already ran (timer fired or "Roll back now").
-fn sshd_cleanup_script(rollback: &str, files: [&str; 2]) -> String {
+fn sshd_cleanup_script(rollback: &str, files: [&str; 2], os: OsFamily) -> String {
     let r = shell_single_quote(rollback);
     let markers: Vec<String> = files
         .iter()
@@ -1767,15 +1793,16 @@ fn sshd_cleanup_script(rollback: &str, files: [&str; 2]) -> String {
         .map(|m| shell_single_quote(&m))
         .collect();
     format!(
-        "systemctl stop sshbox-rollback.timer 2>/dev/null || true\n\
-if [ ! -e {r} ]; then echo SSHBOX_ALREADY_ROLLED_BACK; exit 5; fi\nrm -f {} {r}\n",
+        "{}\nif [ ! -e {r} ]; then echo SSHBOX_ALREADY_ROLLED_BACK; exit 5; fi\nrm -f {} {r}\n",
+        stop_rollback_timer_cmd(os),
         markers.join(" ")
     )
 }
 
-fn sshd_rollback_now_script() -> String {
+fn sshd_rollback_now_script(os: OsFamily) -> String {
     format!(
-        "if [ -e {r} ]; then /bin/sh {r}; fi\nsystemctl stop sshbox-rollback.timer 2>/dev/null || true\n",
+        "if [ -e {r} ]; then /bin/sh {r}; fi\n{}\n",
+        stop_rollback_timer_cmd(os),
         r = SSHD_ROLLBACK_SCRIPT
     )
 }
@@ -1788,16 +1815,17 @@ pub async fn finish_sshd_apply(
     new_port: Option<u16>,
 ) -> Result<SshdView, String> {
     let host = find_remote_host(host_id)?;
+    let os = probe(host_id, pool, sudo_password.clone()).await?.os_family;
     let expected_fp = pool
         .session_fingerprint(host_id)
         .await
         .ok_or_else(|| vps_err(ERR_COMMAND_FAILED, "no SSH session for this host"))?;
     // Unchanged port: verify where the app already connects (may differ from sshd's port behind NAT).
     if let Err(e) = verify_new_connection(pool, &host, new_port.unwrap_or(host.port), &expected_fp).await {
-        run_privileged_script(host_id, pool, sudo_password, &sshd_rollback_now_script(), None).await?;
+        run_privileged_script(host_id, pool, sudo_password, &sshd_rollback_now_script(os), None).await?;
         return Err(e);
     }
-    let cleanup = sshd_cleanup_script(SSHD_ROLLBACK_SCRIPT, [SSHD_DROPIN, SSHD_MAIN_CONFIG]);
+    let cleanup = sshd_cleanup_script(SSHD_ROLLBACK_SCRIPT, [SSHD_DROPIN, SSHD_MAIN_CONFIG], os);
     run_privileged_script(host_id, pool, sudo_password.clone(), &cleanup, None)
         .await
         .map_err(|_| vps_err(ERR_VERIFY_FAILED, "the change was rolled back before it could be kept"))?;
@@ -1809,7 +1837,8 @@ pub async fn revert_sshd_settings(
     pool: &SshPool,
     sudo_password: Option<String>,
 ) -> Result<SshdView, String> {
-    run_privileged_script(host_id, pool, sudo_password.clone(), &sshd_rollback_now_script(), None).await?;
+    let os = probe(host_id, pool, sudo_password.clone()).await?.os_family;
+    run_privileged_script(host_id, pool, sudo_password.clone(), &sshd_rollback_now_script(os), None).await?;
     get_sshd_view(host_id, pool, sudo_password).await
 }
 
@@ -2493,6 +2522,7 @@ exec sh -s"#;
             login_grace_time: 60,
             client_alive_interval: 300,
             client_alive_count_max: 2,
+            kbd_interactive_authentication: true,
         }
     }
 
@@ -2622,7 +2652,7 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         shell::fake_bin(&bin, "systemctl", "exit 0");
         let rollback = dir.join("rollback.sh");
         let files = [dir.join("a.conf"), dir.join("b.conf")];
-        let script = sshd_cleanup_script(rollback.to_str().unwrap(), [files[0].to_str().unwrap(), files[1].to_str().unwrap()]);
+        let script = sshd_cleanup_script(rollback.to_str().unwrap(), [files[0].to_str().unwrap(), files[1].to_str().unwrap()], OsFamily::Linux);
         let out = shell::run_local(&script, b"", &bin, &[], &dir);
         assert!(out.contains("SSHBOX_ALREADY_ROLLED_BACK"), "{out}");
         std::fs::write(&rollback, "").unwrap();
@@ -2773,6 +2803,134 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         run_rollback(&r);
         assert!(!r.file.exists());
         assert!(!r.dir.join("00-sshbox.conf.sshbox.absent").exists());
+    }
+
+    // macOS: turning off only PasswordAuthentication still allows password login via keyboard-interactive.
+    #[test]
+    fn parses_kbd_interactive_from_both_names() {
+        assert!(!parse_sshd_t("kbdinteractiveauthentication no\n").kbd_interactive_authentication);
+        assert!(!parse_sshd_t("challengeresponseauthentication no\n").kbd_interactive_authentication);
+        assert!(parse_sshd_t("port 22\n").kbd_interactive_authentication);
+    }
+
+    // Linux must never get an extra KbdInteractiveAuthentication line written behind the user's back.
+    #[test]
+    fn linux_password_toggle_does_not_touch_kbd() {
+        let cur = SshdSettings::default();
+        let want = SshdSettings { password_authentication: false, ..cur.clone() };
+        let d = changed_directives(&cur, &want);
+        assert_eq!(d, vec![("passwordauthentication", Some("PasswordAuthentication no".to_string()))]);
+    }
+
+    fn macos_probe(include: bool) -> VpsProbe {
+        let raw = format!("{PROBE_MAC}{}Port 22\n", if include { "Include /etc/ssh/sshd_config.d/*\n" } else { "" });
+        parse_probe_output(&raw, key_auth()).unwrap()
+    }
+
+    // Without a drop-in folder macOS would need main-file edits, which we do not offer.
+    #[test]
+    fn macos_support_full_with_dropin_readonly_without() {
+        let s = macos_probe(true).support;
+        assert_eq!(s.ssh.level, SupportLevel::Full);
+        assert!(!s.ssh_rows.port && s.password_coupled);
+        let s = macos_probe(false).support;
+        assert_eq!((s.ssh.level, s.ssh.reason.as_deref()), (SupportLevel::ReadOnly, Some("macos_no_dropin")));
+    }
+
+    // The Port row is hidden on macOS, so a port change must be refused, not written.
+    #[test]
+    fn macos_plan_rejects_port_change() {
+        let view = SshdView { write_target: WriteTarget::DropIn, ..Default::default() };
+        let moved = SshdSettings { port: 2222, ..SshdSettings::default() };
+        let e = plan_sshd_apply(&macos_probe(true), &view, &moved).unwrap_err();
+        assert!(e.starts_with("UNSUPPORTED: hidden_setting"), "{e}");
+    }
+
+    #[cfg(unix)]
+    struct MacRun {
+        out: String,
+        log: String,
+        file: std::path::PathBuf,
+        plist: std::path::PathBuf,
+        rollback: std::path::PathBuf,
+        bin: std::path::PathBuf,
+        dir: std::path::PathBuf,
+    }
+
+    // Runs the macOS apply script locally with fake sshd/launchctl; `launchctl print` exits FAKE_PENDING (default 1).
+    #[cfg(unix)]
+    fn run_mac_apply(existing: Option<&str>, envs: &[(&str, &str)]) -> MacRun {
+        let dir = shell::temp_dir();
+        let bin = dir.join("bin");
+        let log = dir.join("calls.log");
+        shell::fake_bin(&bin, "sshd", r#"echo "sshd $*" >> "$FAKE_LOG"; [ "$1" = "-t" ] && exit "${FAKE_SSHD_T:-0}"; exit 0"#);
+        shell::fake_bin(&bin, "launchctl", r#"[ "$1" = print ] && exit "${FAKE_PENDING:-1}"; echo "launchctl $*" >> "$FAKE_LOG"; exit 0"#);
+        let file = dir.join("00-sshbox.conf");
+        if let Some(c) = existing {
+            std::fs::write(&file, c).unwrap();
+        }
+        let secret = dir.join("secret");
+        std::fs::write(&secret, "PasswordAuthentication no\n").unwrap();
+        let (plist, rollback) = (dir.join("rb.plist"), dir.join("sshbox-rollback.sh"));
+        let script = crate::vps_macos::build_sshd_apply_script_macos(
+            file.to_str().unwrap(), rollback.to_str().unwrap(), plist.to_str().unwrap());
+        let mut all = vec![("FAKE_LOG", log.to_str().unwrap()), ("SSHBOX_SECRET_FILE", secret.to_str().unwrap())];
+        all.extend_from_slice(envs);
+        let out = shell::run_local(&script, b"", &bin, &all, &dir);
+        let log = std::fs::read_to_string(&log).unwrap_or_default();
+        MacRun { out, log, file, plist, rollback, bin, dir }
+    }
+
+    // The launchd job is the only thing that can undo a bad change after the SSH session dies.
+    #[cfg(unix)]
+    #[test]
+    fn macos_apply_backs_up_writes_and_arms_launchd() {
+        let r = run_mac_apply(Some("Port 22\n"), &[]);
+        assert!(r.out.contains("NOW:") && r.out.contains("ROLLBACK_AT:"), "{}", r.out);
+        assert!(r.log.contains(&format!("launchctl bootstrap system {}", r.plist.display())), "{}", r.log);
+        assert!(std::fs::read_to_string(&r.plist).unwrap().contains("sleep 60"));
+        assert_eq!(std::fs::read_to_string(&r.file).unwrap(), "PasswordAuthentication no\n");
+        assert_eq!(std::fs::read_to_string(r.dir.join("00-sshbox.conf.sshbox.bak")).unwrap(), "Port 22\n");
+        assert!(!r.log.contains("reload") && !r.log.contains("kill"), "{}", r.log);
+    }
+
+    // A config sshd rejects must be undone before any timer exists.
+    #[cfg(unix)]
+    #[test]
+    fn macos_apply_invalid_config_restores_and_never_arms() {
+        let r = run_mac_apply(Some("Port 22\n"), &[("FAKE_SSHD_T", "1")]);
+        assert!(r.out.contains("SSHBOX_SSHD_INVALID"), "{}", r.out);
+        assert_eq!(std::fs::read_to_string(&r.file).unwrap(), "Port 22\n");
+        assert!(!r.log.contains("launchctl"), "{}", r.log);
+    }
+
+    // Rolling back must restore the file and leave no plist that would re-fire at the next boot.
+    #[cfg(unix)]
+    #[test]
+    fn macos_rollback_restores_and_removes_plist() {
+        let r = run_mac_apply(Some("Port 22\n"), &[]);
+        let log = r.dir.join("calls.log");
+        shell::run_local(&format!("/bin/sh {}", r.rollback.display()), b"", &r.bin, &[("FAKE_LOG", log.to_str().unwrap())], &r.dir);
+        let log = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(std::fs::read_to_string(&r.file).unwrap(), "Port 22\n");
+        assert!(!r.plist.exists() && !r.rollback.exists());
+        assert!(log.trim_end().ends_with("launchctl bootout system/com.sshbox.rollback"), "{log}");
+    }
+
+    // bootout kills the process running the script, so anything after it would never run.
+    #[test]
+    fn macos_rollback_script_ends_with_bootout() {
+        let s = crate::vps_macos::build_sshd_rollback_script_macos("/f", "/p.plist");
+        assert!(s.trim_end().ends_with("launchctl bootout system/com.sshbox.rollback"), "{s}");
+    }
+
+    // A second apply while one is unverified would overwrite the only good backup.
+    #[cfg(unix)]
+    #[test]
+    fn macos_apply_refuses_while_rollback_pending() {
+        let r = run_mac_apply(Some("Port 22\n"), &[("FAKE_PENDING", "0")]);
+        assert!(r.out.contains("SSHBOX_ROLLBACK_PENDING"), "{}", r.out);
+        assert_eq!(std::fs::read_to_string(&r.file).unwrap(), "Port 22\n");
     }
 
     fn probe_for(ctx_user: &str, has_systemd: bool) -> VpsProbe {

@@ -47,7 +47,9 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
     return () => window.clearInterval(id);
   }, [progress?.phase]);
 
-  const { ssh, sshRows } = probe.support;
+  const { ssh, sshRows, passwordCoupled } = probe.support;
+  // macOS: password login also works through keyboard-interactive, so both fields move together.
+  const passwordOn = (c: SshdSettings) => c.passwordAuthentication || (passwordCoupled && c.kbdInteractiveAuthentication);
   const readOnly = ssh.level === "readOnly" || !!res.data?.rollbackPending;
   const set = <K extends keyof SshdSettings>(key: K, value: SshdSettings[K]) =>
     setDraft((d) => (d ? { ...d, [key]: value } : d));
@@ -61,6 +63,7 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
   const labels: Record<keyof SshdSettings, string> = {
     port: t.vpsSshPort,
     passwordAuthentication: t.vpsSshPassword,
+    kbdInteractiveAuthentication: t.vpsSshPassword,
     pubkeyAuthentication: t.vpsSshPubkey,
     permitRootLogin: t.vpsSshRoot,
     allowUsers: t.vpsSshAllowUsers,
@@ -80,8 +83,10 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
   const changes: PendingChange[] = useMemo(() => {
     if (!current || !draft) return [];
     return (Object.keys(labels) as (keyof SshdSettings)[])
-      .filter((k) => show(k, current[k]) !== show(k, draft[k]))
-      .map((k) => ({ label: labels[k], from: show(k, current[k]), to: show(k, draft[k]) }));
+      .filter((k) => k !== "kbdInteractiveAuthentication")
+      .map((k) => (k === "passwordAuthentication" ? { k, from: passwordOn(current), to: passwordOn(draft) } : { k, from: current[k], to: draft[k] }))
+      .filter((c) => show(c.k, c.from) !== show(c.k, c.to))
+      .map((c) => ({ label: labels[c.k], from: show(c.k, c.from), to: show(c.k, c.to) }));
   }, [current, draft, t]);
   const valid =
     !!draft &&
@@ -141,7 +146,7 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
   if (!draft || !current) return res.error ? <Notice tone="danger">{res.error}</Notice> : null;
 
   const checks = [
-    { id: "row-password", label: t.vpsSshCheckPassword, ok: !current.passwordAuthentication },
+    { id: "row-password", label: t.vpsSshCheckPassword, ok: !passwordOn(current) },
     ...(sshRows.permitRootLogin ? [{ id: "row-root", label: t.vpsSshCheckRoot, ok: current.permitRootLogin !== "yes" }] : []),
     { id: "row-maxauth", label: t.vpsSshCheckMaxAuth, ok: current.maxAuthTries <= 4 },
   ];
@@ -206,7 +211,7 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
             </SettingRow>
           )}
           <SettingRow id="row-password" label={t.vpsSshPassword} directive="PasswordAuthentication">
-            <Switch label={t.vpsSshPassword} checked={draft.passwordAuthentication} onChange={(v) => set("passwordAuthentication", v)} />
+            <Switch label={t.vpsSshPassword} checked={passwordOn(draft)} onChange={(v) => setDraft((d) => d && { ...d, passwordAuthentication: v, ...(passwordCoupled && { kbdInteractiveAuthentication: v }) })} />
           </SettingRow>
           <SettingRow label={t.vpsSshPubkey} directive="PubkeyAuthentication">
             <Switch label={t.vpsSshPubkey} checked={draft.pubkeyAuthentication} onChange={(v) => set("pubkeyAuthentication", v)} />

@@ -194,6 +194,7 @@ export interface SshdSettings {
   port: number;
   permitRootLogin: string;
   passwordAuthentication: boolean;
+  kbdInteractiveAuthentication: boolean;
   pubkeyAuthentication: boolean;
   allowUsers: string[];
   denyUsers: string[];

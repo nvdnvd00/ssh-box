@@ -51,7 +51,8 @@ pub async fn run_windows_script(
 }
 
 pub const WINDOWS_PROBE_SCRIPT: &str = r#"Write-Output 'OS_FAMILY:windows'
-Write-Output ('OS_CAPTION:' + (Get-CimInstance Win32_OperatingSystem).Caption)
+# A standard account gets "Access denied" from CIM; OS_PRODUCT then names the OS.
+Write-Output ('OS_CAPTION:' + (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).Caption)
 $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
 Write-Output ('OS_DISPLAY_VERSION:' + $cv.DisplayVersion)
 Write-Output ('OS_PRODUCT:' + $cv.ProductName)
@@ -680,6 +681,13 @@ mod tests {
         assert_eq!(no_cim("Windows 10 Pro", "19045"), "10 Pro 24H2");
         assert_eq!(no_cim("Windows Server 2025 Datacenter", "26100"), "Server 2025 Datacenter 24H2");
         assert!(WINDOWS_PROBE_SCRIPT.contains("OS_PRODUCT:") && WINDOWS_PROBE_SCRIPT.contains("OS_BUILD:"));
+    }
+
+    // CIM denies a standard account; under EAP=Stop that aborted the whole probe and the host showed "unsupported OS".
+    #[test]
+    fn windows_probe_script_survives_cim_access_denied() {
+        let cim = WINDOWS_PROBE_SCRIPT.lines().find(|l| l.contains("Get-CimInstance")).unwrap();
+        assert!(cim.contains("-ErrorAction SilentlyContinue"), "{cim}");
     }
 
     // Người dùng không phải Administrator không được coi là có quyền ghi.

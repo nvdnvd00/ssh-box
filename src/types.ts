@@ -305,6 +305,49 @@ export interface AccessKeysSnapshot {
   accounts: LinuxAccountItem[];
 }
 
+export interface KernelSysctlSnapshot {
+  kernelRelease: string;
+  availableCongestionControls: string[];
+  bbrSupported: boolean;
+  bbrActive: boolean;
+  congestionControl: string;
+  defaultQdisc: string;
+  swappiness: number;
+  overcommitMemory: number;
+  vfsCachePressure: number;
+  fileMax: number;
+  somaxconn: number;
+  tcpMaxSynBacklog: number;
+  tcpTwReuse: boolean;
+  tcpFinTimeout: number;
+  tcpSyncookies: boolean;
+  icmpEchoIgnoreAll: boolean;
+  rpFilter: boolean;
+  acceptRedirects: boolean;
+  acceptSourceRoute: boolean;
+  ipForward: boolean;
+  persistedConfig: string;
+}
+
+export interface KernelSysctlUpdate {
+  congestionControl: string;
+  defaultQdisc: string;
+  swappiness: number;
+  overcommitMemory: number;
+  vfsCachePressure: number;
+  fileMax: number;
+  somaxconn: number;
+  tcpMaxSynBacklog: number;
+  tcpTwReuse: boolean;
+  tcpFinTimeout: number;
+  tcpSyncookies: boolean;
+  icmpEchoIgnoreAll: boolean;
+  rpFilter: boolean;
+  acceptRedirects: boolean;
+  acceptSourceRoute: boolean;
+  ipForward: boolean;
+}
+
 export interface KnownHostEntry {
   id: string;
   hostPattern: string;

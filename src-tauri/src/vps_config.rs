@@ -228,6 +228,81 @@ pub struct AccessKeysSnapshot {
     pub accounts: Vec<LinuxAccountItem>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KernelSysctlSnapshot {
+    pub kernel_release: String,
+    pub available_congestion_controls: Vec<String>,
+    pub bbr_supported: bool,
+    pub bbr_active: bool,
+    pub congestion_control: String,
+    pub default_qdisc: String,
+    pub swappiness: u32,
+    pub overcommit_memory: u32,
+    pub vfs_cache_pressure: u32,
+    pub file_max: u64,
+    pub somaxconn: u32,
+    pub tcp_max_syn_backlog: u32,
+    pub tcp_tw_reuse: bool,
+    pub tcp_fin_timeout: u32,
+    pub tcp_syncookies: bool,
+    pub icmp_echo_ignore_all: bool,
+    pub rp_filter: bool,
+    pub accept_redirects: bool,
+    pub accept_source_route: bool,
+    pub ip_forward: bool,
+    pub persisted_config: String,
+}
+
+impl Default for KernelSysctlSnapshot {
+    fn default() -> Self {
+        Self {
+            kernel_release: "Linux".to_string(),
+            available_congestion_controls: vec!["cubic".to_string(), "reno".to_string()],
+            bbr_supported: false,
+            bbr_active: false,
+            congestion_control: "cubic".to_string(),
+            default_qdisc: "fq_codel".to_string(),
+            swappiness: 60,
+            overcommit_memory: 0,
+            vfs_cache_pressure: 100,
+            file_max: 524288,
+            somaxconn: 4096,
+            tcp_max_syn_backlog: 4096,
+            tcp_tw_reuse: false,
+            tcp_fin_timeout: 60,
+            tcp_syncookies: true,
+            icmp_echo_ignore_all: false,
+            rp_filter: true,
+            accept_redirects: false,
+            accept_source_route: false,
+            ip_forward: false,
+            persisted_config: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KernelSysctlUpdate {
+    pub congestion_control: String,
+    pub default_qdisc: String,
+    pub swappiness: u32,
+    pub overcommit_memory: u32,
+    pub vfs_cache_pressure: u32,
+    pub file_max: u64,
+    pub somaxconn: u32,
+    pub tcp_max_syn_backlog: u32,
+    pub tcp_tw_reuse: bool,
+    pub tcp_fin_timeout: u32,
+    pub tcp_syncookies: bool,
+    pub icmp_echo_ignore_all: bool,
+    pub rp_filter: bool,
+    pub accept_redirects: bool,
+    pub accept_source_route: bool,
+    pub ip_forward: bool,
+}
+
 fn is_public_bind_address(bind_addr: &str) -> bool {
     let clean = bind_addr
         .trim()
@@ -2840,6 +2915,341 @@ pub async fn update_linux_user_privilege(
     get_access_keys_snapshot(host_id, pool, sudo_password).await
 }
 
+fn parse_sysctl_bool(val: &str, default: bool) -> bool {
+    let s = val.trim().to_ascii_lowercase();
+    match s.as_str() {
+        "1" | "2" | "yes" | "true" => true,
+        "0" | "no" | "false" => false,
+        _ => default,
+    }
+}
+
+fn kernel_release_supports_bbr(release: &str) -> bool {
+    let clean = release.trim();
+    let mut parts = clean.split(|c: char| !c.is_ascii_digit());
+    let Some(maj_s) = parts.next() else {
+        return false;
+    };
+    let Some(min_s) = parts.next() else {
+        return false;
+    };
+    if let (Ok(maj), Ok(min)) = (maj_s.parse::<u32>(), min_s.parse::<u32>()) {
+        return maj > 4 || (maj == 4 && min >= 9);
+    }
+    false
+}
+
+fn sanitize_sysctl_token(raw: &str, fallback: &str) -> String {
+    let clean: String = raw
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    if clean.is_empty() {
+        fallback.to_string()
+    } else {
+        clean.to_ascii_lowercase()
+    }
+}
+
+pub fn parse_kernel_sysctl_snapshot(raw: &str) -> KernelSysctlSnapshot {
+    let mut snap = KernelSysctlSnapshot::default();
+    let mut section = "";
+    let mut bbr_mod_available = false;
+    let mut persisted_lines: Vec<String> = Vec::new();
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        match trimmed {
+            "---KERNEL_META---" => {
+                section = "meta";
+                continue;
+            }
+            "---SYSCTL---" => {
+                section = "sysctl";
+                continue;
+            }
+            "---PERSISTED---" => {
+                section = "persisted";
+                continue;
+            }
+            _ => {}
+        }
+
+        if section == "persisted" {
+            persisted_lines.push(line.to_string());
+            continue;
+        }
+
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+
+        if let Some(v) = trimmed.strip_prefix("KERNEL_RELEASE:") {
+            let rel = v.trim();
+            if !rel.is_empty() {
+                snap.kernel_release = rel.to_string();
+            }
+            continue;
+        }
+        if let Some(v) = trimmed.strip_prefix("AVAILABLE_CC:") {
+            let list: Vec<String> = v
+                .split_whitespace()
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !list.is_empty() {
+                snap.available_congestion_controls = list;
+            }
+            continue;
+        }
+        if let Some(v) = trimmed.strip_prefix("BBR_MOD_AVAILABLE:") {
+            bbr_mod_available = parse_yes_no(v, false);
+            continue;
+        }
+
+        let without_comment = trimmed.split('#').next().unwrap_or("").trim();
+        if let Some((k, v)) = without_comment.split_once('=') {
+            let key = k.trim();
+            let val = v.trim();
+            match key {
+                "net.core.default_qdisc" => {
+                    let q = sanitize_sysctl_token(val, &snap.default_qdisc);
+                    if !q.is_empty() {
+                        snap.default_qdisc = q;
+                    }
+                }
+                "net.ipv4.tcp_congestion_control" => {
+                    let cc = sanitize_sysctl_token(val, &snap.congestion_control);
+                    if !cc.is_empty() {
+                        snap.congestion_control = cc;
+                    }
+                }
+                "net.ipv4.tcp_available_congestion_control" => {
+                    let list: Vec<String> = val
+                        .split_whitespace()
+                        .map(|s| s.trim().to_ascii_lowercase())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if !list.is_empty() {
+                        snap.available_congestion_controls = list;
+                    }
+                }
+                "vm.swappiness" => {
+                    if let Ok(n) = val.parse::<u32>() {
+                        snap.swappiness = n.min(200);
+                    }
+                }
+                "vm.overcommit_memory" => {
+                    if let Ok(n) = val.parse::<u32>() {
+                        snap.overcommit_memory = n.min(2);
+                    }
+                }
+                "vm.vfs_cache_pressure" => {
+                    if let Ok(n) = val.parse::<u32>() {
+                        snap.vfs_cache_pressure = n.clamp(1, 10000);
+                    }
+                }
+                "fs.file-max" => {
+                    if let Ok(n) = val.parse::<u64>() {
+                        if n > 0 {
+                            snap.file_max = n;
+                        }
+                    }
+                }
+                "net.core.somaxconn" => {
+                    if let Ok(n) = val.parse::<u32>() {
+                        if n > 0 {
+                            snap.somaxconn = n;
+                        }
+                    }
+                }
+                "net.ipv4.tcp_max_syn_backlog" => {
+                    if let Ok(n) = val.parse::<u32>() {
+                        if n > 0 {
+                            snap.tcp_max_syn_backlog = n;
+                        }
+                    }
+                }
+                "net.ipv4.tcp_tw_reuse" => {
+                    snap.tcp_tw_reuse = parse_sysctl_bool(val, snap.tcp_tw_reuse);
+                }
+                "net.ipv4.tcp_fin_timeout" => {
+                    if let Ok(n) = val.parse::<u32>() {
+                        if n > 0 {
+                            snap.tcp_fin_timeout = n;
+                        }
+                    }
+                }
+                "net.ipv4.tcp_syncookies" => {
+                    snap.tcp_syncookies = parse_sysctl_bool(val, snap.tcp_syncookies);
+                }
+                "net.ipv4.icmp_echo_ignore_all" => {
+                    snap.icmp_echo_ignore_all = parse_sysctl_bool(val, snap.icmp_echo_ignore_all);
+                }
+                "net.ipv4.conf.all.rp_filter" => {
+                    snap.rp_filter = parse_sysctl_bool(val, snap.rp_filter);
+                }
+                "net.ipv4.conf.all.accept_redirects" => {
+                    snap.accept_redirects = parse_sysctl_bool(val, snap.accept_redirects);
+                }
+                "net.ipv4.conf.all.accept_source_route" => {
+                    snap.accept_source_route = parse_sysctl_bool(val, snap.accept_source_route);
+                }
+                "net.ipv4.ip_forward" => {
+                    snap.ip_forward = parse_sysctl_bool(val, snap.ip_forward);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    snap.persisted_config = persisted_lines.join("\n").trim().to_string();
+    snap.bbr_active = snap.congestion_control.eq_ignore_ascii_case("bbr");
+
+    let has_bbr_in_list = snap
+        .available_congestion_controls
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case("bbr"));
+
+    snap.bbr_supported = has_bbr_in_list
+        || bbr_mod_available
+        || snap.bbr_active
+        || kernel_release_supports_bbr(&snap.kernel_release);
+
+    if snap.bbr_supported && !has_bbr_in_list {
+        snap.available_congestion_controls.push("bbr".to_string());
+    }
+
+    snap
+}
+
+pub fn render_sysctl_conf(update: &KernelSysctlUpdate) -> String {
+    let qdisc = sanitize_sysctl_token(&update.default_qdisc, "fq");
+    let cc = sanitize_sysctl_token(&update.congestion_control, "bbr");
+    let swappiness = update.swappiness.min(100);
+    let overcommit = update.overcommit_memory.min(2);
+    let vfs_pressure = update.vfs_cache_pressure.clamp(1, 500);
+    let file_max = update.file_max.max(65536);
+    let somaxconn = update.somaxconn.max(128);
+    let syn_backlog = update.tcp_max_syn_backlog.max(128);
+    let tw_reuse = u8::from(update.tcp_tw_reuse);
+    let fin_timeout = update.tcp_fin_timeout.clamp(5, 120);
+    let syncookies = u8::from(update.tcp_syncookies);
+    let icmp_ignore = u8::from(update.icmp_echo_ignore_all);
+    let rp_filter = u8::from(update.rp_filter);
+    let accept_redirects = u8::from(update.accept_redirects);
+    let accept_source_route = u8::from(update.accept_source_route);
+    let ip_forward = u8::from(update.ip_forward);
+
+    format!(
+        r#"# /etc/sysctl.d/99-sshbox.conf — Managed by SSH-Box Kernel & Network Tuning Studio
+# Congestion Control & Packet Scheduler
+net.core.default_qdisc = {qdisc}
+net.ipv4.tcp_congestion_control = {cc}
+
+# Virtual Memory & Swap Behavior
+vm.swappiness = {swappiness}
+vm.overcommit_memory = {overcommit}
+vm.vfs_cache_pressure = {vfs_pressure}
+
+# Filesystem & High-Concurrency Socket Backlogs
+fs.file-max = {file_max}
+net.core.somaxconn = {somaxconn}
+net.ipv4.tcp_max_syn_backlog = {syn_backlog}
+net.ipv4.tcp_tw_reuse = {tw_reuse}
+net.ipv4.tcp_fin_timeout = {fin_timeout}
+
+# Network Fortress, Anti-Spoofing & Routing
+net.ipv4.tcp_syncookies = {syncookies}
+net.ipv4.icmp_echo_ignore_all = {icmp_ignore}
+net.ipv4.conf.all.rp_filter = {rp_filter}
+net.ipv4.conf.default.rp_filter = {rp_filter}
+net.ipv4.conf.all.accept_redirects = {accept_redirects}
+net.ipv4.conf.default.accept_redirects = {accept_redirects}
+net.ipv4.conf.all.accept_source_route = {accept_source_route}
+net.ipv4.conf.default.accept_source_route = {accept_source_route}
+net.ipv4.ip_forward = {ip_forward}
+"#
+    )
+}
+
+pub fn build_apply_kernel_tuning_script(update: &KernelSysctlUpdate) -> String {
+    let rendered = render_sysctl_conf(update);
+    let modprobe_step = if update.congestion_control.trim().eq_ignore_ascii_case("bbr") {
+        "modprobe tcp_bbr 2>/dev/null || true\n"
+    } else {
+        ""
+    };
+
+    format!(
+        r#"{modprobe_step}mkdir -p /etc/sysctl.d
+cat << 'SSHBOX_SYSCTL_EOF' > /etc/sysctl.d/99-sshbox.conf
+{rendered}SSHBOX_SYSCTL_EOF
+chmod 0644 /etc/sysctl.d/99-sshbox.conf
+sysctl -e -p /etc/sysctl.d/99-sshbox.conf >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || true"#
+    )
+}
+
+pub async fn get_kernel_snapshot(
+    host_id: &str,
+    pool: &SshPool,
+    sudo_password: Option<String>,
+) -> Result<KernelSysctlSnapshot, String> {
+    let script = r#"
+echo "---KERNEL_META---"
+krel=$(uname -r 2>/dev/null || echo "Linux")
+echo "KERNEL_RELEASE:$krel"
+avail_cc=$(cat /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null || sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "cubic reno")
+echo "AVAILABLE_CC:$avail_cc"
+bbr_mod=0
+if printf '%s\n' "$avail_cc" | grep -qw bbr; then
+  bbr_mod=1
+elif modinfo tcp_bbr >/dev/null 2>&1 || find "/lib/modules/$krel" -name '*bbr*' 2>/dev/null | grep -q bbr; then
+  bbr_mod=1
+elif grep -q CONFIG_TCP_CONG_BBR "/boot/config-$krel" 2>/dev/null; then
+  bbr_mod=1
+fi
+echo "BBR_MOD_AVAILABLE:$bbr_mod"
+echo "---SYSCTL---"
+sysctl -e \
+  net.core.default_qdisc \
+  net.ipv4.tcp_congestion_control \
+  net.ipv4.tcp_available_congestion_control \
+  vm.swappiness \
+  vm.overcommit_memory \
+  vm.vfs_cache_pressure \
+  fs.file-max \
+  net.core.somaxconn \
+  net.ipv4.tcp_max_syn_backlog \
+  net.ipv4.tcp_tw_reuse \
+  net.ipv4.tcp_fin_timeout \
+  net.ipv4.tcp_syncookies \
+  net.ipv4.icmp_echo_ignore_all \
+  net.ipv4.conf.all.rp_filter \
+  net.ipv4.conf.all.accept_redirects \
+  net.ipv4.conf.all.accept_source_route \
+  net.ipv4.ip_forward 2>/dev/null || true
+echo "---PERSISTED---"
+if [ -f /etc/sysctl.d/99-sshbox.conf ]; then
+  cat /etc/sysctl.d/99-sshbox.conf 2>/dev/null || true
+fi
+"#;
+    let raw = run_privileged_script(host_id, pool, sudo_password, script).await?;
+    Ok(parse_kernel_sysctl_snapshot(&raw))
+}
+
+pub async fn apply_kernel_tuning(
+    host_id: &str,
+    pool: &SshPool,
+    update: KernelSysctlUpdate,
+    sudo_password: Option<String>,
+) -> Result<KernelSysctlSnapshot, String> {
+    let script = build_apply_kernel_tuning_script(&update);
+    run_privileged_script(host_id, pool, sudo_password.clone(), &script).await?;
+    get_kernel_snapshot(host_id, pool, sudo_password).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3483,5 +3893,128 @@ SHADOW:*
         let priv_script = build_update_linux_user_privilege_script("deploy", false, false, true).unwrap();
         assert!(priv_script.contains("rm -f '/etc/sudoers.d/90-sshbox-deploy'"));
         assert!(priv_script.contains("usermod -L 'deploy'"));
+    }
+
+    #[test]
+    fn parses_kernel_sysctl_snapshot_with_bbr_and_persisted_config() {
+        let raw = r#"
+---KERNEL_META---
+KERNEL_RELEASE:6.8.0-45-generic
+AVAILABLE_CC:reno cubic bbr
+BBR_MOD_AVAILABLE:1
+---SYSCTL---
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_available_congestion_control = reno cubic bbr
+vm.swappiness = 10
+vm.overcommit_memory = 1
+vm.vfs_cache_pressure = 50
+fs.file-max = 2097152
+net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 16384
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_syncookies = 1
+net.ipv4.icmp_echo_ignore_all = 1
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.ip_forward = 1
+---PERSISTED---
+# Managed by SSH-Box
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+"#;
+
+        let snap = parse_kernel_sysctl_snapshot(raw);
+        assert_eq!(snap.kernel_release, "6.8.0-45-generic");
+        assert_eq!(
+            snap.available_congestion_controls,
+            vec!["reno".to_string(), "cubic".to_string(), "bbr".to_string()]
+        );
+        assert!(snap.bbr_supported);
+        assert!(snap.bbr_active);
+        assert_eq!(snap.congestion_control, "bbr");
+        assert_eq!(snap.default_qdisc, "fq");
+        assert_eq!(snap.swappiness, 10);
+        assert_eq!(snap.overcommit_memory, 1);
+        assert_eq!(snap.vfs_cache_pressure, 50);
+        assert_eq!(snap.file_max, 2097152);
+        assert_eq!(snap.somaxconn, 65535);
+        assert_eq!(snap.tcp_max_syn_backlog, 16384);
+        assert!(snap.tcp_tw_reuse);
+        assert_eq!(snap.tcp_fin_timeout, 15);
+        assert!(snap.tcp_syncookies);
+        assert!(snap.icmp_echo_ignore_all);
+        assert!(snap.rp_filter);
+        assert!(!snap.accept_redirects);
+        assert!(!snap.accept_source_route);
+        assert!(snap.ip_forward);
+        assert!(snap.persisted_config.contains("net.ipv4.tcp_congestion_control = bbr"));
+    }
+
+    #[test]
+    fn renders_sysctl_conf_and_roundtrips_through_parser() {
+        let update = KernelSysctlUpdate {
+            congestion_control: "bbr".to_string(),
+            default_qdisc: "fq".to_string(),
+            swappiness: 10,
+            overcommit_memory: 1,
+            vfs_cache_pressure: 50,
+            file_max: 2097152,
+            somaxconn: 65535,
+            tcp_max_syn_backlog: 16384,
+            tcp_tw_reuse: true,
+            tcp_fin_timeout: 15,
+            tcp_syncookies: true,
+            icmp_echo_ignore_all: true,
+            rp_filter: true,
+            accept_redirects: false,
+            accept_source_route: false,
+            ip_forward: true,
+        };
+
+        let rendered = render_sysctl_conf(&update);
+        assert!(rendered.contains("net.core.default_qdisc = fq"));
+        assert!(rendered.contains("net.ipv4.tcp_congestion_control = bbr"));
+        assert!(rendered.contains("vm.swappiness = 10"));
+        assert!(rendered.contains("vm.overcommit_memory = 1"));
+        assert!(rendered.contains("vm.vfs_cache_pressure = 50"));
+        assert!(rendered.contains("fs.file-max = 2097152"));
+        assert!(rendered.contains("net.core.somaxconn = 65535"));
+        assert!(rendered.contains("net.ipv4.tcp_max_syn_backlog = 16384"));
+        assert!(rendered.contains("net.ipv4.tcp_tw_reuse = 1"));
+        assert!(rendered.contains("net.ipv4.tcp_fin_timeout = 15"));
+        assert!(rendered.contains("net.ipv4.tcp_syncookies = 1"));
+        assert!(rendered.contains("net.ipv4.icmp_echo_ignore_all = 1"));
+        assert!(rendered.contains("net.ipv4.conf.all.rp_filter = 1"));
+        assert!(rendered.contains("net.ipv4.conf.all.accept_redirects = 0"));
+        assert!(rendered.contains("net.ipv4.conf.all.accept_source_route = 0"));
+        assert!(rendered.contains("net.ipv4.ip_forward = 1"));
+
+        let reparsed = parse_kernel_sysctl_snapshot(&rendered);
+        assert_eq!(reparsed.congestion_control, "bbr");
+        assert_eq!(reparsed.default_qdisc, "fq");
+        assert!(reparsed.bbr_active);
+        assert!(reparsed.bbr_supported);
+        assert_eq!(reparsed.swappiness, 10);
+        assert_eq!(reparsed.overcommit_memory, 1);
+        assert_eq!(reparsed.vfs_cache_pressure, 50);
+        assert_eq!(reparsed.file_max, 2097152);
+        assert_eq!(reparsed.somaxconn, 65535);
+        assert_eq!(reparsed.tcp_max_syn_backlog, 16384);
+        assert!(reparsed.tcp_tw_reuse);
+        assert_eq!(reparsed.tcp_fin_timeout, 15);
+        assert!(reparsed.tcp_syncookies);
+        assert!(reparsed.icmp_echo_ignore_all);
+        assert!(reparsed.rp_filter);
+        assert!(!reparsed.accept_redirects);
+        assert!(!reparsed.accept_source_route);
+        assert!(reparsed.ip_forward);
+
+        let apply_script = build_apply_kernel_tuning_script(&update);
+        assert!(apply_script.contains("modprobe tcp_bbr 2>/dev/null || true"));
+        assert!(apply_script.contains("/etc/sysctl.d/99-sshbox.conf"));
+        assert!(apply_script.contains("sysctl -e -p /etc/sysctl.d/99-sshbox.conf"));
     }
 }

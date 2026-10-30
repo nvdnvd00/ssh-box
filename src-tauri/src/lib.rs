@@ -25,8 +25,8 @@ use tauri::State;
 use telemetry::{DockerFullSnapshot, ServerMetrics};
 use tokio::sync::mpsc;
 use vps_config::{
-    AccessKeysSnapshot, Fail2banSnapshot, FirewallSnapshot, SshdConfigSnapshot, SshdConfigUpdate,
-    VpsPrivilegeInfo,
+    AccessKeysSnapshot, Fail2banSnapshot, FirewallSnapshot, KernelSysctlSnapshot,
+    KernelSysctlUpdate, SshdConfigSnapshot, SshdConfigUpdate, VpsPrivilegeInfo,
 };
 
 pub struct AppState {
@@ -1086,6 +1086,25 @@ async fn vps_update_linux_user_privilege(
     .await
 }
 
+#[tauri::command]
+async fn vps_get_kernel_snapshot(
+    state: State<'_, AppState>,
+    host_id: String,
+    sudo_password: Option<String>,
+) -> Result<KernelSysctlSnapshot, String> {
+    vps_config::get_kernel_snapshot(&host_id, &state.ssh_pool, sudo_password).await
+}
+
+#[tauri::command]
+async fn vps_apply_kernel_tuning(
+    state: State<'_, AppState>,
+    host_id: String,
+    update: KernelSysctlUpdate,
+    sudo_password: Option<String>,
+) -> Result<KernelSysctlSnapshot, String> {
+    vps_config::apply_kernel_tuning(&host_id, &state.ssh_pool, update, sudo_password).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1170,6 +1189,8 @@ pub fn run() {
             vps_revoke_ssh_key,
             vps_create_linux_user,
             vps_update_linux_user_privilege,
+            vps_get_kernel_snapshot,
+            vps_apply_kernel_tuning,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

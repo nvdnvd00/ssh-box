@@ -26,7 +26,7 @@ use tauri::State;
 use telemetry::{DockerFullSnapshot, ServerMetrics};
 use tokio::sync::mpsc;
 use vps_config::{
-    AccessKeysSnapshot, FirewallSnapshot, SshdView, VpsProbe,
+    AccessKeysSnapshot, FirewallSnapshot, SshdApplyStarted, SshdSettings, SshdView, VpsProbe,
 };
 
 pub struct AppState {
@@ -841,6 +841,35 @@ async fn vps_get_sshd_settings(
 }
 
 #[tauri::command]
+async fn vps_apply_sshd_settings(
+    state: State<'_, AppState>,
+    host_id: String,
+    desired: SshdSettings,
+    sudo_password: Option<String>,
+) -> Result<SshdApplyStarted, String> {
+    vps_config::apply_sshd_settings(&host_id, &state.ssh_pool, sudo_password, desired).await
+}
+
+#[tauri::command]
+async fn vps_finish_sshd_apply(
+    state: State<'_, AppState>,
+    host_id: String,
+    new_port: u16,
+    sudo_password: Option<String>,
+) -> Result<SshdView, String> {
+    vps_config::finish_sshd_apply(&host_id, &state.ssh_pool, sudo_password, new_port).await
+}
+
+#[tauri::command]
+async fn vps_revert_sshd_settings(
+    state: State<'_, AppState>,
+    host_id: String,
+    sudo_password: Option<String>,
+) -> Result<SshdView, String> {
+    vps_config::revert_sshd_settings(&host_id, &state.ssh_pool, sudo_password).await
+}
+
+#[tauri::command]
 async fn vps_get_firewall_snapshot(
     state: State<'_, AppState>,
     host_id: String,
@@ -1065,6 +1094,9 @@ pub fn run() {
             save_session_log,
             vps_probe,
             vps_get_sshd_settings,
+            vps_apply_sshd_settings,
+            vps_finish_sshd_apply,
+            vps_revert_sshd_settings,
             vps_get_firewall_snapshot,
             vps_add_firewall_rule,
             vps_delete_firewall_rule,

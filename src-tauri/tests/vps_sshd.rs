@@ -5,6 +5,7 @@
 
 use ssh_box_lib::host_store::HostEntry;
 use ssh_box_lib::ssh_pool::{AuthUsed, SshPool};
+use ssh_box_lib::vps_config::verify_new_connection;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -18,7 +19,7 @@ struct TestSshd {
 
 impl Drop for TestSshd {
     fn drop(&mut self) {
-        let _ = Command::new("kill").arg(self.pid.to_string()).status();
+        let _ = Command::new("kill").arg(self.pid.to_string()).stderr(std::process::Stdio::null()).status();
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
@@ -44,20 +45,21 @@ fn keygen(path: &Path) -> String {
     public.split_whitespace().nth(1).unwrap().to_string()
 }
 
-fn start_sshd(name: &str, ports: &[u16], host_key: Option<&Path>) -> TestSshd {
+// `client`: reuse another test sshd's client key so one HostEntry can log in to both.
+fn start_sshd(name: &str, ports: &[u16], client: Option<&TestSshd>) -> TestSshd {
     let dir = std::env::temp_dir().join(format!("sshbox-it-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let host_key = match host_key {
-        Some(p) => p.to_path_buf(),
+    let host_key = dir.join("host_key");
+    keygen(&host_key);
+    let (client_key, client_pub_body) = match client {
+        Some(c) => (c.client_key.clone(), c.client_pub_body.clone()),
         None => {
-            let p = dir.join("host_key");
-            keygen(&p);
-            p
+            let k = dir.join("client");
+            let body = keygen(&k);
+            (k, body)
         }
     };
-    let client_key = dir.join("client");
-    let client_pub_body = keygen(&client_key);
     std::fs::copy(client_key.with_extension("pub"), dir.join("authorized_keys")).unwrap();
 
     let mut cfg: String = ports.iter().map(|p| format!("Port {p}\n")).collect();
@@ -160,4 +162,76 @@ fn dropin_wins_over_cloud_init_and_main_file() {
     std::fs::write(d.join("00-sshbox.conf"), render_dropin(&ours)).unwrap();
     assert!(!effective().password_authentication, "00-sshbox.conf should beat 50-cloud-init.conf");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// The pool's sessions live on the runtime that opened them, so each test uses one block_on.
+async fn fingerprint_of(pool: &SshPool, host: &HostEntry) -> String {
+    pool.get_or_connect(host, None).await.unwrap();
+    pool.session_fingerprint(&host.id).await.unwrap()
+}
+
+// Spec §4.2 step 8: a NEW connection on the new port, same host key, is the only proof.
+#[test]
+#[ignore]
+fn verify_succeeds_on_new_port_with_same_host_key() {
+    fake_home();
+    let a = start_sshd("verify-ok", &[22901, 22902], None);
+    let host = host_for(&a, 22901);
+    let pool = SshPool::default();
+    block_on(async {
+        let fp = fingerprint_of(&pool, &host).await;
+        verify_new_connection(&pool, &host, 22902, &fp).await.unwrap();
+    });
+}
+
+#[test]
+#[ignore]
+fn verify_fails_on_closed_port() {
+    fake_home();
+    let a = start_sshd("verify-closed", &[22904], None);
+    let host = host_for(&a, 22904);
+    let pool = SshPool::default();
+    block_on(async {
+        let fp = fingerprint_of(&pool, &host).await;
+        let err = verify_new_connection(&pool, &host, 22909, &fp).await.unwrap_err();
+        assert!(err.starts_with("VERIFY_FAILED"), "{err}");
+    });
+}
+
+// A different machine answering on the new port must fail, and its key must not stay trusted.
+#[test]
+#[ignore]
+fn verify_fails_on_different_host_key_and_forgets_it() {
+    let home = fake_home();
+    let a = start_sshd("verify-a", &[22905], None);
+    let b = start_sshd("verify-b", &[22903], Some(&a));
+    let host = host_for(&a, 22905);
+    let pool = SshPool::default();
+    block_on(async {
+        let fp = fingerprint_of(&pool, &host).await;
+        let err = verify_new_connection(&pool, &host, 22903, &fp).await.unwrap_err();
+        assert!(err.starts_with("VERIFY_FAILED") && err.contains("host key"), "{err}");
+    });
+    let known = std::fs::read_to_string(home.join(".ssh/known_hosts")).unwrap_or_default();
+    assert!(!known.contains("[127.0.0.1]:22903"), "{known}");
+    drop(b);
+}
+
+// After a reload the old session stays alive; verifying through it would always "succeed".
+#[test]
+#[ignore]
+fn old_session_is_not_proof() {
+    fake_home();
+    let a = start_sshd("verify-old", &[22906], None);
+    let host = host_for(&a, 22906);
+    let pool = SshPool::default();
+    block_on(async {
+        let fp = fingerprint_of(&pool, &host).await;
+        // Stop the listener; the per-connection child serving our session keeps running.
+        assert!(Command::new("kill").arg(a.pid.to_string()).status().unwrap().success());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(pool.exec_on_host(&host, "echo alive").await.unwrap().trim(), "alive");
+        let err = verify_new_connection(&pool, &host, 22906, &fp).await.unwrap_err();
+        assert!(err.starts_with("VERIFY_FAILED"), "{err}");
+    });
 }

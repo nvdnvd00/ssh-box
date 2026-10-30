@@ -1406,6 +1406,235 @@ systemctl is-active sshbox-rollback.timer 2>/dev/null || true\n",
     parse_sshd_view(&raw)
 }
 
+pub const SSHD_ROLLBACK_SCRIPT: &str = "/etc/ssh/sshbox-rollback.sh";
+
+// What the apply script must do besides writing the file (from the probe and the port change).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReloadPlan {
+    pub ssh_socket_active: bool,
+    pub selinux_enforcing: bool,
+    pub new_port: Option<u16>,
+    pub firewall_engine: FirewallEngine,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SshdApplyStarted {
+    pub rollback_at: i64,
+    pub server_now: i64,
+    pub new_port: u16,
+}
+
+fn sshd_reload_cmd(plan: &ReloadPlan, restart: bool) -> &'static str {
+    match (plan.ssh_socket_active, restart) {
+        (true, _) => "systemctl daemon-reload\nsystemctl restart ssh.socket",
+        (false, false) => "systemctl reload-or-restart ssh 2>/dev/null || systemctl reload-or-restart sshd",
+        (false, true) => "systemctl restart ssh 2>/dev/null || systemctl restart sshd",
+    }
+}
+
+// Opens (or, on rollback, closes) the new SSH port in the active firewall.
+fn sshd_firewall_cmd(plan: &ReloadPlan, open: bool) -> String {
+    let Some(port) = plan.new_port else {
+        return String::new();
+    };
+    match (plan.firewall_engine, open) {
+        (FirewallEngine::Ufw, true) => format!(
+            "if ufw status 2>/dev/null | grep -q '^Status: active'; then ufw allow {port}/tcp; fi\n"
+        ),
+        (FirewallEngine::Ufw, false) => format!("ufw delete allow {port}/tcp 2>/dev/null || true\n"),
+        (FirewallEngine::Firewalld, true) => format!(
+            "if firewall-cmd --state >/dev/null 2>&1; then firewall-cmd --permanent --add-port={port}/tcp && firewall-cmd --reload; fi\n"
+        ),
+        (FirewallEngine::Firewalld, false) => format!(
+            "firewall-cmd --permanent --remove-port={port}/tcp 2>/dev/null && firewall-cmd --reload 2>/dev/null || true\n"
+        ),
+        _ => String::new(),
+    }
+}
+
+fn sshd_restore_fn(file: &str) -> String {
+    format!(
+        "F={f}\nsshbox_restore() {{\n  if [ -e \"$F.sshbox.bak\" ]; then mv -f \"$F.sshbox.bak\" \"$F\";\n  \
+elif [ -e \"$F.sshbox.absent\" ]; then rm -f \"$F\" \"$F.sshbox.absent\"; fi\n}}\n",
+        f = shell_single_quote(file)
+    )
+}
+
+// Run by the systemd timer after 60s, on any failure after arming, or by "Roll back now".
+pub fn build_sshd_rollback_script(file: &str, plan: &ReloadPlan) -> String {
+    format!(
+        "#!/bin/sh\n{restore}sshbox_restore\n{reload}\n{firewall}systemctl stop sshbox-rollback.timer 2>/dev/null || true\nrm -f \"$0\"\n",
+        restore = sshd_restore_fn(file),
+        reload = sshd_reload_cmd(plan, true),
+        firewall = sshd_firewall_cmd(plan, false),
+    )
+}
+
+// Spec §4.2 steps 3–7. The new file content comes from $SSHBOX_SECRET_FILE.
+pub fn build_sshd_apply_script(file: &str, rollback_path: &str, plan: &ReloadPlan) -> String {
+    let semanage = match plan.new_port {
+        Some(port) if plan.selinux_enforcing && port != 22 => format!(
+            "semanage port -a -t ssh_port_t -p tcp {port} 2>/dev/null || semanage port -m -t ssh_port_t -p tcp {port}\n"
+        ),
+        _ => String::new(),
+    };
+    let port_check = plan
+        .new_port
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "$(sed -n 's/^Port \\([0-9]*\\).*/\\1/p' \"$F\" | head -n 1)".to_string());
+    format!(
+        r#"set -eu
+{restore}R={r}
+if systemctl is-active --quiet sshbox-rollback.timer 2>/dev/null; then echo SSHBOX_ROLLBACK_PENDING; exit 3; fi
+if [ -e "$F" ]; then cp -p "$F" "$F.sshbox.bak"; rm -f "$F.sshbox.absent"; else : > "$F.sshbox.absent"; rm -f "$F.sshbox.bak"; fi
+T=$(mktemp)
+cat "$SSHBOX_SECRET_FILE" > "$T"
+install -m 644 "$T" "$F"
+rm -f "$T"
+if ! sshd -t 2>&1; then sshbox_restore; echo SSHBOX_SSHD_INVALID; exit 1; fi
+cat > "$R" << 'SSHBOX_ROLLBACK_EOF'
+{rollback}SSHBOX_ROLLBACK_EOF
+chmod 700 "$R"
+trap 'rc=$?; [ "$rc" -eq 0 ] || /bin/sh "$R"; exit "$rc"' EXIT
+systemd-run --on-active=60 --unit=sshbox-rollback /bin/sh "$R" >/dev/null
+echo "NOW:$(date +%s)"
+echo "ROLLBACK_AT:$(( $(date +%s) + 60 ))"
+{semanage}{firewall}{reload}
+P={port_check}
+ss -tlnpH "sport = :$P" | grep -Eq 'sshd|systemd' || {{ echo SSHBOX_PORT_NOT_LISTENING; exit 4; }}
+"#,
+        restore = sshd_restore_fn(file),
+        r = shell_single_quote(rollback_path),
+        rollback = build_sshd_rollback_script(file, plan),
+        firewall = sshd_firewall_cmd(plan, true),
+        reload = sshd_reload_cmd(plan, false),
+    )
+}
+
+pub fn apply_preflight(probe: &VpsProbe, view: &SshdView, desired: &SshdSettings) -> Result<(), String> {
+    if !probe.has_systemd {
+        return Err(vps_err(ERR_UNSUPPORTED, "no_systemd"));
+    }
+    if view.rollback_pending {
+        return Err(vps_err(ERR_COMMAND_FAILED, "a previous change is still waiting for verification"));
+    }
+    crate::vps_guard::check_sshd(&probe.context, desired)
+}
+
+pub fn parse_apply_started(raw: &str, new_port: u16) -> Result<SshdApplyStarted, String> {
+    let num = |key: &str| {
+        raw.lines()
+            .find_map(|l| l.trim().strip_prefix(key))
+            .and_then(|v| v.trim().parse::<i64>().ok())
+    };
+    match (num("NOW:"), num("ROLLBACK_AT:")) {
+        (Some(server_now), Some(rollback_at)) => Ok(SshdApplyStarted { rollback_at, server_now, new_port }),
+        _ => Err(vps_err(ERR_COMMAND_FAILED, raw.trim())),
+    }
+}
+
+pub async fn apply_sshd_settings(
+    host_id: &str,
+    pool: &SshPool,
+    sudo_password: Option<String>,
+    desired: SshdSettings,
+) -> Result<SshdApplyStarted, String> {
+    let probe = probe(host_id, pool, sudo_password.clone()).await?;
+    let view = get_sshd_view(host_id, pool, sudo_password.clone()).await?;
+    apply_preflight(&probe, &view, &desired)?;
+    let plan = ReloadPlan {
+        ssh_socket_active: probe.ssh_socket_active,
+        selinux_enforcing: probe.selinux_enforcing,
+        new_port: (desired.port != view.settings.port).then_some(desired.port),
+        firewall_engine: probe.firewall_engine,
+    };
+    let (file, content) = match view.write_target {
+        WriteTarget::DropIn => (SSHD_DROPIN, render_dropin(&desired)),
+        WriteTarget::MainFile => {
+            let main = run_privileged_script(host_id, pool, sudo_password.clone(), &format!("cat {SSHD_MAIN_CONFIG}"), None).await?;
+            (SSHD_MAIN_CONFIG, render_sshd_config(&main, &desired))
+        }
+    };
+    let script = build_sshd_apply_script(file, SSHD_ROLLBACK_SCRIPT, &plan);
+    let raw = run_privileged_script(host_id, pool, sudo_password, &script, Some(&content)).await?;
+    parse_apply_started(&raw, desired.port)
+}
+
+// Opens a brand-new SSH connection on `new_port`; the live session proves nothing (spec §4.1).
+pub async fn verify_new_connection(
+    pool: &SshPool,
+    host: &crate::host_store::HostEntry,
+    new_port: u16,
+    expected_fp: &str,
+) -> Result<(), String> {
+    let known_hosts = crate::ssh_pool::default_known_hosts_path();
+    let before = crate::ssh_pool::list_known_hosts_at(&known_hosts);
+    let mut target = host.clone();
+    target.port = new_port;
+    let reason = match pool.test_connection(&target, None).await {
+        Ok(fp) if fp == expected_fp => return Ok(()),
+        Ok(fp) => format!("host key changed on port {new_port} ({fp})"),
+        Err(e) => e,
+    };
+    // test_connection trusts a first-seen key (TOFU); forget anything it just recorded.
+    for entry in crate::ssh_pool::list_known_hosts_at(&known_hosts) {
+        let existed = before
+            .iter()
+            .any(|b| b.host_pattern == entry.host_pattern && b.public_key_base64 == entry.public_key_base64);
+        if !existed {
+            let _ = crate::ssh_pool::delete_known_host_at(&known_hosts, &entry.host_pattern, &entry.key_type);
+        }
+    }
+    Err(vps_err(ERR_VERIFY_FAILED, reason))
+}
+
+fn sshd_cleanup_script() -> String {
+    format!(
+        "systemctl stop sshbox-rollback.timer 2>/dev/null || true\n\
+rm -f {d}.sshbox.bak {d}.sshbox.absent {m}.sshbox.bak {m}.sshbox.absent {r}\n",
+        d = SSHD_DROPIN,
+        m = SSHD_MAIN_CONFIG,
+        r = SSHD_ROLLBACK_SCRIPT
+    )
+}
+
+fn sshd_rollback_now_script() -> String {
+    format!(
+        "if [ -e {r} ]; then /bin/sh {r}; fi\nsystemctl stop sshbox-rollback.timer 2>/dev/null || true\n",
+        r = SSHD_ROLLBACK_SCRIPT
+    )
+}
+
+// Step 8–9: verify with a new connection, then keep the change or roll it back now.
+pub async fn finish_sshd_apply(
+    host_id: &str,
+    pool: &SshPool,
+    sudo_password: Option<String>,
+    new_port: u16,
+) -> Result<SshdView, String> {
+    let host = find_remote_host(host_id)?;
+    let expected_fp = pool
+        .session_fingerprint(host_id)
+        .await
+        .ok_or_else(|| vps_err(ERR_COMMAND_FAILED, "no SSH session for this host"))?;
+    if let Err(e) = verify_new_connection(pool, &host, new_port, &expected_fp).await {
+        run_privileged_script(host_id, pool, sudo_password, &sshd_rollback_now_script(), None).await?;
+        return Err(e);
+    }
+    run_privileged_script(host_id, pool, sudo_password.clone(), &sshd_cleanup_script(), None).await?;
+    get_sshd_view(host_id, pool, sudo_password).await
+}
+
+pub async fn revert_sshd_settings(
+    host_id: &str,
+    pool: &SshPool,
+    sudo_password: Option<String>,
+) -> Result<SshdView, String> {
+    run_privileged_script(host_id, pool, sudo_password.clone(), &sshd_rollback_now_script(), None).await?;
+    get_sshd_view(host_id, pool, sudo_password).await
+}
+
 pub fn is_valid_linux_username(username: &str) -> bool {
     let mut chars = username.chars();
     let Some(first) = chars.next() else {
@@ -2238,6 +2467,173 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         let v = parse_sshd_view("port 22\n---SSHBOX-PART---\nPort 22\n---SSHBOX-PART---\ninactive\n").unwrap();
         assert!(!v.rollback_pending && v.write_target == WriteTarget::MainFile);
         assert!(parse_sshd_view("garbage").unwrap_err().starts_with("COMMAND_FAILED"));
+    }
+
+    // Runs the apply script locally with fake systemctl/sshd/ss/semanage/ufw that log each call in order.
+    #[cfg(unix)]
+    struct ApplyRun {
+        out: String,
+        log: String,
+        file: std::path::PathBuf,
+        rollback: std::path::PathBuf,
+        bin: std::path::PathBuf,
+        dir: std::path::PathBuf,
+    }
+
+    #[cfg(unix)]
+    fn plan(socket: bool, selinux: bool, new_port: Option<u16>, engine: FirewallEngine) -> ReloadPlan {
+        ReloadPlan { ssh_socket_active: socket, selinux_enforcing: selinux, new_port, firewall_engine: engine }
+    }
+
+    #[cfg(unix)]
+    fn run_apply(plan: &ReloadPlan, existing: Option<&str>, envs: &[(&str, &str)]) -> ApplyRun {
+        let dir = shell::temp_dir();
+        let bin = dir.join("bin");
+        let log = dir.join("calls.log");
+        let logger = |name: &str, extra: &str| {
+            shell::fake_bin(&bin, name, &format!("echo \"{name} $*\" >> \"$FAKE_LOG\"\n{extra}\nexit 0"));
+        };
+        logger("systemctl", r#"case "$*" in *"is-active --quiet sshbox-rollback.timer"*) exit "${FAKE_PENDING:-1}";; *is-active*) exit 1;; esac"#);
+        logger("sshd", r#"[ "$1" = "-t" ] && exit "${FAKE_SSHD_T:-0}""#);
+        logger("ss", r#"[ -n "${FAKE_SS_EMPTY:-}" ] || echo 'LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=7,fd=3))'"#);
+        logger("systemd-run", "");
+        logger("semanage", "");
+        logger("ufw", r#"[ "$1" = "status" ] && echo 'Status: active'"#);
+        logger("firewall-cmd", r#"[ "$1" = "--state" ] && echo running"#);
+        let file = dir.join("00-sshbox.conf");
+        if let Some(content) = existing {
+            std::fs::write(&file, content).unwrap();
+        }
+        let secret = dir.join("secret");
+        std::fs::write(&secret, "Port 2222\n").unwrap();
+        let rollback = dir.join("sshbox-rollback.sh");
+        let script = build_sshd_apply_script(file.to_str().unwrap(), rollback.to_str().unwrap(), plan);
+        let mut all: Vec<(&str, &str)> = vec![
+            ("FAKE_LOG", log.to_str().unwrap()),
+            ("SSHBOX_SECRET_FILE", secret.to_str().unwrap()),
+        ];
+        all.extend_from_slice(envs);
+        let out = shell::run_local(&script, b"", &bin, &all, &dir);
+        let log = std::fs::read_to_string(&log).unwrap_or_default();
+        ApplyRun { out, log, file, rollback, bin, dir }
+    }
+
+    #[cfg(unix)]
+    fn pos(log: &str, needle: &str) -> usize {
+        log.find(needle).unwrap_or_else(|| panic!("{needle:?} not called:\n{log}"))
+    }
+
+    // The rollback timer must exist before sshd reloads, or a bad reload has nothing to undo it.
+    #[cfg(unix)]
+    #[test]
+    fn apply_script_arms_rollback_before_reload() {
+        let r = run_apply(&plan(false, false, None, FirewallEngine::Ufw), Some("Port 22\n"), &[]);
+        assert!(r.out.contains("ROLLBACK_AT:") && r.out.contains("NOW:"), "{}", r.out);
+        assert!(pos(&r.log, "systemd-run") < pos(&r.log, "systemctl reload-or-restart"), "{}", r.log);
+        assert!(pos(&r.log, "systemctl reload-or-restart") < pos(&r.log, "ss "), "{}", r.log);
+        assert_eq!(std::fs::read_to_string(&r.file).unwrap(), "Port 2222\n");
+        assert!(r.rollback.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_script_handles_socket_selinux_and_firewall() {
+        let r = run_apply(&plan(true, true, Some(2222), FirewallEngine::Ufw), Some("Port 22\n"), &[]);
+        assert!(pos(&r.log, "semanage port") < pos(&r.log, "systemctl restart ssh.socket"), "{}", r.log);
+        assert!(pos(&r.log, "ufw allow 2222/tcp") < pos(&r.log, "systemctl restart ssh.socket"), "{}", r.log);
+        assert!(!r.log.contains("reload-or-restart"), "{}", r.log);
+        let r = run_apply(&plan(false, true, Some(22), FirewallEngine::Firewalld), Some("Port 2222\n"), &[]);
+        assert!(!r.log.contains("semanage"), "{}", r.log);
+        assert!(pos(&r.log, "firewall-cmd --permanent --add-port=22/tcp") < pos(&r.log, "reload-or-restart"), "{}", r.log);
+    }
+
+    // A second apply while one is unverified would overwrite the only good backup.
+    #[cfg(unix)]
+    #[test]
+    fn apply_refuses_while_rollback_pending() {
+        let r = run_apply(&plan(false, false, None, FirewallEngine::None), Some("Port 22\n"), &[("FAKE_PENDING", "0")]);
+        assert!(r.out.contains("SSHBOX_ROLLBACK_PENDING"), "{}", r.out);
+        assert_eq!(std::fs::read_to_string(&r.file).unwrap(), "Port 22\n");
+        assert!(!r.log.contains("systemd-run"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_config_restores_previous_file() {
+        let r = run_apply(&plan(false, false, None, FirewallEngine::None), Some("Port 22\n"), &[("FAKE_SSHD_T", "1")]);
+        assert_eq!(std::fs::read_to_string(&r.file).unwrap(), "Port 22\n");
+        assert!(!r.log.contains("systemd-run") && !r.log.contains("reload"), "{}", r.log);
+    }
+
+    // Any failure after the timer is armed rolls back at once instead of waiting 60 seconds.
+    #[cfg(unix)]
+    #[test]
+    fn failure_after_arming_rolls_back_immediately() {
+        let r = run_apply(&plan(false, false, None, FirewallEngine::None), Some("Port 22\n"), &[("FAKE_SS_EMPTY", "1")]);
+        assert!(r.out.contains("SSHBOX_PORT_NOT_LISTENING"), "{}", r.out);
+        assert_eq!(std::fs::read_to_string(&r.file).unwrap(), "Port 22\n");
+        assert!(r.log.contains("systemctl restart ssh"), "{}", r.log);
+        assert!(!r.rollback.exists());
+    }
+
+    #[cfg(unix)]
+    fn run_rollback(r: &ApplyRun) -> String {
+        let log = r.dir.join("calls.log");
+        shell::run_local(
+            &format!("/bin/sh {}", r.rollback.display()),
+            b"",
+            &r.bin,
+            &[("FAKE_LOG", log.to_str().unwrap())],
+            &r.dir,
+        );
+        std::fs::read_to_string(&log).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_restores_backup_and_restarts() {
+        let r = run_apply(&plan(false, false, Some(2222), FirewallEngine::Ufw), Some("Port 22\n"), &[]);
+        let log = run_rollback(&r);
+        assert_eq!(std::fs::read_to_string(&r.file).unwrap(), "Port 22\n");
+        assert!(log[r.log.len()..].contains("systemctl restart ssh"), "{log}");
+        assert!(log[r.log.len()..].contains("ufw delete allow 2222/tcp"), "{log}");
+        assert!(!r.rollback.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_removes_dropin_that_did_not_exist() {
+        let r = run_apply(&plan(false, false, None, FirewallEngine::None), None, &[]);
+        assert!(r.file.exists());
+        run_rollback(&r);
+        assert!(!r.file.exists());
+        assert!(!r.dir.join("00-sshbox.conf.sshbox.absent").exists());
+    }
+
+    fn probe_for(ctx_user: &str, has_systemd: bool) -> VpsProbe {
+        let mut p = parse_probe_output(PROBE_UBUNTU, key_auth()).unwrap();
+        p.context.login_user = ctx_user.to_string();
+        p.has_systemd = has_systemd;
+        p
+    }
+
+    #[test]
+    fn apply_refuses_change_blocked_by_guard() {
+        let view = SshdView { settings: SshdSettings::default(), write_target: WriteTarget::DropIn, rollback_pending: false };
+        let no_pubkey = SshdSettings { pubkey_authentication: false, ..SshdSettings::default() };
+        assert!(apply_preflight(&probe_for("deploy", true), &view, &no_pubkey).unwrap_err().starts_with("LOCKOUT_BLOCKED"));
+        let fine = SshdSettings { max_auth_tries: 3, ..SshdSettings::default() };
+        assert_eq!(apply_preflight(&probe_for("deploy", true), &view, &fine), Ok(()));
+        assert!(apply_preflight(&probe_for("deploy", false), &view, &fine).unwrap_err().starts_with("UNSUPPORTED"));
+        let pending = SshdView { rollback_pending: true, ..view };
+        assert!(apply_preflight(&probe_for("deploy", true), &pending, &fine).unwrap_err().starts_with("COMMAND_FAILED"));
+    }
+
+    #[test]
+    fn parses_apply_started_times() {
+        let s = parse_apply_started("noise\nNOW:1000\nROLLBACK_AT:1060\n", 2222).unwrap();
+        assert_eq!((s.server_now, s.rollback_at, s.new_port), (1000, 1060, 2222));
+        assert!(parse_apply_started("nothing", 22).unwrap_err().starts_with("COMMAND_FAILED"));
     }
 
     const PROBE_UBUNTU: &str = "UNAME:Linux\nUSER:deploy\nUID:1000\nSUDO:password_ok\nOS_ID:ubuntu\nOS_VERSION:24.04\n\

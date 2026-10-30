@@ -93,7 +93,13 @@ pub fn check_firewall_delete(
     rules: &[FirewallRuleItem],
     target: &FirewallRuleItem,
 ) -> Result<(), String> {
-    if allows_my_ssh(ctx, target) && !rules.iter().any(|r| r != target && allows_my_ssh(ctx, r)) {
+    // Deletion is by content, so every rule with the same raw_spec goes (firewalld family twins,
+    // and the current copy of a rule whose index went stale).
+    let removed = |r: &FirewallRuleItem| r.raw_spec == target.raw_spec;
+    let removes_mine = std::iter::once(target)
+        .chain(rules.iter().filter(|r| removed(r)))
+        .any(|r| allows_my_ssh(ctx, r));
+    if removes_mine && !rules.iter().any(|r| !removed(r) && allows_my_ssh(ctx, r)) {
         return block("only_ssh_rule");
     }
     Ok(())
@@ -338,6 +344,26 @@ mod tests {
         assert_eq!(check_firewall_delete(&deploy_key(), &rules, &only), Ok(()));
         let web = rule(2, "ALLOW", "80/tcp", "Anywhere");
         assert_eq!(check_firewall_delete(&deploy_key(), &[only, web.clone()], &web), Ok(()));
+    }
+
+    // firewalld lists service:ssh once per family under one raw_spec; deleting it removes both copies.
+    #[test]
+    fn deleting_rule_twins_from_ipv6_client_blocked() {
+        let v6 = ConnectionContext { client_ip: "2001:db8::7".to_string(), ..deploy_key() };
+        let mut v4_copy = rule(3, "ALLOW", "2222/tcp", "Anywhere");
+        v4_copy.raw_spec = "service:ssh".to_string();
+        let v6_copy = FirewallRuleItem { v6: true, index: 4, ..v4_copy.clone() };
+        let rules = vec![v4_copy.clone(), v6_copy];
+        assert!(blocked(check_firewall_delete(&v6, &rules, &v4_copy)));
+    }
+
+    // Numbers shift outside the app (fail2ban inserts at 1); a stale index is still the same rule.
+    #[test]
+    fn deleting_with_stale_index_still_blocked() {
+        let current = rule(2, "ALLOW", "2222/tcp", "203.0.113.7");
+        let stale = FirewallRuleItem { index: 1, ..current.clone() };
+        let rules = vec![rule(1, "DENY", "Anywhere", "198.51.100.9"), current];
+        assert!(blocked(check_firewall_delete(&deploy_key(), &rules, &stale)));
     }
 
     #[test]

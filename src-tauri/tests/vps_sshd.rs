@@ -259,6 +259,8 @@ fn verify_fails_when_sessions_are_refused() {
 
 // Users & Keys writes must be refused on a non-Linux host before anything runs; this host (the Mac) probes as macOS.
 // Deleting a require_linux call from any of the five fns makes its assertion fail.
+// macOS only: on a Linux box with passwordless sudo these calls would really create a privileged user.
+#[cfg(target_os = "macos")]
 #[test]
 #[ignore]
 fn access_writes_are_refused_on_macos_host() {

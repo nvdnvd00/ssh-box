@@ -523,7 +523,7 @@ mod tests {
     // Từ JSON thật: allow IPv6 duy nhất cho /64 của máy khách, xoá phải bị chặn (parser + guard cùng chạy).
     #[test]
     fn windows_delete_from_parsed_json_blocks_only_ipv6_allow() {
-        let j = r#"{"profiles":[{"name":"Private","enabled":true,"defaultInbound":"Block"}],"active":["Private"],"rules":[{"displayName":"ssh6","group":"","profile":"Any","scoped":false,"action":"Allow","localPort":"2222","protocol":"TCP","remoteAddress":"2001:db8::/64"}],"sockets":[]}"#;
+        let j = r#"{"profiles":[{"name":"Private","enabled":true,"defaultInbound":"Block"}],"active":["Private"],"rules":[{"displayName":"ssh6","group":"","program":"Any","profile":"Any","scoped":false,"action":"Allow","localPort":"2222","protocol":"TCP","remoteAddress":"2001:db8::/64"}],"sockets":[]}"#;
         let rules = crate::vps_windows::parse_windows_firewall(j).unwrap().rules;
         let mut c = deploy_key();
         c.client_ip = "2001:db8::7".to_string();

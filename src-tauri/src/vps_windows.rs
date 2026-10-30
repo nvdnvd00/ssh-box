@@ -383,14 +383,16 @@ $ifs = @{}; Get-NetFirewallInterfaceTypeFilter -All | ForEach-Object { $ifs[$_.I
 $rules = @(Get-NetFirewallRule -Direction Inbound -Enabled True | ForEach-Object {
   $p = $ports[$_.InstanceID]; $a = $addrs[$_.InstanceID]
   if ($p -and $a -and (@($p.LocalPort) -join ',') -ne 'Any') {
+    # No application filter read: '' (treated as scoped). Otherwise 'Any' or the program path with %SystemRoot% etc. expanded.
+    $app = $apps[$_.InstanceID]; $prog = if ($app) { [Environment]::ExpandEnvironmentVariables([string]$app.Program) } else { '' }
     $scoped = ([string]$svcs[$_.InstanceID].Service -ne 'Any') -or ((@($a.LocalAddress) -join ',') -ne 'Any') -or ([string]$ifs[$_.InstanceID].InterfaceType -ne 'Any')
-    [ordered]@{ displayName = [string]$_.DisplayName; group = [string]$_.Group; profile = [string]$_.Profile; program = [string]$apps[$_.InstanceID].Program; scoped = [bool]$scoped; action = [string]$_.Action; localPort = (@($p.LocalPort) -join ','); protocol = [string]$p.Protocol; remoteAddress = (@($a.RemoteAddress) -join ',') }
+    [ordered]@{ displayName = [string]$_.DisplayName; group = [string]$_.Group; profile = [string]$_.Profile; program = $prog; scoped = [bool]$scoped; action = [string]$_.Action; localPort = (@($p.LocalPort) -join ','); protocol = [string]$p.Protocol; remoteAddress = (@($a.RemoteAddress) -join ',') }
   }
 })
-$names = @{}; Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $names[[int]$_.Id] = $_.ProcessName }
+$names = @{}; $paths = @{}; Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $names[[int]$_.Id] = $_.ProcessName; $paths[[int]$_.Id] = [string]$_.Path }
 $sockets = @(
-  Get-NetTCPConnection -State Listen | ForEach-Object { [ordered]@{ protocol = 'tcp'; addr = [string]$_.LocalAddress; port = [int]$_.LocalPort; pid = [int]$_.OwningProcess; process = [string]$names[[int]$_.OwningProcess] } }
-  Get-NetUDPEndpoint | ForEach-Object { [ordered]@{ protocol = 'udp'; addr = [string]$_.LocalAddress; port = [int]$_.LocalPort; pid = [int]$_.OwningProcess; process = [string]$names[[int]$_.OwningProcess] } }
+  Get-NetTCPConnection -State Listen | ForEach-Object { [ordered]@{ protocol = 'tcp'; addr = [string]$_.LocalAddress; port = [int]$_.LocalPort; pid = [int]$_.OwningProcess; process = [string]$names[[int]$_.OwningProcess]; path = [string]$paths[[int]$_.OwningProcess] } }
+  Get-NetUDPEndpoint | ForEach-Object { [ordered]@{ protocol = 'udp'; addr = [string]$_.LocalAddress; port = [int]$_.LocalPort; pid = [int]$_.OwningProcess; process = [string]$names[[int]$_.OwningProcess]; path = [string]$paths[[int]$_.OwningProcess] } }
 )
 ConvertTo-Json -InputObject ([ordered]@{ profiles = $profiles; active = $active; rules = $rules; sockets = $sockets }) -Depth 5 -Compress
 "#;
@@ -416,7 +418,7 @@ struct WinRule {
     group: String,
     #[serde(default)]
     profile: String,
-    // "Any" or the program path the rule is limited to.
+    // "Any", the expanded program path the rule is limited to, or "" when no application filter was read (scoped).
     #[serde(default)]
     program: String,
     // Service, local-address or interface-type scoped: not a plain port rule.
@@ -438,6 +440,9 @@ struct WinSocket {
     pid: Option<u32>,
     #[serde(default)]
     process: String,
+    // Full image path of the owning process; empty when unknown (e.g. PID 4 "System").
+    #[serde(default)]
+    path: String,
 }
 
 #[derive(Deserialize)]
@@ -475,16 +480,15 @@ pub fn parse_windows_firewall(json: &str) -> Result<FirewallSnapshot, String> {
             || p.eq_ignore_ascii_case("any")
             || p.split(',').any(|x| w.active.iter().any(|a| a.eq_ignore_ascii_case(x.trim())))
     };
-    // A program-scoped rule (the stock OpenSSH one is limited to sshd.exe) applies only while that program owns every socket on its port.
+    // A program-scoped rule (the stock OpenSSH one is limited to sshd.exe) applies only while exactly that file owns every
+    // socket on its port: another sshd.exe (zip/MSI install, Cygwin) does not, and an unknown listener path never does.
     let program_owns = |r: &WinRule, protocol: &str| {
-        let p = r.program.trim();
-        if p.is_empty() || p.eq_ignore_ascii_case("any") {
+        let prog = r.program.trim();
+        if prog.eq_ignore_ascii_case("any") {
             return true;
         }
-        let exe = p.rsplit(['\\', '/']).next().unwrap_or(p).to_ascii_lowercase();
-        let stem = exe.strip_suffix(".exe").unwrap_or(&exe);
         let mut on_port = w.sockets.iter().filter(|s| rule_port_matches(&r.local_port, protocol, s.port, &s.protocol)).peekable();
-        on_port.peek().is_some() && on_port.all(|s| s.process.eq_ignore_ascii_case(stem))
+        !prog.is_empty() && on_port.peek().is_some() && on_port.all(|s| !s.path.is_empty() && s.path.eq_ignore_ascii_case(prog))
     };
     // Every rule is listed; only plain port rules of an active profile take part in the exposure, the rest leave the port "unknown".
     let mut rules = Vec::new();
@@ -858,7 +862,7 @@ mod tests {
         assert!(parse_windows_accounts("not json").unwrap_err().starts_with("COMMAND_FAILED"));
     }
 
-    const FW: &str = r#"{"profiles":[{"name":"Domain","enabled":false,"defaultInbound":"Block"},{"name":"Private","enabled":true,"defaultInbound":"Block"}],"active":["Private"],"rules":[{"displayName":"OpenSSH-Server-In-TCP","group":"ssh-box","action":"Allow","localPort":"22","protocol":"TCP","remoteAddress":"Any"},{"displayName":"Cho phép Đạt","group":"","action":"Block","localPort":"8080","protocol":"UDP","remoteAddress":"10.0.0.0/8"}],"sockets":[{"protocol":"tcp","addr":"::","port":22,"pid":1234,"process":"sshd"},{"protocol":"tcp","addr":"127.0.0.1","port":5432,"pid":null,"process":""}]}"#;
+    const FW: &str = r#"{"profiles":[{"name":"Domain","enabled":false,"defaultInbound":"Block"},{"name":"Private","enabled":true,"defaultInbound":"Block"}],"active":["Private"],"rules":[{"displayName":"OpenSSH-Server-In-TCP","group":"ssh-box","program":"Any","action":"Allow","localPort":"22","protocol":"TCP","remoteAddress":"Any"},{"displayName":"Cho phép Đạt","group":"","program":"Any","action":"Block","localPort":"8080","protocol":"UDP","remoteAddress":"10.0.0.0/8"}],"sockets":[{"protocol":"tcp","addr":"::","port":22,"pid":1234,"process":"sshd","path":"C:\\Windows\\System32\\OpenSSH\\sshd.exe"},{"protocol":"tcp","addr":"127.0.0.1","port":5432,"pid":null,"process":"","path":""}]}"#;
 
     // Rule "Any" phải thành hai mục v4/v6, tên rule và nhóm phải qua được để Task 9 xoá theo tên.
     #[test]
@@ -935,7 +939,7 @@ mod tests {
     // Luật Block của profile Public không chặn cổng khi máy đang dùng Private; không được báo "blocked".
     #[test]
     fn windows_rule_of_inactive_profile_does_not_count() {
-        let j = FW.replace(r#""remoteAddress":"Any"}"#, r#""remoteAddress":"Any"},{"displayName":"B","group":"","profile":"Public","action":"Block","localPort":"22","protocol":"TCP","remoteAddress":"Any"}"#);
+        let j = FW.replace(r#""remoteAddress":"Any"}"#, r#""remoteAddress":"Any"},{"displayName":"B","group":"","program":"Any","profile":"Public","action":"Block","localPort":"22","protocol":"TCP","remoteAddress":"Any"}"#);
         assert_eq!(parse_windows_firewall(&j).unwrap().listening_sockets[0].exposure, "exposed");
         let j = j.replace(r#""profile":"Public""#, r#""profile":"Private""#);
         assert_eq!(parse_windows_firewall(&j).unwrap().listening_sockets[0].exposure, "blocked");
@@ -947,24 +951,42 @@ mod tests {
         let j = FW.replace(r#""displayName":"OpenSSH-Server-In-TCP""#, r#""displayName":"OpenSSH-Server-In-TCP","scoped":true"#).replace(r#""action":"Allow""#, r#""action":"Block""#);
         let s = parse_windows_firewall(&j).unwrap();
         assert_eq!(s.listening_sockets[0].exposure, "unknown");
-        let other = j.replace(r#","scoped":true"#, r#","program":"C:\\tools\\other.exe""#);
+        let other = j.replace(r#","scoped":true"#, "").replace(r#""program":"Any","action":"Block","localPort":"22""#, r#""program":"C:\\tools\\other.exe","action":"Block","localPort":"22""#);
         assert_eq!(parse_windows_firewall(&other).unwrap().listening_sockets[0].exposure, "unknown");
         assert!(s.rules.iter().any(|r| r.raw_spec == "OpenSSH-Server-In-TCP"));
     }
 
-    // The stock "OpenSSH SSH Server (sshd)" rule is scoped to sshd.exe: it carries SSH while sshd owns the port.
+    // The stock "OpenSSH SSH Server (sshd)" rule is limited to sshd.exe: it carries SSH while exactly that program owns the port.
     // Ignoring it showed port 22 "unknown" and made enabling add an allow for every profile (Public included).
+    // A stale rule for another sshd.exe (zip/MSI install, Cygwin) must not count: it would suppress that auto-allow and pass the delete guard.
     #[test]
-    fn windows_program_rule_counts_when_its_program_owns_the_port() {
-        let j = FW.replace(r#""displayName":"OpenSSH-Server-In-TCP""#, r#""displayName":"OpenSSH-Server-In-TCP","program":"%SystemRoot%\\system32\\OpenSSH\\sshd.exe""#);
-        let s = parse_windows_firewall(&j).unwrap();
-        assert!(s.rules.iter().filter(|r| r.raw_spec == "OpenSSH-Server-In-TCP").all(|r| r.effective));
-        assert_eq!(s.listening_sockets[0].exposure, "exposed");
+    fn windows_program_rule_counts_only_for_the_exact_program_path() {
+        let with = |program: &str, path: &str| {
+            let j = FW
+                .replace(r#""group":"ssh-box","program":"Any""#, &format!(r#""group":"ssh-box","program":{}"#, serde_json::to_string(program).unwrap()))
+                .replace(r#""path":"C:\\Windows\\System32\\OpenSSH\\sshd.exe""#, &format!(r#""path":{}"#, serde_json::to_string(path).unwrap()));
+            parse_windows_firewall(&j).unwrap()
+        };
+        let counts = |s: &FirewallSnapshot| s.rules.iter().filter(|r| r.raw_spec == "OpenSSH-Server-In-TCP").all(|r| r.effective);
         let ctx = parse_windows_probe(&raw("1", "admin", CONN), key_auth()).unwrap().context;
+        let inbox = r"C:\WINDOWS\system32\OpenSSH\sshd.exe"; // %SystemRoot% already expanded by the script; case differs
+        let s = with(inbox, r"C:\Windows\System32\OpenSSH\sshd.exe");
+        assert!(counts(&s) && s.listening_sockets[0].exposure == "exposed");
         assert_eq!(windows_ensure_port(&ctx, &s.rules), None);
-        let s = parse_windows_firewall(&j.replace(r#""process":"sshd""#, r#""process":"nginx""#)).unwrap();
+        let s = with(inbox, r"C:\Program Files\OpenSSH\sshd.exe");
+        assert!(!counts(&s) && s.listening_sockets[0].exposure == "unknown");
+        assert_eq!(windows_ensure_port(&ctx, &s.rules), Some(22));
+        assert!(!counts(&with(inbox, "")), "an unreadable path (PID 4 System) never owns a port");
+        let script = windows_firewall_read_script();
+        assert!(script.contains("[Environment]::ExpandEnvironmentVariables(") && script.contains("$paths[[int]$_.Id] = [string]$_.Path"));
+    }
+
+    // A rule whose application filter was not read is scoped, not "any program": counting it could hide the need for an SSH allow.
+    #[test]
+    fn windows_rule_without_application_filter_is_not_effective() {
+        let s = parse_windows_firewall(&FW.replace(r#""group":"ssh-box","program":"Any","#, r#""group":"ssh-box","#)).unwrap();
         assert!(s.rules.iter().filter(|r| r.raw_spec == "OpenSSH-Server-In-TCP").all(|r| !r.effective));
-        assert_eq!(s.listening_sockets[0].exposure, "unknown");
+        assert!(windows_firewall_read_script().contains("$prog = if ($app) {"));
     }
 
     // Mỗi địa chỉ nguồn phải thành mục riêng đúng họ v4/v6, nếu không guard khoá không thấy allow của máy khách IPv6.

@@ -242,8 +242,7 @@ export interface FirewallSnapshot {
   enabled: boolean;
   defaultIncoming: string;
   defaultOutgoing: string;
-  detectedClientIp: string;
-  sshPort: number;
+  ipv6Filtered: boolean;
   rules: FirewallRuleItem[];
   listeningSockets: ListeningSocketItem[];
 }

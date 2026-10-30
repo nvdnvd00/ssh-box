@@ -10,6 +10,7 @@ import { vpsErrorText } from "./vps/shared/errors";
 import { VpsCtx } from "./vps/shared/useVpsResource";
 import { Notice } from "./vps/shared/Notice";
 import { SshHardeningStudio } from "./vps/SshHardeningStudio";
+import { FirewallStudio } from "./vps/FirewallStudio";
 
 interface VpsConfigWorkspaceProps {
   hosts: HostEntry[];
@@ -191,8 +192,11 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
           {!isLocal && probe && host && !probeError && activeStudio === "ssh" && (
             <SshHardeningStudio key={host.id} vps={vps} probe={probe} host={host} onSaveHost={onSaveHost} />
           )}
-          {!isLocal && probe && host && !probeError && activeStudio !== "ssh" && (
-            // ponytail: placeholder until Tasks 11/13 mount the rebuilt Firewall and Users & Keys studios.
+          {!isLocal && probe && host && !probeError && activeStudio === "firewall" && (
+            <FirewallStudio key={host.id} vps={vps} probe={probe} host={host} onSaveHost={onSaveHost} />
+          )}
+          {!isLocal && probe && host && !probeError && activeStudio === "access" && (
+            // ponytail: placeholder until Task 13 mounts the rebuilt Users & Keys studio.
             <p className="text-sm text-muted-foreground">{t.vpsStudioPending}</p>
           )}
         </div>

@@ -164,6 +164,32 @@ export interface AppI18nStrings {
   vpsSshClose: string;
   vpsSshInvalid: string;
   vpsSshSteps: string[];
+  vpsFwStatusTitle: string;
+  vpsFwEnabled: string;
+  vpsFwEngine: string;
+  vpsFwIpv6Off: string;
+  vpsFwNoEngine: string;
+  vpsFwPortsTitle: string;
+  vpsFwNoPorts: string;
+  vpsFwRulesTitle: string;
+  vpsFwNoRules: string;
+  vpsFwFrom: string;
+  vpsFwAnywhere: string;
+  vpsFwAllPorts: string;
+  vpsFwDelete: string;
+  vpsFwDeleteConfirm: string;
+  vpsFwAddTitle: string;
+  vpsFwAction: string;
+  vpsFwSource: string;
+  vpsFwMyIp: string;
+  vpsFwPort: string;
+  vpsFwProto: string;
+  vpsFwAny: string;
+  vpsFwAdd: string;
+  vpsFwOn: string;
+  vpsFwOff: string;
+  vpsFwExposure: Record<string, string>;
+  vpsFwActions: Record<string, string>;
   vpsShellSelectHost: string;
   vpsShellNoHosts: string;
   vpsShellProbing: string;
@@ -379,6 +405,32 @@ const VI_STRINGS: AppI18nStrings = {
   vpsSshClose: "Đóng",
   vpsSshInvalid: "Có giá trị không hợp lệ.",
   vpsSshSteps: ["Kiểm tra bộ chặn tự khoá", "Sao lưu", "Ghi cấu hình", "Kiểm tra cú pháp (sshd -t)", "Hẹn giờ hoàn tác 60 giây", "Nạp lại SSH", "Kiểm tra cổng", "Kết nối thử từ ứng dụng", "Giữ thay đổi"],
+  vpsFwStatusTitle: "Tình trạng",
+  vpsFwEnabled: "Bật tường lửa",
+  vpsFwEngine: "Công cụ tường lửa",
+  vpsFwIpv6Off: "IPv6 không được lọc. Đặt IPV6=yes trong /etc/default/ufw để lọc cả IPv6.",
+  vpsFwNoEngine: "Máy này chưa cài tường lửa. Cài ufw để dùng mục này.",
+  vpsFwPortsTitle: "Cổng đang mở",
+  vpsFwNoPorts: "Không có cổng nào đang lắng nghe.",
+  vpsFwRulesTitle: "Quy tắc",
+  vpsFwNoRules: "Chưa có quy tắc nào.",
+  vpsFwFrom: "từ {s}",
+  vpsFwAnywhere: "mọi nơi",
+  vpsFwAllPorts: "mọi cổng",
+  vpsFwDelete: "Xoá",
+  vpsFwDeleteConfirm: "Xoá quy tắc",
+  vpsFwAddTitle: "Thêm quy tắc",
+  vpsFwAction: "Hành động",
+  vpsFwSource: "Nguồn (IP hoặc dải IP, để trống là mọi nơi)",
+  vpsFwMyIp: "IP của tôi",
+  vpsFwPort: "Cổng (để trống là mọi cổng)",
+  vpsFwProto: "Giao thức",
+  vpsFwAny: "Tất cả",
+  vpsFwAdd: "Thêm",
+  vpsFwOn: "bật",
+  vpsFwOff: "tắt",
+  vpsFwExposure: { exposed: "Mở công khai", restricted: "Giới hạn IP", blocked: "Bị chặn", loopback: "Chỉ nội bộ" },
+  vpsFwActions: { allow: "Cho phép", limit: "Cho phép, giới hạn tần suất", deny: "Chặn", reject: "Từ chối" },
 };
 
 const EN_STRINGS: AppI18nStrings = {
@@ -579,6 +631,32 @@ const EN_STRINGS: AppI18nStrings = {
   vpsSshClose: "Close",
   vpsSshInvalid: "Some values are invalid.",
   vpsSshSteps: ["Check lockout guard", "Back up", "Write config", "Check syntax (sshd -t)", "Arm 60-second rollback", "Reload SSH", "Check port", "Test a new connection", "Keep the change"],
+  vpsFwStatusTitle: "Status",
+  vpsFwEnabled: "Firewall on",
+  vpsFwEngine: "Firewall tool",
+  vpsFwIpv6Off: "IPv6 traffic is not filtered. Set IPV6=yes in /etc/default/ufw to filter it.",
+  vpsFwNoEngine: "No firewall is installed on this server. Install ufw to use this section.",
+  vpsFwPortsTitle: "Open ports",
+  vpsFwNoPorts: "No ports are listening.",
+  vpsFwRulesTitle: "Rules",
+  vpsFwNoRules: "No rules yet.",
+  vpsFwFrom: "from {s}",
+  vpsFwAnywhere: "anywhere",
+  vpsFwAllPorts: "all ports",
+  vpsFwDelete: "Delete",
+  vpsFwDeleteConfirm: "Delete rule",
+  vpsFwAddTitle: "Add a rule",
+  vpsFwAction: "Action",
+  vpsFwSource: "Source (IP or range, empty = anywhere)",
+  vpsFwMyIp: "My IP",
+  vpsFwPort: "Port (empty = all ports)",
+  vpsFwProto: "Protocol",
+  vpsFwAny: "Any",
+  vpsFwAdd: "Add",
+  vpsFwOn: "on",
+  vpsFwOff: "off",
+  vpsFwExposure: { exposed: "Public", restricted: "Limited to some IPs", blocked: "Blocked", loopback: "Local only" },
+  vpsFwActions: { allow: "Allow", limit: "Allow, rate-limited", deny: "Deny", reject: "Reject" },
 };
 
 export function getI18n(lang?: AppLanguage): AppI18nStrings {

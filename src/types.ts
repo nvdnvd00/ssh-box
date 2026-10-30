@@ -149,7 +149,64 @@ export type TabResources =
   | "portForwarding"
   | "snippets"
   | "docker"
-  | "sftp";
+  | "sftp"
+  | "vpsConfig";
+
+export type VpsStudioTab =
+  | "ssh"
+  | "firewall"
+  | "fail2ban"
+  | "access"
+  | "kernel"
+  | "system";
+
+export interface VpsPrivilegeInfo {
+  user: string;
+  uid: number;
+  isRoot: boolean;
+  passwordlessSudo: boolean;
+  sudoUnlocked: boolean;
+  osPrettyName: string;
+  detectedClientIp: string;
+}
+
+export interface SshdConfigSnapshot {
+  port: number;
+  permitRootLogin: string;
+  passwordAuthentication: boolean;
+  pubkeyAuthentication: boolean;
+  permitEmptyPasswords: boolean;
+  maxAuthTries: number;
+  loginGraceTime: number;
+  clientAliveInterval: number;
+  clientAliveCountMax: number;
+  allowUsers: string[];
+  x11Forwarding: boolean;
+  allowTcpForwarding: boolean;
+  allowAgentForwarding: boolean;
+  addressFamily: string;
+  authorizedKeysCount: number;
+  securityScore: number;
+  rawConfig: string;
+  rollbackPending: boolean;
+}
+
+export interface SshdConfigUpdate {
+  port: number;
+  permitRootLogin: string;
+  passwordAuthentication: boolean;
+  pubkeyAuthentication: boolean;
+  permitEmptyPasswords: boolean;
+  maxAuthTries: number;
+  loginGraceTime: number;
+  clientAliveInterval: number;
+  clientAliveCountMax: number;
+  allowUsers: string[];
+  x11Forwarding: boolean;
+  allowTcpForwarding: boolean;
+  allowAgentForwarding: boolean;
+  addressFamily: string;
+}
 
 export interface KnownHostEntry {
   id: string;

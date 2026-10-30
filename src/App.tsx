@@ -20,6 +20,7 @@ import {
   Search,
   Server,
   Settings,
+  Shield,
   Terminal as TerminalIcon,
   Waypoints,
   X,
@@ -69,6 +70,7 @@ import { SplitWorkspace } from "./components/SplitWorkspace";
 import { normalizeTerminalInput } from "./components/TerminalPane";
 import { TelemetryDrawer } from "./components/TelemetryDrawer";
 import { ResourcesWorkspace } from "./components/ResourcesWorkspace";
+import { VpsConfigWorkspace } from "./components/VpsConfigWorkspace";
 import { DashboardWorkspace } from "./components/DashboardWorkspace";
 import {
   getSettingsNavGroups,
@@ -956,6 +958,11 @@ export default function App() {
       label: t.navDocker,
       icon: <Container className="w-4 h-4 text-cyan-400" />,
     },
+    {
+      id: "vpsConfig",
+      label: t.navVpsConfig,
+      icon: <Shield className="w-4 h-4 text-emerald-400" />,
+    },
   ];
 
   const keychainItems: { id: TabResources; label: string }[] = [
@@ -1132,6 +1139,23 @@ export default function App() {
               >
                 <HardDrive className="w-3.5 h-3.5 text-amber-400" />
               </button>
+
+              {activeLeaf.kind === "ssh" && activeLeaf.host && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (activeLeaf.host) {
+                      setInspectedHostId(activeLeaf.host.id);
+                    }
+                    setResourceSubTab("vpsConfig");
+                    setWorkspaceView("resources");
+                  }}
+                  title={t.navVpsConfig}
+                  className={toolBtnClass(false)}
+                >
+                  <Shield className="w-3.5 h-3.5 text-emerald-400" />
+                </button>
+              )}
 
               <button
                 type="button"
@@ -1371,56 +1395,75 @@ export default function App() {
                 setResourceSubTab("sftp");
                 setWorkspaceView("resources");
               }}
+              onOpenVpsConfig={(hostId) => {
+                setInspectedHostId(hostId);
+                setResourceSubTab("vpsConfig");
+                setWorkspaceView("resources");
+              }}
             />
           )}
 
           {/* Resources & Toolbox View (Keychain groups several sub-tabs behind one sidebar item) */}
           {workspaceView === "resources" && (
             <div className="flex flex-col h-full">
-              {KEYCHAIN_TABS.includes(resourceSubTab) && (
-                <div className="px-5 pt-3 flex items-center gap-1.5 shrink-0">
-                  {keychainItems.map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => setResourceSubTab(item.id)}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition-all cursor-pointer ${
-                        resourceSubTab === item.id
-                          ? "bg-primary/15 text-foreground border-primary/35"
-                          : "text-muted-foreground hover:bg-accent/60 hover:text-foreground border-transparent"
-                      }`}
-                    >
-                      {item.label}
-                    </button>
-                  ))}
-                </div>
-              )}
-              <div className="flex-1 min-h-0">
-                <ResourcesWorkspace
+              {resourceSubTab === "vpsConfig" ? (
+                <VpsConfigWorkspace
                   hosts={hosts}
                   resources={resources}
-                  appSettings={appSettings}
                   activeHostId={inspectedHostId || activeTerminalHostId}
-                  initialTab={resourceSubTab}
-                  hideSidebar={true}
-                  openCreateMachineSignal={openCreateMachineSignal}
-                  onRefreshHosts={() => {
-                    loadHosts();
-                    loadResources();
-                  }}
-                  onUpdateResources={handleUpdateResources}
+                  appSettings={appSettings}
+                  onSelectHost={(hostId) => setInspectedHostId(hostId)}
                   onSaveHost={handleSaveHost}
-                  onDeleteHost={handleDeleteHost}
-                  onConnectHost={handleConnectHostTab}
-                  onInspectMachine={(hostId) => {
-                    setInspectedHostId(hostId);
-                    setWorkspaceView("dashboard");
-                  }}
-                  onOpenLocalTerminal={openLocalTab}
-                  onOpenCommandTab={handleOpenCommandTab}
-                  onRunSnippetInActivePane={handleRunSnippetInActivePane}
+                  onConnectHostTerminal={handleConnectHostTab}
                 />
-              </div>
+              ) : (
+                <>
+                  {KEYCHAIN_TABS.includes(resourceSubTab) && (
+                    <div className="px-5 pt-3 flex items-center gap-1.5 shrink-0">
+                      {keychainItems.map((item) => (
+                        <button
+                          key={item.id}
+                          type="button"
+                          onClick={() => setResourceSubTab(item.id)}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition-all cursor-pointer ${
+                            resourceSubTab === item.id
+                              ? "bg-primary/15 text-foreground border-primary/35"
+                              : "text-muted-foreground hover:bg-accent/60 hover:text-foreground border-transparent"
+                          }`}
+                        >
+                          {item.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <div className="flex-1 min-h-0">
+                    <ResourcesWorkspace
+                      hosts={hosts}
+                      resources={resources}
+                      appSettings={appSettings}
+                      activeHostId={inspectedHostId || activeTerminalHostId}
+                      initialTab={resourceSubTab}
+                      hideSidebar={true}
+                      openCreateMachineSignal={openCreateMachineSignal}
+                      onRefreshHosts={() => {
+                        loadHosts();
+                        loadResources();
+                      }}
+                      onUpdateResources={handleUpdateResources}
+                      onSaveHost={handleSaveHost}
+                      onDeleteHost={handleDeleteHost}
+                      onConnectHost={handleConnectHostTab}
+                      onInspectMachine={(hostId) => {
+                        setInspectedHostId(hostId);
+                        setWorkspaceView("dashboard");
+                      }}
+                      onOpenLocalTerminal={openLocalTab}
+                      onOpenCommandTab={handleOpenCommandTab}
+                      onRunSnippetInActivePane={handleRunSnippetInActivePane}
+                    />
+                  </div>
+                </>
+              )}
             </div>
           )}
 

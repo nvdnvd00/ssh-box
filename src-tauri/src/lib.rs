@@ -6,6 +6,7 @@ pub mod sftp;
 pub mod ssh_pool;
 pub mod telemetry;
 pub mod vault;
+pub mod vps_config;
 
 use host_store::HostEntry;
 use local_pty::LocalPtyManager;
@@ -23,6 +24,7 @@ use tauri::ipc::Channel;
 use tauri::State;
 use telemetry::{DockerFullSnapshot, ServerMetrics};
 use tokio::sync::mpsc;
+use vps_config::{SshdConfigSnapshot, SshdConfigUpdate, VpsPrivilegeInfo};
 
 pub struct AppState {
     pub local_pty: LocalPtyManager,
@@ -817,6 +819,60 @@ fn save_session_log(
     Ok(full_path.to_string_lossy().to_string())
 }
 
+#[tauri::command]
+async fn vps_probe_privilege(
+    state: State<'_, AppState>,
+    host_id: String,
+    sudo_password: Option<String>,
+) -> Result<VpsPrivilegeInfo, String> {
+    vps_config::probe_privilege(&host_id, &state.ssh_pool, sudo_password).await
+}
+
+#[tauri::command]
+async fn vps_get_sshd_config(
+    state: State<'_, AppState>,
+    host_id: String,
+    sudo_password: Option<String>,
+) -> Result<SshdConfigSnapshot, String> {
+    vps_config::get_sshd_config(&host_id, &state.ssh_pool, sudo_password).await
+}
+
+#[tauri::command]
+async fn vps_apply_sshd_config(
+    state: State<'_, AppState>,
+    host_id: String,
+    update: SshdConfigUpdate,
+    sudo_password: Option<String>,
+    with_auto_rollback: bool,
+) -> Result<SshdConfigSnapshot, String> {
+    vps_config::apply_sshd_config(
+        &host_id,
+        &state.ssh_pool,
+        update,
+        sudo_password,
+        with_auto_rollback,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn vps_confirm_sshd_config(
+    state: State<'_, AppState>,
+    host_id: String,
+    sudo_password: Option<String>,
+) -> Result<SshdConfigSnapshot, String> {
+    vps_config::confirm_sshd_config(&host_id, &state.ssh_pool, sudo_password).await
+}
+
+#[tauri::command]
+async fn vps_revert_sshd_config(
+    state: State<'_, AppState>,
+    host_id: String,
+    sudo_password: Option<String>,
+) -> Result<SshdConfigSnapshot, String> {
+    vps_config::revert_sshd_config(&host_id, &state.ssh_pool, sudo_password).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -883,6 +939,11 @@ pub fn run() {
             clear_known_hosts,
             export_ssh_key_to_host,
             save_session_log,
+            vps_probe_privilege,
+            vps_get_sshd_config,
+            vps_apply_sshd_config,
+            vps_confirm_sshd_config,
+            vps_revert_sshd_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

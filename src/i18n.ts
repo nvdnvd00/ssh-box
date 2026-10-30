@@ -15,6 +15,7 @@ export interface AppI18nStrings {
   navSnippets: string;
   navDocker: string;
   navSftp: string;
+  navVpsConfig: string;
   navTerminal: string;
   navSettings: string;
   quickConnectBtn: string;
@@ -120,6 +121,7 @@ const VI_STRINGS: AppI18nStrings = {
   navSnippets: "Đoạn lệnh (Snippets)",
   navDocker: "Quản lý Docker",
   navSftp: "Truyền tệp SFTP",
+  navVpsConfig: "Cấu hình & Bảo mật VPS",
   navTerminal: "Terminal",
   navSettings: "Cài đặt",
   quickConnectBtn: "Tìm & Kết nối nhanh",
@@ -227,6 +229,7 @@ const EN_STRINGS: AppI18nStrings = {
   navSnippets: "Snippets",
   navDocker: "Docker",
   navSftp: "SFTP Browser",
+  navVpsConfig: "VPS Hardening & Config",
   navTerminal: "Terminal",
   navSettings: "Settings",
   quickConnectBtn: "Quick Connect & Actions",

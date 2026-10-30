@@ -52,6 +52,7 @@ interface DashboardWorkspaceProps {
   onOpenDockerManager: (hostId: string) => void;
   onOpenSftpManager?: (hostId: string) => void;
   onOpenVpsConfig?: (hostId: string) => void;
+  vpsConfigLabel: string;
 }
 
 interface LoadHistoryPoint {
@@ -373,6 +374,7 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
   onOpenDockerManager,
   onOpenSftpManager,
   onOpenVpsConfig,
+  vpsConfigLabel,
 }) => {
   // Icon toggle sized like the neighbouring action buttons; `small` matches the compact/list rows.
   const renderMonitorSwitch = (hostId: string, enabled: boolean, small = false) => (
@@ -629,7 +631,7 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                 className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-secondary/80 hover:bg-accent text-foreground text-xs font-medium border border-border/70 transition-all cursor-pointer"
               >
                 <Shield className="w-3.5 h-3.5 text-emerald-400" />
-                <span>VPS Hardening</span>
+                <span>{vpsConfigLabel}</span>
               </button>
             )}
           </div>
@@ -1570,7 +1572,8 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                             e.stopPropagation();
                             onOpenVpsConfig(host.id);
                           }}
-                          title="VPS Hardening & Config"
+                          title={vpsConfigLabel}
+                          aria-label={vpsConfigLabel}
                           className="p-2 rounded-xl bg-secondary/90 hover:bg-accent text-muted-foreground hover:text-emerald-400 transition-colors cursor-pointer"
                         >
                           <Shield className="w-4 h-4" />
@@ -1754,7 +1757,8 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                             e.stopPropagation();
                             onOpenVpsConfig(row.id);
                           }}
-                          title="VPS Hardening & Config"
+                          title={vpsConfigLabel}
+                          aria-label={vpsConfigLabel}
                           className="p-1.5 rounded-lg bg-secondary/90 hover:bg-accent text-muted-foreground hover:text-emerald-400 transition-colors cursor-pointer"
                         >
                           <Shield className="w-3.5 h-3.5" />
@@ -2025,7 +2029,8 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                             <button
                               type="button"
                               onClick={() => onOpenVpsConfig(row.id)}
-                              title="VPS Hardening & Config"
+                              title={vpsConfigLabel}
+                          aria-label={vpsConfigLabel}
                               className="p-1.5 rounded-lg bg-secondary/90 hover:bg-accent text-muted-foreground hover:text-emerald-400 transition-colors cursor-pointer"
                             >
                               <Shield className="w-3.5 h-3.5" />

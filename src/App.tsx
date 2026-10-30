@@ -1370,6 +1370,7 @@ export default function App() {
           {/* Dashboard & Full-Screen Machine Monitor Detail View */}
           {workspaceView === "dashboard" && (
             <DashboardWorkspace
+              vpsConfigLabel={t.navVpsConfig}
               hosts={hosts}
               resources={resources}
               metricsMap={metricsMap}

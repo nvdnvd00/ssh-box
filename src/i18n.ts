@@ -129,6 +129,21 @@ export interface AppI18nStrings {
   vpsErrUnsupported: string;
   vpsLockoutReasons: Record<string, string>;
   vpsUnsupportedReasons: Record<string, string>;
+  vpsShellSelectHost: string;
+  vpsShellNoHosts: string;
+  vpsShellProbing: string;
+  vpsTabSsh: string;
+  vpsTabFirewall: string;
+  vpsTabAccess: string;
+  vpsPrivRoot: string;
+  vpsPrivSudoNoPassword: string;
+  vpsPrivSudoPassword: string;
+  vpsPrivNone: string;
+  vpsSudoTitle: string;
+  vpsSudoHint: string;
+  vpsSudoOpen: string;
+  vpsSudoUnlock: string;
+  vpsStudioPending: string;
 }
 
 const VI_STRINGS: AppI18nStrings = {
@@ -279,6 +294,21 @@ const VI_STRINGS: AppI18nStrings = {
     no_systemd: "Máy chủ không dùng systemd nên chỉ xem được, không sửa được.",
     firewall_read_only: "Firewall này chỉ xem được. Cài ufw để sửa rule.",
   },
+  vpsShellSelectHost: "Chọn máy",
+  vpsShellNoHosts: "Chưa có máy chủ nào. Hãy thêm máy trong mục Máy chủ.",
+  vpsShellProbing: "Đang kiểm tra máy chủ…",
+  vpsTabSsh: "SSH",
+  vpsTabFirewall: "Tường lửa",
+  vpsTabAccess: "Người dùng & khoá SSH",
+  vpsPrivRoot: "Root",
+  vpsPrivSudoNoPassword: "Sudo không cần mật khẩu",
+  vpsPrivSudoPassword: "Sudo đã mở khoá",
+  vpsPrivNone: "Chưa có quyền sudo",
+  vpsSudoTitle: "Mật khẩu sudo",
+  vpsSudoHint: "Chỉ giữ trong bộ nhớ cho phiên làm việc này, không lưu lại.",
+  vpsSudoOpen: "Nhập mật khẩu sudo",
+  vpsSudoUnlock: "Mở khoá",
+  vpsStudioPending: "Phần này đang được làm lại.",
 };
 
 const EN_STRINGS: AppI18nStrings = {
@@ -429,6 +459,21 @@ const EN_STRINGS: AppI18nStrings = {
     no_systemd: "This server does not use systemd, so settings are read only.",
     firewall_read_only: "This firewall is read only. Install ufw to edit rules.",
   },
+  vpsShellSelectHost: "Select host",
+  vpsShellNoHosts: "No hosts yet. Add one under Machines.",
+  vpsShellProbing: "Checking the server…",
+  vpsTabSsh: "SSH",
+  vpsTabFirewall: "Firewall",
+  vpsTabAccess: "Users & Keys",
+  vpsPrivRoot: "Root",
+  vpsPrivSudoNoPassword: "Sudo, no password",
+  vpsPrivSudoPassword: "Sudo unlocked",
+  vpsPrivNone: "No sudo yet",
+  vpsSudoTitle: "Sudo password",
+  vpsSudoHint: "Kept in memory for this session only, never saved.",
+  vpsSudoOpen: "Enter sudo password",
+  vpsSudoUnlock: "Unlock",
+  vpsStudioPending: "This section is being rebuilt.",
 };
 
 export function getI18n(lang?: AppLanguage): AppI18nStrings {

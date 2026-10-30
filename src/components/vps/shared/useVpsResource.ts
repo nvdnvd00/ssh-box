@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppI18nStrings } from "../../../i18n";
+import { HostEntry, VpsProbe } from "../../../types";
 import { parseVpsError, vpsErrorText } from "./errors";
 
 export interface VpsCtx {
@@ -55,4 +56,12 @@ export function useVpsResource<T>(vps: VpsCtx, load: (sudoPassword?: string) => 
   );
 
   return { data, loading, error, setError, refresh, mutate };
+}
+
+// Props every studio receives from VpsConfigWorkspace.
+export interface VpsStudioProps {
+  vps: VpsCtx;
+  probe: VpsProbe;
+  host: HostEntry;
+  onSaveHost: (host: HostEntry, secret?: string) => Promise<void>;
 }

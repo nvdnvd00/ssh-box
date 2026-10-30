@@ -1,226 +1,256 @@
-# VPS Server Center & 6 Advanced Configuration Studios — Design Specification
+# Thiết kế Kỹ thuật: Cấu hình VPS (VPS Server Center) — Bản sửa đổi 2
 
-**Date:** 2026-10-30  
-**Project:** `ssh-box` (Tauri v2 + React 19 + TypeScript + Tailwind CSS v4 + Rust `russh`)  
-**Execution Strategy:** Subagent-Driven Development — 6 independent feature sessions (1 fresh subagent per Studio after shared foundation)
-
----
-
-## 1. Design Philosophy & UX Principles
-
-Instead of generic CRUD forms or button dumps, **Server Center** (`VpsConfigWorkspace`) is designed as a cohesive, purpose-built **Systems Engineering & Security Workbench** where each of the 6 modules has a bespoke UI/UX tailored to its operational mental model:
-
-1. **Zero-Guesswork Visual Feedback:** Every setting displays its **live server state**, **recommended security/performance baseline**, and **staged diff** before execution.
-2. **Anti-Lockout Safety First:** Modifying SSH daemon or firewall rules uses a non-destructive backup + background rollback timer so a bad port or rule never locks the operator out of their VPS.
-3. **Privilege Awareness (`root` vs `sudo`):** The workspace header automatically detects whether the SSH user is `root`, has passwordless `sudo -n`, or requires a `sudo` password (allowing one-click sudo session unlock via vault/prompt).
-4. **Modern Web Standards (`modern-web-guidance`):**
-   - Binary toggles use accessible `<input type="checkbox" switch>` semantics with theme-consistent `accent-color`.
-   - Data-dense tables (listening sockets, firewall rules, audit logs, systemd services) use `@container` responsive queries and `position: sticky` column/row headers inside keyboard-focusable `role="region"` scroll containers.
-5. **Strict File Modularity:** Do not bloat [`ResourcesWorkspace.tsx`](file://~/ssh-box/src/components/ResourcesWorkspace.tsx). All Server Center components live under `src/components/vps/` and backend logic lives in `src-tauri/src/vps_config.rs`.
+**Ngày:** 2026-10-30 (sửa đổi sau review MR !50)
+**Dự án:** `ssh-box` (Tauri v2 + React 19 + TypeScript + Tailwind CSS v4 + Rust `russh`)
+**Thay thế:** bản "VPS Server Center & 6 Advanced Configuration Studios" cùng ngày.
 
 ---
 
-## 2. System Architecture & Navigation Flow
+## 0. Vì sao viết lại
 
-```mermaid
-flowchart TD
-    subgraph Frontend["React 19 Frontend (src/components/vps/)"]
-        Shell["VpsConfigWorkspace.tsx\n(Machine Bar + Privilege Badge + Studio Switcher)"]
-        S1["Session 1: SshHardeningStudio.tsx\n(Posture Score + Policy Cards + Live Diff + 30s Rollback)"]
-        S2["Session 2: FirewallStudio.tsx\n(Live Socket Radar ss -tulpn + UFW/IPTables Rule Matrix)"]
-        S3["Session 3: Fail2banStudio.tsx\n(Jail Deck + Quarantine Vault + Auth Audit Timeline)"]
-        S4["Session 4: AccessKeysStudio.tsx\n(Linux Accounts Deck + Keychain Bridge + Sudoers)"]
-        S5["Session 5: KernelTuningStudio.tsx\n(1-Click BBR/Security Profiles + Sysctl Range Sliders)"]
-        S6["Session 6: SystemOpsStudio.tsx\n(Visual Swap Bar + Systemd Deck + Human Cron Studio)"]
-        Shell --> S1 & S2 & S3 & S4 & S5 & S6
-    end
+Review MR !50 cho thấy phần lớn lỗi bắt nguồn từ chính bản thiết kế cũ, không phải do code làm sai:
 
-    subgraph Backend["Rust Tauri Backend (src-tauri/src/)"]
-        IPC["lib.rs (Tauri Commands)"]
-        VPS["vps_config.rs\n(Privileged Runner + Parsers + Safe Rollback Engine)"]
-        POOL["ssh_pool.rs & telemetry.rs\n(run_host_or_local_cmd)"]
-        IPC --> VPS --> POOL
-    end
+| Bản cũ yêu cầu | Hệ quả | Bản này đổi thành |
+|---|---|---|
+| Mỗi studio một bố cục riêng ("bespoke"), 6 subagent độc lập | 6 phong cách khác nhau, boilerplate lặp 6 lần | Một khuôn giao diện chung (§3), làm phần dùng chung trước (§7) |
+| `<input type="checkbox" switch>` | Chỉ WebKit vẽ thành công tắc; Windows/Android thấy checkbox | Dùng toggle `role="switch"` sẵn có của app (§3.3) |
+| Nút "Confirm & Keep" huỷ hẹn giờ rollback | Phiên SSH cũ vẫn sống sau reload, nên xác nhận luôn "thành công" | App tự mở **kết nối mới** để xác minh (§4.2) |
+| Cảnh báo lockout chỉ khi tắt password và không có key | Bỏ sót root, `AllowUsers`, cách app đang đăng nhập | Bộ chặn tự khoá ở backend theo bảng (§4.3) |
+| Đọc/ghi mỗi `/etc/ssh/sshd_config` | Bỏ qua `sshd_config.d/`, điểm bảo mật sai | Đọc bằng `sshd -T`, ghi một file drop-in (§4.2) |
+| 6 studio trong một đợt | 15.8k dòng, nhiều thao tác dễ làm hỏng máy | Đợt 1 chỉ 3 studio (§1) |
+| Test: parser + `npm run build` | Lỗi quoting mật khẩu sudo, luồng đổi port không được kiểm | Test bộ chạy lệnh, bộ chặn, luồng kết nối mới, ma trận nền tảng (§6) |
 
-    Shell <-->|"invoke() JSON"| IPC
+---
+
+## 1. Phạm vi
+
+### 1.1. Đợt 1 (MR này)
+1. **Khung chung:** chọn máy, nhận diện quyền, bộ chạy lệnh đặc quyền, bộ chặn tự khoá, thành phần UI dùng chung.
+2. **SSH:** xem và đổi cấu hình `sshd` (port, cách đăng nhập, root login, `AllowUsers`, giới hạn phiên).
+3. **Firewall:** xem cổng đang mở và rule; bật/tắt; thêm/xoá rule; cho phép IP của tôi.
+4. **Users & Keys:** xem user (`root` và `UID >= 1000`), tạo user, sudo, khoá/mở khoá, cấp/thu hồi SSH key từ kho key của `ssh-box`.
+
+### 1.2. Hoãn sang đợt 2 (không nằm trong MR này)
+Fail2ban, Kernel/sysctl, Swap, Systemd, Cron, Hostname/Timezone/DNS. Code hiện có của các studio này được chuyển sang nhánh riêng `feat/vps-server-center-phase2`, không xoá.
+
+Điều kiện mở lại đợt 2: đợt 1 qua hết ma trận kiểm thử §6.3, và mỗi thao tác của đợt 2 có một dòng trong bảng chặn §4.3.
+
+### 1.3. Ngoài phạm vi
+- Host `local` và máy không phải Linux: probe phát hiện `uname -s` khác `Linux` thì hiện thông báo "Chỉ hỗ trợ máy chủ Linux", không chạy lệnh nào khác.
+- Thao tác hàng loạt trên nhiều máy.
+
+---
+
+## 2. Nền tảng hỗ trợ
+
+### 2.1. Phía app (client)
+macOS (WKWebView), iOS (WKWebView), Windows (WebView2), Linux (WebKitGTK), Android (Android WebView).
+
+- Giao diện phải giống nhau trên cả 5 nền tảng: chỉ dùng HTML/CSS mà cả WebKit lẫn Chromium đều hỗ trợ mặc định.
+- Rộng tối thiểu 360px (`minWidth` trong `src-tauri/tauri.conf.json`): không có phần tử rộng cố định lớn hơn màn hình, không có popover bị cắt mép.
+- Thao tác cảm ứng: không có thông tin chỉ hiện khi rê chuột (`title`, `group-hover`).
+
+### 2.2. Phía server
+| Distro | Điểm đặc biệt phải xử lý |
+|---|---|
+| Ubuntu 22.04 / 24.04 | 24.04 dùng `ssh.socket` (socket activation); cloud image có `sshd_config.d/50-cloud-init.conf` |
+| Debian 12 / 13 | 13 dùng OpenSSH 10 (log ghi `sshd-session[pid]`); bản tối giản không có `/var/log/auth.log` |
+| Rocky / Alma 9 | `firewalld`, SELinux `Enforcing` (đổi port phải `semanage`) |
+
+Distro khác: được phép dùng nếu probe nhận ra `systemctl` và một engine firewall có hỗ trợ; nếu không thì studio tương ứng chỉ hiển thị, không cho sửa.
+
+---
+
+## 3. Khuôn giao diện chung
+
+### 3.1. Nguyên tắc
+1. **Một khuôn cho mọi studio**, lấy theo trang Cài đặt (`SettingsWorkspace.tsx`): tiêu đề nhóm `h2` + thẻ `rounded-2xl border border-border/80 bg-card/65 divide-y divide-border/60`, mỗi dòng là một cài đặt.
+2. **Từ ngữ thường, không ẩn dụ:** không dùng "Fortress", "Radar", "Vault", "SOC", "SHIELDS ACTIVE". Tên directive (`PasswordAuthentication`…) hiện ở dòng phụ bằng font mono để người rành kỹ thuật đối chiếu.
+3. **Không đồng hồ điểm, không preset "1 click".** Trạng thái bảo mật là danh sách kiểm tra (đạt / chưa đạt + lý do), mỗi mục có nút "Sửa" đưa tới đúng dòng cài đặt.
+4. **Mọi thay đổi đi qua cùng một luồng:** chỉnh → thanh "N thay đổi" → "Xem trước" (cũ → mới) → "Áp dụng".
+5. **Cho phép bôi đen và copy** nội dung (log, IP, cấu hình): không đặt `select-none` lên vùng nội dung.
+
+### 3.2. Bố cục
+
+```
+┌ Thanh máy ───────────────────────────────────────────────┐
+│ [Chọn máy ▾]  user@host:port · Ubuntu 24.04 · [Quyền: …] ⟳│
+├ Tab ─────────────────────────────────────────────────────┤
+│  SSH   Firewall   Users & Keys                           │
+├──────────────────────────────────────────────────────────┤
+│ [Banner: lỗi / đang xác minh / chỉ xem]                   │
+│ Tình trạng            ← danh sách kiểm tra đạt/chưa đạt   │
+│ Nhóm cài đặt 1        ← các dòng: nhãn · mô tả · điều khiển│
+│ Nhóm cài đặt 2                                            │
+├──────────────────────────────────────────────────────────┤
+│ 3 thay đổi chưa áp dụng      [Bỏ]  [Xem trước & áp dụng]  │ ← dính đáy
+└──────────────────────────────────────────────────────────┘
 ```
 
-### Entry Points in `ssh-box`
-1. **Left Navigation Sidebar ([`App.tsx`](file://~/ssh-box/src/App.tsx)):** New `TabResources` entry `"vpsConfig"` labeled **Server Config** (`Shield` icon in violet/emerald) right below `Docker`.
-2. **Dashboard Machine Cards ([`DashboardWorkspace.tsx`](file://~/ssh-box/src/components/DashboardWorkspace.tsx)):** Quick action button (`Shield` icon) on each host card and machine detail header that jumps directly to `Server Config` with that machine selected.
-3. **Top Terminal Toolbar ([`App.tsx`](file://~/ssh-box/src/App.tsx)):** Quick button inside active SSH terminal tabs to open `Server Config` for the current host.
+- Từ 640px trở xuống: dòng cài đặt xếp dọc (nhãn trên, điều khiển dưới); tab cuộn ngang; thanh hành động rộng hết màn hình; bảng chuyển thành danh sách thẻ.
+- Popover mật khẩu sudo dùng modal (`ui-modal-backdrop` + `ui-modal-content`), không dùng popover neo theo nút, để không bị cắt mép trên điện thoại.
 
-### Shared Privileged Execution Layer (`src-tauri/src/vps_config.rs`)
-- `run_privileged_cmd(host_id, pool, sudo_password, script)`:
-  - If `id -u` is `0`, executes `sh -c <script>` directly.
-  - Else if `sudo -n true` succeeds, executes `sudo -n sh -c <script>`.
-  - Else if `sudo_password` (or stored host/identity password from `vault.rs`) is available, pipes password via `sudo -S -p '' sh -c <script>`.
-  - Returns structured `PrivilegeStatus` (`root` | `sudoNoPass` | `sudoPasswordRequired` | `unprivileged`).
+### 3.3. Thành phần dùng chung
+Tạo trong `src/components/vps/shared/`, studio nào cũng chỉ ghép từ các thành phần này cùng `SelectField` và các lớp `.ui-input`, `.ui-label` có sẵn:
 
----
+| Thành phần | Nguồn / mô tả |
+|---|---|
+| `Switch` | Trích từ toggle `role="switch"` ở `SettingsWorkspace.tsx` (cùng kích thước, màu `bg-primary` / `bg-secondary`) |
+| `SettingRow` | Nhãn, mô tả, tên directive (mono), giá trị đang hiệu lực, điều khiển; tự xếp dọc dưới 640px |
+| `StatusBadge` | 4 mức `ok / warn / danger / neutral`; là nơi **duy nhất** định nghĩa màu trạng thái |
+| `ConfirmButton` | Xác nhận 2 bước tại chỗ, theo mẫu `confirmReset` ở `SettingsWorkspace.tsx` |
+| `ChangePreviewDialog` | Modal liệt kê từng thay đổi "cũ → mới" và cảnh báo của bộ chặn |
+| `useVpsResource` | Hook: tải dữ liệu, `loading`, lỗi, `refresh`, `mutate`; xử lý mã lỗi `SUDO_REQUIRED` một chỗ |
 
-## 3. Bespoke UI/UX Specification for Each Studio (6 Sessions)
+Màu trạng thái: thêm 3 token `--success`, `--warning`, `--danger` vào từng khối `:root[data-app-theme=…]` trong `src/index.css`, và khai báo `--color-success`… như các token sẵn có, để theme sáng và tối đều đọc được. Không dùng lớp màu nhạt kiểu `text-cyan-200`, `text-emerald-300`.
 
-### Session 1: Workspace Shell + SSH Daemon Hardening Studio (`SshHardeningStudio.tsx`)
-
-#### UX Mental Model
-Operators editing `/etc/ssh/sshd_config` fear two things: syntax errors that crash `sshd` and port/auth changes that lock them out. The UI is built as a **3-Zone Security Studio**:
-
-1. **Zone A — SSH Posture Score & Preset Strip (Top / Left):**
-   - **Circular Security Gauge (`0–100`):** Computed dynamically from active settings:
-     - Custom non-22 port (`+15`)
-     - `PermitRootLogin no` (`+25`) or `prohibit-password` (`+15`)
-     - `PasswordAuthentication no` (`+25`)
-     - `PermitEmptyPasswords no` (`+10`)
-     - `MaxAuthTries <= 4` (`+10`)
-     - `X11Forwarding no` (`+5`)
-     - `PubkeyAuthentication yes` (`+10`)
-   - **One-Click Posture Presets:**
-     - *Key-Only Fortress* (`PermitRootLogin prohibit-password`, `PasswordAuthentication no`, `MaxAuthTries 3`, `X11Forwarding no`)
-     - *Balanced Production* (`PermitRootLogin no`, `PubkeyAuthentication yes`, `MaxAuthTries 4`, `ClientAliveInterval 60`)
-     - *Reset to Server Current*
-
-2. **Zone B — Domain Policy Cards (Center):**
-   - **Card 1: Network & Listening Port:**
-     - Large monospace Port input (`1–65535`) with a **"Random High Port (20000–60000)"** button.
-     - Contextual callout when Port is changed: *"Port change detected (`22 → 22022`). Safe Apply will automatically open port `22022/tcp` in UFW/iptables if active and update this machine's port in ssh-box."*
-   - **Card 2: Authentication Gate:**
-     - Segmented visual selector for `PermitRootLogin`: `Disabled (no)` | `SSH Key Only (prohibit-password)` | `Full Access (yes - risky)`.
-     - Accessible `<input type="checkbox" switch>` toggles for `PasswordAuthentication`, `PubkeyAuthentication`, `PermitEmptyPasswords`.
-     - **Smart Lockout Guard Warning:** If user toggles `PasswordAuthentication` OFF while `authorizedKeysCount === 0` for the current SSH user, displays an inline amber/rose alert preventing accidental lockout.
-   - **Card 3: Session & Access Limits:**
-     - Interactive chip-tag editor for `AllowUsers` (e.g., `ubuntu`, `deploy@203.0.113.*`).
-     - Numeric steppers for `MaxAuthTries` (`1–10`), `LoginGraceTime` (`15–120s`), `ClientAliveInterval` (`0–300s`), `ClientAliveCountMax` (`1–10`).
-     - Toggles for `AllowTcpForwarding`, `AllowAgentForwarding`, `X11Forwarding`.
-
-3. **Zone C — Live `sshd_config` Diff Inspector & Anti-Lockout Apply Modal (Right):**
-   - Displays a live unified diff comparing the server's current `/etc/ssh/sshd_config` against the staged changes.
-   - **Safe Apply Flow:**
-     1. Backs up `/etc/ssh/sshd_config` to `/etc/ssh/sshd_config.sshbox.bak`.
-     2. Writes staged config to temp file and runs `sshd -t -f <tmp>` to verify syntax before touching the live file.
-     3. If port changed and `ufw` is active, opens the new port (`ufw allow <new_port>/tcp`).
-     4. Spawns a detached 30-second auto-rollback timer on the VPS (`/tmp/sshbox-sshd-rollback.pid`) and reloads `sshd`.
-     5. Opens a **30-Second Confirmation Modal** with a circular countdown ring; clicking **"Confirm & Keep"** kills the rollback timer and updates `HostEntry.port` in `ssh-box`.
+### 3.4. Chữ và tên gọi
+- Mọi chuỗi lấy từ `getI18n(lang)` (`src/i18n.ts`); không viết `isVi ? … : …` trong JSX.
+- Một tên duy nhất `t.navVpsConfig`: VI **"Cấu hình VPS"**, EN **"Server Config"**. Dùng cho sidebar, nút trên Dashboard, nút trên thanh terminal và tooltip.
+- Backend trả lỗi dạng `MÃ: chi tiết` (vẫn `Result<T, String>` như các lệnh khác trong `lib.rs`); frontend dịch `MÃ` thành câu theo ngôn ngữ. Các mã: `SUDO_REQUIRED`, `SUDO_DENIED`, `LOCKOUT_BLOCKED`, `COMMAND_FAILED`, `VERIFY_FAILED`, `UNSUPPORTED`.
 
 ---
 
-### Session 2: Firewall & Live Listening Socket Radar (`FirewallStudio.tsx`)
+## 4. Chống khoá
 
-#### UX Mental Model
-Traditional firewall UIs only list static rules, leaving the user guessing which ports are actually open on the machine. `FirewallStudio` bridges **Live Network Reality (`ss -tulpn`)** with **Firewall Policy (`ufw` / `iptables`)**:
+### 4.1. Định nghĩa
+**Ngữ cảnh kết nối** (`ConnectionContext`) là bộ thông tin app đang dùng để vào máy:
+- `login_user`: user đăng nhập (`host.user` hoặc user của identity).
+- `auth`: `Password` hoặc `Key { public_key_body }` — key app thực sự dùng cho host này.
+- `client_ip`, `server_port`: lấy từ trường 1 và trường 4 của `$SSH_CONNECTION` trong probe **không qua sudo** (vì sudo xoá biến này).
 
-1. **Top Command Bar — Firewall Engine & "Shield My IP" Banner:**
-   - Displays detected firewall backend (`UFW`, `firewalld`, or `iptables`), master `Active / Inactive` switch, and Default Policy badges (`Incoming: DENY`, `Outgoing: ALLOW`).
-   - **Client IP Detector Banner:** Automatically detects the operator's current public IP from `$SSH_CLIENT` / external check and provides a 1-click **"Whitelist My IP (`x.x.x.x`)"** action.
+Một thay đổi chỉ được coi là **an toàn** khi, sau khi áp dụng, app mở được một **kết nối SSH mới** bằng đúng ngữ cảnh này (hoặc ngữ cảnh mới đã khai báo, ví dụ port mới). Giữ được phiên đang mở không chứng minh được gì.
 
-2. **Left Split Pane — Live Listening Socket Radar (`ss -tulpn`):**
-   - Interactive cards/rows for every TCP/UDP port currently bound on the VPS:
-     - Shows **Port badge** (`:22`, `:80`, `:443`, `:5432`, `:6379`), **Bind Scope pill** (`0.0.0.0 Public` in amber vs `127.0.0.1 Local-only` in emerald), and **Process/PID** (`nginx #1042`, `postgres #882`).
-     - Cross-references with active firewall rules to show a live status badge: `EXPOSED TO INTERNET`, `RESTRICTED TO IP`, `BLOCKED BY FIREWALL`, or `LOOPBACK SAFE`.
-     - 1-click inline button on each public socket: **"Allow All"**, **"Restrict to IP..."**, or **"Block Port"**.
+### 4.2. Luồng áp dụng thay đổi SSH
 
-3. **Right Split Pane — Visual Firewall Rule Matrix & Quick Presets:**
-   - **1-Click Service Presets Bar:** `+ HTTP/HTTPS (80, 443)`, `+ SSH Rate-Limit`, `+ DNS (53)`, `+ MySQL/Postgres from IP`.
-   - **Visual Rule Composer:** Action segmented toggle (`ALLOW` emerald / `LIMIT` amber / `DENY` rose), Port or Port Range (`80`, `8000:8010`), Protocol (`tcp` | `udp` | `any`), Source (`Anywhere 0.0.0.0/0` or specific `IP / CIDR`), and Note/Comment.
-   - **Responsive Sticky-Header Rule Table:** Built with `@container` query and sticky headers (`modern-web-guidance: responsive-table`) for deleting rules with 1 click.
+```
+Kiểm tra bộ chặn → Sao lưu → Ghi drop-in → sshd -t → Hẹn giờ hoàn tác
+→ Nạp lại đúng cách → Kiểm tra cổng → Kết nối thử từ app → Huỷ hẹn giờ → Lưu port
+            (bất kỳ bước nào lỗi → hoàn tác ngay, không lưu port)
+```
 
----
+1. **Đọc cấu hình đang hiệu lực** bằng `sshd -T -C user=<login_user>,addr=<client_ip>,lport=<server_port>`, đã gồm `sshd_config.d/` và `Match`. Không tự parse file.
+2. **Nơi ghi:** nếu dòng `Include /etc/ssh/sshd_config.d/*.conf` đứng trước mọi directive trong file chính, ghi toàn bộ thay đổi vào `/etc/ssh/sshd_config.d/00-sshbox.conf` (tên sắp xếp đứng đầu, nên thắng theo quy tắc giá trị đầu tiên). Nếu không có `Include`, sửa file chính và giữ nguyên comment.
+3. **Sao lưu** file sẽ ghi vào `<file>.sshbox.bak`, chỉ khi không có hoàn tác nào đang chờ. Đang có thay đổi chờ xác minh thì từ chối áp dụng tiếp.
+4. **Kiểm tra cú pháp** `sshd -t` trên cấu hình đầy đủ; lỗi thì khôi phục bản sao lưu và dừng. sshd đang chạy chỉ đọc lại file khi reload, nên bước ghi không ảnh hưởng kết nối mới.
+5. **Hẹn giờ hoàn tác trên server, trước khi nạp lại:** `systemd-run --on-active=60 --unit=sshbox-rollback …` (không bị logind huỷ khi phiên SSH đóng). Script hoàn tác khôi phục bản sao lưu rồi chạy lệnh nạp lại ở bước 6, dùng `restart` (không chỉ `reload`) để cứu cả trường hợp sshd đã dừng. Server trả về thời điểm hết hạn; UI đếm ngược theo đó, không tự đặt 30 giây.
+6. **Nạp lại đúng cách:**
+   - `ssh.socket` đang active: `systemctl daemon-reload && systemctl restart ssh.socket`.
+   - Ngược lại: `systemctl reload-or-restart ssh` (hoặc `sshd`).
+   - SELinux `Enforcing` và port khác 22: `semanage port -a -t ssh_port_t -p tcp <port>` **trước** khi nạp lại; lỗi thì dừng ở bước này.
+   - Firewall đang bật và port đổi: thêm rule cho phép port mới qua engine đang dùng (§4.4).
+7. **Kiểm tra cổng trên server:** `ss -tlnH "sport = :<port>"` phải có tiến trình `sshd`.
+8. **Kết nối thử từ app:** gọi `SshPool::test_connection` (`src-tauri/src/ssh_pool.rs`) với bản sao `HostEntry` mang port mới. Kết nối này là kết nối mới hoàn toàn. Fingerprint host key trả về phải trùng fingerprint đã biết của port cũ; khác thì coi là thất bại.
+9. **Thành công:** `systemctl stop sshbox-rollback.timer`, rồi mới lưu `HostEntry.port`. **Thất bại hoặc hết giờ:** hoàn tác ngay, không đụng `HostEntry`, hiện bước thất bại và lý do.
 
-### Session 3: Intrusion Prevention & Auth Audit Timeline (`Fail2banStudio.tsx`)
+UI: modal tiến trình hiện các bước trên với trạng thái từng bước, cùng nút "Hoàn tác ngay". Không có nút "Xác nhận" thủ công, không có nút "Áp dụng không hẹn giờ hoàn tác".
 
-#### UX Mental Model
-Designed as a **Security Operations Center (SOC) Mini-Dashboard** combining active intrusion blocking (`fail2ban`) with real-time SSH authentication forensics (`/var/log/auth.log` / `/var/log/secure` / `journalctl`).
+### 4.3. Bộ chặn tự khoá
+Chạy ở backend (Rust, hàm thuần, có unit test) trước mọi thao tác ghi. Frontend hiển thị kết quả trong `ChangePreviewDialog`, không tự quyết.
 
-1. **Onboarding / Service Banner:**
-   - If `fail2ban` is not installed on the VPS, displays a dedicated **Zero-State Onboarding Card** with a 1-click **"Install & Enable Fail2ban (`apt`/`dnf`/`yum`)"** button that installs `fail2ban` and writes a sane `/etc/fail2ban/jail.d/sshbox.local`.
-2. **Top Deck — Active Jail Cards:**
-   - Each jail (`sshd`, `nginx-http-auth`, etc.) is rendered as a visual metric card showing:
-     - **Currently Banned IPs** (large rose counter)
-     - **Total Banned** & **Current Failed Attempts**
-     - **"Tune Jail" Popover:** Visual controls for `maxretry` (attempts), `findtime` (window in minutes), `bantime` (duration in hours/days), and `ignoreip` whitelist.
-3. **Left Pane — Quarantine Vault (Banned IPs Manager):**
-   - Filterable list of banned IPs across jails with an instant **"Unban"** action button and a manual **"Ban IP Now"** input field.
-4. **Right Pane — SSH Authentication Audit Stream:**
-   - Dual-tab/filterable live event stream parsed from system auth logs (`Accepted` vs `Failed / Invalid user`):
-     - **Accepted Logins (Emerald):** User, Source IP, Port, Method (`publickey` / `password`), Timestamp.
-     - **Attack / Brute-Force Attempts (Rose):** Attacker IP, Target User (`root`, `admin`, etc.), Attempt count badge, and a 1-click **"Ban IP in Fail2ban"** button directly on the log item.
+| Thao tác | Điều kiện | Kết quả |
+|---|---|---|
+| SSH: `PasswordAuthentication no` | `auth = Password` | Chặn |
+| SSH: `PubkeyAuthentication no` | `auth = Key` | Chặn |
+| SSH: tắt cả password lẫn pubkey | luôn | Chặn |
+| SSH: `PermitRootLogin no` | `login_user = root` | Chặn |
+| SSH: `PermitRootLogin prohibit-password` | `login_user = root` và `auth = Password` | Chặn |
+| SSH: `AllowUsers` / `DenyUsers` | danh sách mới loại trừ `login_user` | Chặn |
+| Firewall: bật với incoming `deny` | chưa có rule cho phép `server_port` | Tự thêm rule cho phép `server_port` trước khi bật |
+| Firewall: xoá rule | rule này là rule duy nhất cho phép `server_port` từ `client_ip` | Chặn |
+| Firewall: thêm `deny` / `reject` | nguồn bao gồm `client_ip`, hoặc cổng là `server_port` từ mọi nơi | Chặn |
+| Users: khoá, bỏ sudo | user là `login_user` | Chặn |
+| Users: bỏ sudo | user là người cuối cùng có sudo (trừ root) | Chặn |
+| Keys: thu hồi | key là key app đang dùng cho `login_user` | Chặn |
+| Mọi thao tác xoá/khoá/thu hồi khác | — | Hỏi lại bằng `ConfirmButton` |
 
----
+Bị chặn thì trả lỗi `LOCKOUT_BLOCKED: <lý do>`, UI giải thích bằng một câu, ví dụ: "Ứng dụng đang đăng nhập bằng mật khẩu. Hãy chuyển máy này sang đăng nhập bằng SSH key trước khi tắt mật khẩu."
 
-### Session 4: Linux Users, Sudoers & Keyring Matrix (`AccessKeysStudio.tsx`)
+### 4.4. Firewall
+- **Engine được phép ghi:** `ufw` và `firewalld`. iptables thuần chỉ được xem, kèm hướng dẫn cài `ufw`, vì không có cách lưu bền qua reboot thống nhất giữa các distro.
+- **firewalld:** mọi thay đổi dùng `--permanent` rồi `--reload`.
+- **Thứ tự rule:** `deny` / `reject` chèn lên đầu (`ufw insert 1`; firewalld rich rule có `priority` âm). `allow` nối cuối.
+- **Xoá theo nội dung, không theo số thứ tự:** script đọc lại `ufw status numbered`, tìm dòng có nội dung trùng rule cần xoá, lấy số hiện tại rồi xoá trong cùng script. Không tìm thấy thì báo lỗi, không xoá gì.
+- **IPv6:** ufw kiểm tra `IPV6=yes` trong `/etc/default/ufw`; tắt thì hiện cảnh báo "IPv6 không được lọc".
+- **Trạng thái cổng** (đang mở công khai / giới hạn IP / bị chặn / chỉ nội bộ) tính theo thứ tự rule, rule khớp đầu tiên thắng; tách IPv4 và IPv6.
 
-#### UX Mental Model
-Eliminates manual editing of `/etc/passwd`, `/etc/sudoers`, and `~/.ssh/authorized_keys` by creating a **Visual Bridge between `ssh-box`'s Local Keychain (`resources.sshKeys`) and Remote Linux Accounts**.
-
-1. **Left Column — Linux Accounts Deck:**
-   - Lists `root` and all human/deploy accounts (`UID >= 1000`) as selectable profile cards:
-     - Displays Username, `UID:GID`, Login Shell (`/bin/bash`, `/usr/sbin/nologin`), Account Status (`Active` vs `Locked`), Sudo Privilege pill (`ROOT`, `SUDO + NOPASSWD`, `SUDO`, `STANDARD`), and Authorized Keys count badge.
-   - **Account Action Bar & "+ New Linux User" Modal:**
-     - Create a new user (`useradd -m -s /bin/bash`), optionally add to `sudo`/`wheel` & `docker` groups, and optionally enable passwordless sudo (`/etc/sudoers.d/90-sshbox-<user>` validated with `visudo -cf`).
-     - Quick toggles on selected user: **Lock/Unlock Account (`usermod -L/-U`)**, **Toggle Passwordless Sudo (`NOPASSWD`)**.
-
-2. **Right Column — Authorized Keys Inspector & Local Keychain Bridge:**
-   - **Section 1: Keys Authorized on `<user>@<vps>` (`~/.ssh/authorized_keys`):**
-     - Each line in `authorized_keys` is parsed into a structured **Remote Key Card**: Algorithm badge (`ED25519`, `RSA`, `ECDSA`), Key Comment/Owner, Key Prefix/Suffix preview, and a **"Linked in ssh-box"** badge if its public key matches an item in `resources.sshKeys`.
-     - Includes 1-click **Revoke Key** button and **"+ Paste Public Key"** inline form.
-   - **Section 2: `ssh-box` Local Keychain Bridge:**
-     - Displays all SSH keys stored in `ssh-box` (`resources.sshKeys`).
-     - Keys already present in this Linux user's `authorized_keys` show an emerald `Authorized` badge; remaining keys show a 1-click **"Authorize for `<user>`"** button that appends the key, creates `~/.ssh` if missing, and enforces `chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys && chown -R <user>:<user> ~/.ssh`.
-
----
-
-### Session 5: Kernel & Network Tuning Deck (`KernelTuningStudio.tsx`)
-
-#### UX Mental Model
-Transforms cryptic `/etc/sysctl.conf` key-value pairs into **1-Click Hardware/Network Optimization Profiles** and **Visual Range Gauges** comparing live kernel state against recommended production targets.
-
-1. **Top Deck — 3 Signature Optimization Profile Cards:**
-   - **Card 1: Google TCP BBR Congestion Control:**
-     - Displays live kernel version, available congestion algorithms (`sysctl net.ipv4.tcp_available_congestion_control`), and current active algorithm (`cubic` vs `bbr`).
-     - 1-click switch to enable/disable `net.core.default_qdisc = fq` + `net.ipv4.tcp_congestion_control = bbr`.
-   - **Card 2: High-Throughput & Docker Server Profile:**
-     - Optimizes connection backlog and file descriptors (`fs.file-max = 2097152`, `net.core.somaxconn = 65535`, `net.ipv4.tcp_max_syn_backlog = 16384`, `net.ipv4.tcp_tw_reuse = 1`, `net.ipv4.ip_local_port_range = 10240 65535`).
-   - **Card 3: Kernel Network Fortress:**
-     - Enables SYN flood protection (`net.ipv4.tcp_syncookies = 1`), reverse-path filtering (`net.ipv4.conf.all.rp_filter = 1`), disables ICMP redirects/source routing, and includes a dedicated **"Stealth Mode (Ignore ICMP Ping)"** switch (`net.ipv4.icmp_echo_ignore_all`).
-
-2. **Bottom Deck — Interactive Sysctl Parameter Gauges:**
-   - Grouped into *Memory & Swap*, *Network Stack*, and *Filesystem & Descriptors*.
-   - Each parameter card shows:
-     - Human title & sysctl key (e.g., `Memory Swappiness — vm.swappiness`)
-     - Plain-language explanation of impact
-     - **Live Server Value** vs **Staged Value** interactive slider/input + **Recommended Badge** (e.g., `Recommended: 10 for VPS`)
-   - **Apply Engine:** Writes clean, idempotent configuration to `/etc/sysctl.d/99-sshbox.conf` and applies immediately via `sysctl --system` (or `sysctl -p /etc/sysctl.d/99-sshbox.conf`).
+### 4.5. Users & Keys
+- **Tạo user, quyền sudo** có 3 lựa chọn: không sudo / sudo không cần mật khẩu (`/etc/sudoers.d/90-sshbox-<user>`, kiểm bằng `visudo -cf`) / sudo có mật khẩu. Lựa chọn thứ ba bắt buộc nhập mật khẩu; mật khẩu truyền vào `chpasswd` qua stdin.
+- **Khoá user:** `usermod -L` kèm `usermod -e 1`, để chặn cả đăng nhập bằng key (với `UsePAM yes`, chỉ `-L` không chặn key). Mở khoá: `usermod -U -e ''`.
+- **Thao tác trong thư mục của user** (`~/.ssh`, `authorized_keys`) chạy dưới quyền chính user đó (`runuser -u <user> -- sh -c …`, `umask 077`), không ghi bằng root, để tránh bị lừa bằng symlink.
+- **Thu hồi key:** so khớp chính xác trường key (trường thứ 2 của dòng), không tìm chuỗi con.
 
 ---
 
-### Session 6: System Operations, Dynamic Swap, Systemd & Cron Studio (`SystemOpsStudio.tsx`)
+## 5. Lớp thực thi đặc quyền (backend)
 
-#### UX Mental Model
-A 3-tab operational studio inside System Operations for managing storage/memory elasticity, background daemons, and scheduled tasks:
-
-1. **Sub-Studio 6A — Dynamic Swap Allocator & Host Identity:**
-   - **Visual Memory + Swap Capacity Bar:** Shows Physical RAM, Current Swap (`/proc/swaps`), and Available Disk Space on `/`.
-   - **Interactive Swap Size Selector:** Segmented preset pills (`Disable Swap`, `512 MB`, `1 GB`, `2 GB`, `4 GB`, `8 GB`) that safely turn off existing `/swapfile`, allocate the new size (`fallocate` / `dd`), set `chmod 600`, `mkswap`, `swapon`, and persist `/swapfile none swap sw 0 0` in `/etc/fstab`.
-   - **Host Identity & Network Resolver Bar:**
-     - Inline editors for **Hostname** (`hostnamectl set-hostname`), **Timezone** selector (`UTC`, `Asia/Ho_Chi_Minh`, `Asia/Tokyo`, `America/New_York`, `Europe/London`, etc.), and **DNS Servers** with 1-click presets (*Cloudflare 1.1.1.1*, *Google 8.8.8.8*, *Quad9 9.9.9.9*).
-
-2. **Sub-Studio 6B — Systemd Service Deck (`systemctl`):**
-   - Filterable deck of systemd `.service` units (*All*, *Running*, *Failed*, *Pinned Common Services* like `nginx`, `docker`, `postgresql`, `redis`, `mysql`, `caddy`, `ssh`).
-   - Each row/card displays Unit Name, Description, Active State badge (`active (running)` emerald, `failed` rose, `inactive` muted), Boot State (`enabled` / `disabled`), and 1-click action buttons (`Start`, `Stop`, `Restart`, `Enable/Disable`) plus a **"Logs"** button that opens an inline slide-over **Live `journalctl -u <unit> -n 150` Inspector**.
-
-3. **Sub-Studio 6C — Human-Readable Cron Studio (`crontab`):**
-   - **Visual Cron Composer:**
-     - Preset frequency pills (*Every Minute*, *Every 5 Mins*, *Hourly*, *Daily at 02:00 AM*, *Weekly Sunday*, *Monthly*, *On Reboot `@reboot`*) + 5-part cron field inputs (`Minute`, `Hour`, `Day`, `Month`, `Weekday`) with a live **Human-Readable Schedule Translator** (e.g., `"0 3 * * *"` → *"Runs every day at 03:00"*).
-     - Command input + optional log redirection toggle (`>> /var/log/cron-job.log 2>&1`).
-   - **Active Crontab List:**
-     - Displays each cron entry from `crontab -l` with its human-readable schedule badge, command, a switch to **Pause/Resume** (comments/uncomments the line in crontab with `# [PAUSED]`), and **Delete**.
+- Giữ cách chạy script qua heredoc `sh -s` của `build_privileged_command` (`src-tauri/src/vps_config.rs`). Bỏ dòng `:` cuối; mọi script ghi bắt đầu bằng `set -eu`, để lệnh nào lỗi thì trả `COMMAND_FAILED`.
+- **Mật khẩu sudo** chỉ đi qua stdin của `sudo -S`, không bao giờ nằm trong chuỗi `sh -c` hay trong dòng lệnh. Sửa luôn `probe_privilege` theo cách này.
+- **Không tự lấy mật khẩu đăng nhập trong vault để thử sudo** (bỏ nhánh này trong `resolve_sudo_password`): mỗi lần đoán sai bị sudo tính là 3 lần thử sai, có thể khoá tài khoản trên máy dùng `pam_faillock`. Người dùng nhập mật khẩu sudo một lần mỗi phiên làm việc, chỉ giữ trong bộ nhớ.
+- **Probe** chạy không qua sudo và trả về:
+  - quyền: `root | sudoNoPassword | sudoPassword | none`;
+  - `ConnectionContext` (§4.1);
+  - `os_id`, `os_version`, `openssh_version`;
+  - `ssh_socket_active`, `selinux_enforcing`, `firewall_engine`.
+- **File tạm** dùng `mktemp`, không dùng đường dẫn đoán trước được trong `/tmp`.
+- Mỗi thao tác ghi trả về snapshot mới trong cùng một lần chạy script, không gọi thêm lệnh đọc riêng.
 
 ---
 
-## 4. Testing & Verification Strategy Per Session
+## 6. Kiểm thử
 
-Every subagent session must verify both backend and frontend before committing:
-1. **Rust Unit Tests (`cargo test` in `src-tauri`):**
-   - Pure parser and config-generator unit tests in `src-tauri/src/vps_config.rs` (testing `sshd_config` parsing/diffing/scoring, `ufw`/`ss -tulpn` parsing, `fail2ban`/`auth.log` parsing, `authorized_keys`/`passwd` parsing, `sysctl` parsing, and `swapon`/`systemctl`/`crontab` parsing).
-2. **Frontend Type & Build Check (`npm run build`):**
-   - Ensures zero TypeScript (`tsc`) or Vite bundle errors after each Studio is integrated.
+### 6.1. Unit test Rust (`cargo test`)
+- Giữ các test parser đã có (ufw, `ss`, `authorized_keys`, `passwd`/sudoers).
+- **Bộ chạy lệnh:** dựng lệnh bằng `build_privileged_command` và probe rồi chạy thật bằng `sh` cục bộ, với `sudo` được thay bằng một script giả (đặt trước trong `PATH`) chỉ ghi lại stdin. Mật khẩu thử: dấu cách, `'`, `"`, `$HOME`, `;`, `` ` ``, `\`. Phải chứng minh mật khẩu tới nguyên vẹn và không có lệnh nào khác bị chạy.
+- **Lỗi giữa script:** một lệnh lỗi ở giữa thì `run_privileged_script` phải trả `Err(COMMAND_FAILED…)`.
+- **Bộ chặn:** mỗi dòng của bảng §4.3 có ít nhất một test chặn và một test cho phép.
+- **Parser `sshd -T`:** gồm trường hợp drop-in đặt `PasswordAuthentication yes` thắng file chính.
+- **Xoá rule ufw theo nội dung:** khi số thứ tự đã bị lệch thì phải xoá đúng rule.
+- Mỗi test có một câu nói rõ nó bảo vệ điều gì. Mỗi test phải được chạy một lần trên code chưa sửa để thấy nó bắt được lỗi.
+
+### 6.2. Test tích hợp với sshd tạm
+Dùng cách dự án đã làm: sshd tạm trên cổng cao, chạy bằng user hiện tại, `HOME` giả, không đụng `~/.ssh` thật và không dùng server thật.
+- Luồng xác minh §4.2 bước 8: đổi port của sshd tạm → `test_connection` trên port mới thành công; port sai thất bại; host key khác thì thất bại.
+- Kết nối cũ vẫn sống sau reload nhưng **không** được dùng làm bằng chứng: test phải thất bại nếu code xác minh bằng phiên cũ.
+
+### 6.3. Ma trận kiểm thử thủ công
+**Server**, trên máy ảo dùng một lần (không dùng server thật): Ubuntu 24.04, Debian 13, Rocky 9.
+
+| Kịch bản | Kết quả mong đợi |
+|---|---|
+| Đổi port SSH | Hoạt động trên cả 3 distro (`ssh.socket`, SELinux); `HostEntry.port` chỉ đổi khi kết nối thử thành công |
+| Đổi port bằng một port chưa mở trên firewall của nhà cung cấp | Kết nối thử thất bại → tự hoàn tác, port cũ vẫn vào được |
+| Tắt password khi app đăng nhập bằng password | Bị chặn, có hướng dẫn |
+| Cloud image có `50-cloud-init.conf` bật password | Tình trạng hiển thị đúng "đang bật" và tắt được thật |
+| Bật firewall rồi reboot | Rule còn, SSH vẫn vào được |
+| Xoá rule SSH duy nhất / thu hồi key đang dùng / khoá chính mình | Bị chặn |
+
+**App:** macOS, Windows, iOS hoặc Android (thiết bị thật hoặc trình giả lập) × theme tối / sáng × tiếng Việt / tiếng Anh.
+- Công tắc trông giống nhau trên mọi nền tảng.
+- Ở 360px không có thanh cuộn ngang toàn trang và không có phần tử bị cắt.
+- Theme sáng đọc được mọi trạng thái.
+- Chế độ tiếng Việt không còn chữ tiếng Anh, trừ tên directive và lệnh.
+
+### 6.4. Tiêu chí hoàn thành
+- `cargo test` và `npm run build` đều qua; các test ở 6.1 và 6.2 đã được chứng minh là bắt được lỗi cũ.
+- Đã đi hết ma trận 6.3 và ghi kết quả (đạt/không đạt) vào mô tả MR.
+
+---
+
+## 7. Thứ tự thực hiện
+
+Làm tuần tự trong một luồng, không chia cho nhiều agent độc lập. Mỗi bước tối đa khoảng 400 dòng code; bước nào lớn hơn thì tách nhỏ tiếp.
+
+1. **Backend chung:** sửa bộ chạy lệnh và probe, thêm `ConnectionContext`, mã lỗi, bộ chặn, kèm test §6.1.
+2. **UI chung:** `src/components/vps/shared/`, 3 token màu, chuỗi i18n, khung `VpsConfigWorkspace` theo §3.
+3. **SSH:** luồng §4.2, test tích hợp §6.2.
+4. **Firewall:** §4.4.
+5. **Users & Keys:** §4.5.
+6. **Kiểm thử thủ công:** ma trận §6.3.
+
+Sau khi spec này được duyệt, viết lại `docs/superpowers/plans/2026-10-30-vps-server-center-plan.md` theo đúng các bước trên.
+
+### Xử lý code đang có trong MR !50
+- **Giữ:** các parser đã có test, `build_privileged_command` (sau khi sửa theo §5), các điểm vào từ sidebar, Dashboard và thanh terminal (đổi nhãn sang `t.navVpsConfig`).
+- **Viết lại theo khuôn §3:** `VpsConfigWorkspace.tsx`, `SshHardeningStudio.tsx`, `FirewallStudio.tsx`, `AccessKeysStudio.tsx`.
+- **Chuyển sang nhánh `feat/vps-server-center-phase2`:** `Fail2banStudio.tsx`, `KernelTuningStudio.tsx`, `SystemOpsStudio.tsx` cùng các lệnh backend và kiểu dữ liệu tương ứng.

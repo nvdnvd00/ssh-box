@@ -225,6 +225,7 @@ export interface AppI18nStrings {
   instCat: Record<string, string>;
   instRecommended: string;
   instInstall: string;
+  instBrewAdminNote: string;
   instUninstall: string;
   instEnable: string;
   instInstallSelected: (n: number) => string;
@@ -426,6 +427,7 @@ const VI_STRINGS: AppI18nStrings = {
   instCat: { managers: "Trình quản lý gói", security: "Bảo mật", apps: "Chạy ứng dụng", ai: "AI", network: "Mạng", utils: "Tiện ích" },
   instRecommended: "nên cài",
   instInstall: "Cài",
+  instBrewAdminNote: "Cài Homebrew cần quyền quản trị; nếu lỗi, hãy chạy lệnh cài chính thức trong Terminal",
   instUninstall: "Gỡ",
   instEnable: "Bật",
   instInstallSelected: (n) => `Cài ${n} mục đã chọn`,
@@ -709,6 +711,7 @@ const EN_STRINGS: AppI18nStrings = {
   instCat: { managers: "Package managers", security: "Security", apps: "Run apps", ai: "AI", network: "Network", utils: "Utilities" },
   instRecommended: "recommended",
   instInstall: "Install",
+  instBrewAdminNote: "Installing Homebrew needs admin rights; if it fails, run the official install command in Terminal",
   instUninstall: "Remove",
   instEnable: "Enable",
   instInstallSelected: (n) => `Install ${n} selected`,

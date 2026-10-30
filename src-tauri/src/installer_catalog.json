@@ -52,7 +52,7 @@
   "recommended": true,
   "descriptionVi": "Tự cập nhật bản vá bảo mật",
   "descriptionEn": "Automatic security updates",
-  "bin": null,
+  "bin": "unattended-upgrade",
   "methods": [
    {
     "os": "linux",
@@ -209,7 +209,7 @@
     "os": "linux",
     "manager": "snap",
     "package": "docker",
-    "service": "docker"
+    "service": "snap.docker.dockerd"
    },
    {
     "os": "macos",

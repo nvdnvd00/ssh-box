@@ -126,8 +126,8 @@ fn os_methods(t: &CatalogTool, os: HostOs) -> impl Iterator<Item = &Method> {
 }
 
 // Name used for the "installed outside a manager" check: the binary, else the tool id.
-fn bin_key(t: &CatalogTool, os: HostOs) -> Option<&str> {
-    Some(t.bin.as_deref().unwrap_or(&t.id))
+fn bin_key(t: &CatalogTool) -> &str {
+    t.bin.as_deref().unwrap_or(&t.id)
 }
 
 pub fn scan_script(os: HostOs) -> String {
@@ -141,14 +141,13 @@ pub fn scan_script(os: HostOs) -> String {
             .flat_map(|t| os_methods(t, os).filter(|m| m.manager == "winget").map(|m| ps_quote(&m.package)))
             .collect();
         s += &format!(
-            "$w = winget list --source winget 2>$null | Out-String\nforeach ($id in @({})) {{ if ($w -match [regex]::Escape($id)) {{ ('PKG:winget:' + $id) }} }}\n",
+            "$w = winget list --source winget --accept-source-agreements --disable-interactivity 2>$null | Out-String\nforeach ($id in @({})) {{ if ($w -match ('(?m)(^|\\s)' + [regex]::Escape($id) + '(\\s|$)')) {{ ('PKG:winget:' + $id) }} }}\n",
             ids.join(",")
         );
         s += "npm ls -g --depth=0 --parseable 2>$null | ForEach-Object { if ($_ -match 'node_modules[\\\\/](.+)$') { 'PKG:npm:' + ($Matches[1] -replace '\\\\','/') } }\n";
         for t in tools() {
-            if let Some(k) = bin_key(t, os) {
-                s += &format!("{} + [int][bool](Get-Command {} -ErrorAction SilentlyContinue)\n", ps_quote(&format!("BIN:{k}:")), ps_quote(k));
-            }
+            let k = bin_key(t);
+            s += &format!("{} + [int][bool](Get-Command {} -ErrorAction SilentlyContinue)\n", ps_quote(&format!("BIN:{k}:")), ps_quote(k));
             if let Some(v) = os_methods(t, os).find_map(|m| m.service.as_deref()) {
                 s += &format!(
                     "$s = Get-Service -Name {q} -ErrorAction SilentlyContinue\nif ($s) {{ {l} + [int]($s.StartType -eq 'Automatic') + ':' + [int]($s.Status -eq 'Running') }}\n",
@@ -168,9 +167,8 @@ pub fn scan_script(os: HostOs) -> String {
     s += "brew list --formula -1 2>/dev/null | sed 's/^/PKG:brew:/'\n";
     s += "brew list --cask -1 2>/dev/null | sed 's/^/PKG:brew:/'\n";
     for t in tools() {
-        if let Some(k) = bin_key(t, os) {
-            s += &format!("if command -v {q} >/dev/null 2>&1; then echo {y}; else echo {n}; fi\n", q = shq(k), y = shq(&format!("BIN:{k}:1")), n = shq(&format!("BIN:{k}:0")));
-        }
+        let k = bin_key(t);
+        s += &format!("if command -v {q} >/dev/null 2>&1; then echo {y}; else echo {n}; fi\n", q = shq(k), y = shq(&format!("BIN:{k}:1")), n = shq(&format!("BIN:{k}:0")));
         if let Some(v) = os_methods(t, os).find_map(|m| m.service.as_deref()) {
             if os == HostOs::Linux {
                 s += &format!(
@@ -218,7 +216,7 @@ pub fn parse_scan(os: HostOs, raw: &str) -> InstallerScan {
                 .collect();
             let status = if !via.is_empty() {
                 ToolStatus::Installed { via }
-            } else if bin_key(t, os).is_some_and(|k| bins.contains(k)) {
+            } else if bins.contains(bin_key(t)) {
                 ToolStatus::External
             } else {
                 ToolStatus::NotInstalled
@@ -321,7 +319,8 @@ pub fn needs_root(os: HostOs, a: &InstallAction) -> bool {
     use InstallAction::*;
     os == HostOs::Linux
         && match a {
-            Install { manager, .. } | Uninstall { manager, .. } => ["apt", "dnf", "snap"].contains(&manager.as_str()),
+            Install { manager, .. } | Uninstall { manager, .. } => // npm too: the distro's global prefix (/usr/lib) is root-owned.
+                ["apt", "dnf", "snap", "npm"].contains(&manager.as_str()),
             EnableService { .. } | Refresh | InstallManager { .. } => true,
         }
 }
@@ -347,7 +346,7 @@ pub fn search_script(os: HostOs, present: &[String], query: &str) -> Result<Stri
             ("snap", _) => format!("snap find {q} 2>/dev/null | awk 'NR>1{{n=$1; $1=$2=$3=$4=\"\"; sub(/^ +/,\"\"); print \"HIT:snap:\" n \":\" $0}}' | head -n 20\n"),
             ("brew", _) => format!("brew search {q} 2>/dev/null | grep -v '^==>' | head -n 20 | sed 's/^/HIT:brew:/; s/$/:/'\n"),
             ("winget", _) => format!(
-                "winget search --source winget {} | Out-String -Stream | ForEach-Object {{ if ($_ -match '^(.+?)\\s{{2,}}([A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+)\\s') {{ 'HIT:winget:' + $Matches[2] + ':' + $Matches[1].Trim() }} }} | Select-Object -First 20\n",
+                "winget search --source winget --accept-source-agreements --disable-interactivity {} | Out-String -Stream | ForEach-Object {{ if ($_ -match '^(.+?)\\s{{2,}}([A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)+)\\s') {{ 'HIT:winget:' + $Matches[2] + ':' + $Matches[1].Trim() }} }} | Select-Object -First 20\n",
                 ps_quote(query)
             ),
             // npm search --parseable: name<TAB>description<TAB>...
@@ -438,7 +437,8 @@ pub async fn run_local(
             if pw.contains('\n') || pw.contains('\r') {
                 return Err(vps_err(ERR_SUDO_DENIED, "sudo password must not contain a line break"));
             }
-            cmd.args(["-S", "-p", "", "sh", "-s"]);
+            // -k: ignore cached credentials so sudo always consumes line 1; otherwise sh would run the password.
+            cmd.args(["-k", "-S", "-p", "", "sh", "-s"]);
             pipe(cmd, format!("{pw}\n{script}").into_bytes()).await
         }
         None => {
@@ -476,6 +476,13 @@ async fn run_local_windows(script: &str, elevated: bool) -> Result<String, Strin
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (ps1, out) = (dir.join(format!("sshbox-inst-{id}-{n}.ps1")), dir.join(format!("sshbox-inst-{id}-{n}.txt")));
+    struct Cleanup([std::path::PathBuf; 2]);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            self.0.iter().for_each(|p| { let _ = std::fs::remove_file(p); });
+        }
+    }
+    let _cleanup = Cleanup([ps1.clone(), out.clone()]); // also runs when a timeout drops this future
     let o = ps_quote(&out.to_string_lossy());
     std::fs::write(&ps1, format!("& {{\n{script}\n}} *> {o}\nif (-not $?) {{ Add-Content -Path {o} 'SSHBOX_EXIT_CODE:1' }}\n"))
         .map_err(|e| vps_err(ERR_COMMAND_FAILED, e))?;
@@ -485,8 +492,6 @@ async fn run_local_windows(script: &str, elevated: bool) -> Result<String, Strin
     );
     let r = pipe(ps(&["-Command", "-"]), outer.into_bytes()).await;
     let text = std::fs::read_to_string(&out).unwrap_or_default();
-    let _ = std::fs::remove_file(&ps1);
-    let _ = std::fs::remove_file(&out);
     r?;
     classify_privileged_output(&text)
 }
@@ -495,6 +500,8 @@ async fn run_local_windows(script: &str, elevated: bool) -> Result<String, Strin
 async fn run_local_windows(_script: &str, _elevated: bool) -> Result<String, String> {
     Err(vps_err(ERR_UNSUPPORTED, "windows_only"))
 }
+
+const UNIX_PATH: &str = r#"export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.npm-global/bin:$PATH""#;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -507,6 +514,8 @@ pub async fn run(
     elevated: bool,
     secs: u64,
 ) -> Result<String, String> {
+    // GUI-launched apps and non-login SSH miss Homebrew/npm bins; inside the script so it survives sudo.
+    let script = &if os == HostOs::Windows { script.to_string() } else { format!("{UNIX_PATH}\n{script}") };
     let fut = async {
         if host_id == "local" {
             run_local(os, script, sudo_password.as_deref(), root, elevated).await
@@ -562,6 +571,9 @@ mod tests {
     fn catalog_parses_and_ids_unique() {
         let c = catalog();
         assert!(!c.is_empty());
+        for t in c {
+            assert!(["security", "apps", "ai", "network", "utils"].contains(&t.category.as_str()), "{}", t.id);
+        }
         let mut ids: Vec<&str> = c.iter().map(|t| t.id.as_str()).collect();
         ids.sort();
         ids.dedup();
@@ -570,6 +582,7 @@ mod tests {
             for m in &t.methods {
                 assert!(managers_for(m.os).contains(&m.manager.as_str()), "{} {}", t.id, m.manager);
                 assert!(valid_name(&m.package));
+                assert!(m.service.as_deref().is_none_or(valid_name), "{}", t.id);
             }
         }
     }
@@ -681,13 +694,19 @@ mod tests {
         let u = action_script(HostOs::Windows, &act("uninstall", "winget", "Tailscale.Tailscale")).unwrap();
         assert!(s.contains("--disable-interactivity") && u.contains("--disable-interactivity"));
         assert!(s.contains("--accept-package-agreements") && s.contains("--accept-source-agreements") && s.contains("'Tailscale.Tailscale'"));
+        let scan = scan_script(HostOs::Windows);
+        assert!(scan.contains("winget list --source winget --accept-source-agreements --disable-interactivity"));
+        // whole-token: 'Git.Git' must not match 'Git.Git.LFS' or 'XGit.Git'
+        assert!(scan.contains(r"-match ('(?m)(^|\s)' + [regex]::Escape($id) + '(\s|$)')"), "{scan}");
+        let q = search_script(HostOs::Windows, &["winget".into()], "git").unwrap();
+        assert!(q.contains("winget search --source winget --accept-source-agreements --disable-interactivity"));
         assert_eq!(action_script(HostOs::Windows, &InstallAction::InstallManager { manager: "winget".into() }), Err("WINGET_MANUAL".into()));
     }
 
     #[test]
     fn needs_root_matrix() {
         assert!(needs_root(HostOs::Linux, &act("install", "apt", "x")));
-        assert!(!needs_root(HostOs::Linux, &act("install", "npm", "x")));
+        assert!(needs_root(HostOs::Linux, &act("install", "npm", "x")), "distro npm prefix is root-owned");
         assert!(!needs_root(HostOs::Macos, &act("install", "brew", "x")));
         assert!(!needs_root(HostOs::Macos, &act("install", "npm", "x")));
         assert!(!needs_root(HostOs::Macos, &InstallAction::EnableService { service: "x".into() }));
@@ -727,5 +746,33 @@ mod tests {
     async fn run_local_echo() {
         let out = run_local(HostOs::Linux, "echo hi", None, false, false).await.unwrap();
         assert_eq!(out.trim(), "hi");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_local_root_never_executes_password() {
+        // Fake sudo that behaves like sudo with cached creds unless -k is given: it only reads
+        // the password line when -k is present, then hands the rest of stdin to `sh -s`.
+        let dir = std::env::temp_dir().join(format!("sshbox-fakesudo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sudo = dir.join("sudo");
+        std::fs::write(&sudo, "#!/bin/sh\ncase \" $* \" in *\" -k \"*) IFS= read -r _pw;; esac\nexec sh -s\n").unwrap();
+        std::fs::set_permissions(&sudo, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let old = std::env::var("PATH").unwrap();
+        std::env::set_var("PATH", format!("{}:{old}", dir.display()));
+        let r = run_local(HostOs::Linux, "echo ok", Some("echo LEAKED"), true, false).await;
+        std::env::set_var("PATH", old);
+        let _ = std::fs::remove_dir_all(&dir);
+        let out = r.unwrap();
+        assert!(!out.contains("LEAKED") && out.trim() == "ok", "{out}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_prepends_unix_path() {
+        let pool = crate::ssh_pool::SshPool::default();
+        let out = run("local", &pool, HostOs::Macos, "echo \"$PATH\"", None, false, false, 10).await.unwrap();
+        assert!(out.starts_with("/opt/homebrew/bin:/usr/local/bin:"), "{out}");
+        assert!(UNIX_PATH.starts_with(r#"export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.npm-global/bin:$PATH""#));
     }
 }

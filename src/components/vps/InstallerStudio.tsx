@@ -227,6 +227,7 @@ export const InstallerStudio: React.FC<{ vps: VpsCtx; os: HostOs }> = ({ vps, os
                 {t.instInstall}
               </button>
             )}
+            {m.id === "brew" && !m.present && <p className="w-full text-xs text-muted-foreground">{t.instBrewAdminNote}</p>}
           </div>
         )),
       )}

@@ -286,7 +286,7 @@ pub fn upsert_identity_at(
     }
     if let Some(pw) = password {
         if !pw.trim().is_empty() {
-            let _ = vault::set_secret(&format!("identity:{}", identity.id), pw.trim());
+            vault::set_secret(&format!("identity:{}", identity.id), pw.trim())?;
             identity.has_password = true;
         }
     }
@@ -429,6 +429,13 @@ pub fn import_ssh_key_at(
     let id = key_id
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| format!("key:{}", uuid::Uuid::new_v4()));
+    // The id becomes a file name under keys_dir and can come from an imported file.
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_'))
+    {
+        return Err(format!("Invalid SSH key id '{id}'"));
+    }
     let file_stem = id.replace(':', "_");
     let priv_path = keys_dir.join(&file_stem);
     let pub_path = keys_dir.join(format!("{file_stem}.pub"));
@@ -499,7 +506,7 @@ pub fn import_ssh_key_at(
         .unwrap_or(false);
     if let Some(pp) = passphrase {
         if !pp.trim().is_empty() {
-            let _ = vault::set_secret(&format!("sshkey:{id}"), pp.trim());
+            vault::set_secret(&format!("sshkey:{id}"), pp.trim())?;
         }
     }
 
@@ -507,6 +514,7 @@ pub fn import_ssh_key_at(
     if let Some(existing) = store.ssh_keys.iter_mut().find(|k| k.id == id) {
         existing.name = name;
         existing.remark = remark;
+        existing.private_key_path = priv_path.to_string_lossy().to_string();
         if !derived_pub.is_empty() {
             existing.public_key = derived_pub;
             existing.key_type = detected_type.to_string();
@@ -759,6 +767,383 @@ pub fn resolve_host_credentials_from(
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportedIdentityItem {
+    pub identity: IdentityItem,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportedSshKeyItem {
+    pub key: SshKeyItem,
+    pub private_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MachinesBundleSecrets {
+    #[serde(default)]
+    pub identities: Vec<ExportedIdentityItem>,
+    #[serde(default)]
+    pub ssh_keys: Vec<ExportedSshKeyItem>,
+    #[serde(default)]
+    pub host_secrets: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MachinesExportBundle {
+    #[serde(rename = "type")]
+    pub bundle_type: String,
+    pub items: Vec<HostEntry>,
+    #[serde(default)]
+    pub has_identities: bool,
+    #[serde(default)]
+    pub has_ssh_keys: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_secrets: Option<String>,
+}
+
+// v1 = PBKDF2-HMAC-SHA256 (OWASP 2023 iteration count) + AES-256-GCM: salt(16) | nonce(12) | ciphertext+tag.
+// Unit tests only need a round trip and their bundles never leave the test, so they skip the cost.
+const BACKUP_KDF_ROUNDS: u32 = if cfg!(test) { 1_000 } else { 600_000 };
+
+fn backup_cipher(passphrase: &str, salt: &[u8]) -> aes_gcm::Aes256Gcm {
+    use aes_gcm::KeyInit;
+    let mut key = [0u8; 32];
+    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(passphrase.as_bytes(), salt, BACKUP_KDF_ROUNDS, &mut key);
+    aes_gcm::Aes256Gcm::new(aes_gcm::Key::<aes_gcm::Aes256Gcm>::from_slice(&key))
+}
+
+pub fn encrypt_bundle_secrets(
+    secrets: &MachinesBundleSecrets,
+    passphrase: &str,
+) -> Result<String, String> {
+    use aes_gcm::aead::Aead;
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    use ssh_key::rand_core::{OsRng, RngCore};
+
+    let payload = serde_json::to_vec(secrets).map_err(|e| e.to_string())?;
+    let mut salt = [0u8; 16];
+    let mut nonce = [0u8; 12];
+    OsRng.fill_bytes(&mut salt);
+    OsRng.fill_bytes(&mut nonce);
+    let ciphertext = backup_cipher(passphrase, &salt)
+        .encrypt(aes_gcm::Nonce::from_slice(&nonce), payload.as_slice())
+        .map_err(|_| "Failed to encrypt backup".to_string())?;
+
+    let mut out = Vec::with_capacity(28 + ciphertext.len());
+    out.extend_from_slice(&salt);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ciphertext);
+    Ok(format!("v1:{}", BASE64.encode(out)))
+}
+
+pub fn decrypt_bundle_secrets(
+    encoded: &str,
+    passphrase: &str,
+) -> Result<MachinesBundleSecrets, String> {
+    use aes_gcm::aead::Aead;
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
+    let b64 = encoded
+        .strip_prefix("v1:")
+        .ok_or_else(|| "Unsupported encrypted backup format".to_string())?;
+    let raw = BASE64
+        .decode(b64.trim())
+        .map_err(|_| "Corrupted encrypted backup payload".to_string())?;
+    // salt + nonce + 16-byte GCM tag
+    if raw.len() < 44 {
+        return Err("Corrupted encrypted backup payload".to_string());
+    }
+    let payload = backup_cipher(passphrase, &raw[0..16])
+        .decrypt(aes_gcm::Nonce::from_slice(&raw[16..28]), &raw[28..])
+        .map_err(|_| "Invalid backup passphrase".to_string())?;
+    serde_json::from_slice(&payload).map_err(|e| format!("Failed to parse decrypted backup: {e}"))
+}
+
+// Copies an identity's login user (and, if asked, its key link) onto a host that will
+// not resolve the identity itself.
+fn flatten_identity_into_host(host: &mut HostEntry, ident: &IdentityItem, with_key: bool) {
+    if !ident.user_name.trim().is_empty() {
+        host.user = ident.user_name.clone();
+    }
+    if with_key && host.ssh_key_id.is_none() {
+        host.ssh_key_id = ident.ssh_key_id.clone();
+    }
+}
+
+pub fn export_machines_bundle_at(
+    store_path: &Path,
+    hosts: Vec<HostEntry>,
+    include_identities: bool,
+    include_ssh_keys: bool,
+    passphrase: Option<String>,
+) -> Result<MachinesExportBundle, String> {
+    let store = load_resources_at(store_path);
+    let key_exists = |kid: &String| store.ssh_keys.iter().any(|k| &k.id == kid);
+    let mut exported_hosts = Vec::with_capacity(hosts.len());
+    let mut identity_ids: Vec<String> = Vec::new();
+    let mut ssh_key_ids: Vec<String> = Vec::new();
+    let mut host_secrets = std::collections::BTreeMap::new();
+
+    for mut h in hosts {
+        h.source = crate::host_store::HostSource::Custom;
+        let linked_identity = h
+            .identity_id
+            .as_ref()
+            .and_then(|id| store.identities.iter().find(|i| &i.id == id));
+
+        if h.auth_method == "identity" {
+            if let Some(ident) = linked_identity {
+                // The login user is not a secret: carry it so the host keeps working
+                // when identities are left out on either side.
+                flatten_identity_into_host(&mut h, ident, include_ssh_keys && !include_identities);
+            }
+        }
+        match linked_identity {
+            Some(ident) if include_identities => {
+                if !identity_ids.contains(&ident.id) {
+                    identity_ids.push(ident.id.clone());
+                }
+            }
+            _ => {
+                if h.auth_method == "identity" {
+                    h.auth_method = "passwordOrKey".to_string();
+                }
+                h.identity_id = None;
+            }
+        }
+
+        if include_identities {
+            if let Some(pw) = vault::get_host_secret(&h.id)? {
+                if !pw.is_empty() {
+                    host_secrets.insert(h.id.clone(), pw);
+                }
+            }
+        }
+
+        if !include_ssh_keys || !h.ssh_key_id.as_ref().is_some_and(key_exists) {
+            h.ssh_key_id = None;
+        }
+        if let Some(ref kid) = h.ssh_key_id {
+            if !ssh_key_ids.contains(kid) {
+                ssh_key_ids.push(kid.clone());
+            }
+        }
+
+        exported_hosts.push(h);
+    }
+
+    let mut identities = Vec::new();
+    for ident in store
+        .identities
+        .iter()
+        .filter(|i| identity_ids.contains(&i.id))
+    {
+        let mut ident = ident.clone();
+        match ident.ssh_key_id {
+            Some(ref kid) if include_ssh_keys && key_exists(kid) => {
+                if !ssh_key_ids.contains(kid) {
+                    ssh_key_ids.push(kid.clone());
+                }
+            }
+            _ => ident.ssh_key_id = None,
+        }
+        let password = vault::get_secret(&format!("identity:{}", ident.id))?;
+        if ident.has_password && password.is_none() {
+            return Err(format!(
+                "Password for identity '{}' could not be read from the vault",
+                ident.name
+            ));
+        }
+        identities.push(ExportedIdentityItem {
+            identity: ident,
+            password,
+        });
+    }
+
+    let mut ssh_keys = Vec::new();
+    for kitem in store
+        .ssh_keys
+        .iter()
+        .filter(|k| ssh_key_ids.contains(&k.id))
+    {
+        let private_key = std::fs::read_to_string(&kitem.private_key_path)
+            .map_err(|e| format!("Failed to read SSH private key '{}': {e}", kitem.name))?;
+        let key_pass = vault::get_secret(&format!("sshkey:{}", kitem.id))?;
+        if kitem.has_passphrase && key_pass.is_none() {
+            return Err(format!(
+                "Passphrase for SSH key '{}' could not be read from the vault",
+                kitem.name
+            ));
+        }
+        ssh_keys.push(ExportedSshKeyItem {
+            key: kitem.clone(),
+            private_key,
+            passphrase: key_pass,
+        });
+    }
+
+    let has_identities = !identities.is_empty() || !host_secrets.is_empty();
+    let has_ssh_keys = !ssh_keys.is_empty();
+    let encrypted_secrets = if has_identities || has_ssh_keys {
+        let pass = passphrase.as_deref().unwrap_or("").trim();
+        if pass.is_empty() {
+            return Err("A passphrase is required to export credentials".to_string());
+        }
+        let secrets = MachinesBundleSecrets {
+            identities,
+            ssh_keys,
+            host_secrets,
+        };
+        Some(encrypt_bundle_secrets(&secrets, pass)?)
+    } else {
+        None
+    };
+
+    Ok(MachinesExportBundle {
+        bundle_type: "ssh-box/machines".to_string(),
+        items: exported_hosts,
+        has_identities,
+        has_ssh_keys,
+        encrypted_secrets,
+    })
+}
+
+pub fn import_machines_bundle_at(
+    ssh_cfg_path: &Path,
+    custom_hosts_path: &Path,
+    resources_path: &Path,
+    keys_dir: &Path,
+    bundle: MachinesExportBundle,
+    selected_indices: Vec<usize>,
+    include_identities: bool,
+    include_ssh_keys: bool,
+    passphrase: Option<String>,
+) -> Result<(), String> {
+    let want_identities = include_identities && bundle.has_identities;
+    let want_ssh_keys = include_ssh_keys && bundle.has_ssh_keys;
+
+    let secrets = if want_identities || want_ssh_keys {
+        let pass = passphrase.as_deref().unwrap_or("").trim();
+        if pass.is_empty() {
+            return Err("Backup passphrase is required".to_string());
+        }
+        let enc = bundle
+            .encrypted_secrets
+            .as_deref()
+            .ok_or_else(|| "Missing encrypted secrets payload".to_string())?;
+        decrypt_bundle_secrets(enc, pass)?
+    } else {
+        MachinesBundleSecrets::default()
+    };
+
+    let selected_hosts: Vec<HostEntry> = selected_indices
+        .into_iter()
+        .filter_map(|idx| bundle.items.get(idx).cloned())
+        .collect();
+
+    // Only bring in credentials that the selected machines use.
+    let used_identities: Vec<&ExportedIdentityItem> = secrets
+        .identities
+        .iter()
+        .filter(|i| {
+            selected_hosts
+                .iter()
+                .any(|h| h.identity_id.as_ref() == Some(&i.identity.id))
+        })
+        .collect();
+    let key_used = |kid: &String| {
+        selected_hosts
+            .iter()
+            .any(|h| h.ssh_key_id.as_ref() == Some(kid))
+            || used_identities
+                .iter()
+                .any(|i| i.identity.ssh_key_id.as_ref() == Some(kid))
+    };
+
+    if want_ssh_keys {
+        for exported_key in secrets.ssh_keys.iter().filter(|k| key_used(&k.key.id)) {
+            import_ssh_key_at(
+                resources_path,
+                keys_dir,
+                Some(exported_key.key.id.clone()),
+                exported_key.key.name.clone(),
+                exported_key.key.remark.clone(),
+                exported_key.private_key.clone(),
+                Some(exported_key.key.public_key.clone()),
+                exported_key.passphrase.clone(),
+            )?;
+        }
+    }
+
+    if want_identities {
+        let local = load_resources_at(resources_path);
+        for exported_id in &used_identities {
+            let mut ident = exported_id.identity.clone();
+            if !want_ssh_keys {
+                // Keys stay behind: keep the key this identity already uses here.
+                ident.ssh_key_id = local
+                    .identities
+                    .iter()
+                    .find(|i| i.id == ident.id)
+                    .and_then(|i| i.ssh_key_id.clone());
+            }
+            upsert_identity_at(resources_path, ident, exported_id.password.clone())?;
+        }
+    }
+
+    let existing_hosts = crate::host_store::load_merged_hosts(ssh_cfg_path, custom_hosts_path);
+    for mut host in selected_hosts {
+        host.source = crate::host_store::HostSource::Custom;
+        let existing = existing_hosts.iter().find(|h| h.id == host.id);
+
+        if want_identities {
+            if let Some(pw) = secrets.host_secrets.get(&host.id) {
+                if !pw.trim().is_empty() {
+                    vault::set_host_secret(&host.id, pw.trim())?;
+                }
+            }
+        } else {
+            if want_ssh_keys && host.auth_method == "identity" {
+                if let Some(i) = used_identities
+                    .iter()
+                    .find(|i| host.identity_id.as_ref() == Some(&i.identity.id))
+                {
+                    flatten_identity_into_host(&mut host, &i.identity, true);
+                }
+            }
+            // Same id already here: keep its local auth and identity link.
+            match existing {
+                Some(ex) => {
+                    host.auth_method = ex.auth_method.clone();
+                    host.identity_id = ex.identity_id.clone();
+                }
+                None => {
+                    if host.auth_method == "identity" {
+                        host.auth_method = "passwordOrKey".to_string();
+                    }
+                    host.identity_id = None;
+                }
+            }
+        }
+
+        if !want_ssh_keys {
+            host.ssh_key_id = existing.and_then(|ex| ex.ssh_key_id.clone());
+        }
+
+        crate::host_store::upsert_custom_host_at(custom_hosts_path, host)?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,5 +1228,231 @@ mod tests {
         assert!(s6.ssh_keys[0].fingerprint.starts_with("SHA256:"));
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn export_and_import_machines_with_separate_identity_and_ssh_key_options_and_passphrase() {
+        // Mock keyring: secrets land in a vault file under the temp app dir, never the real Keychain.
+        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+        let src_dir =
+            std::env::temp_dir().join(format!("ssh-box-export-src-{}", uuid::Uuid::new_v4()));
+        let dst_dir =
+            std::env::temp_dir().join(format!("ssh-box-export-dst-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&dst_dir).unwrap();
+        crate::host_store::set_app_data_dir(src_dir.clone());
+
+        let src_res_path = src_dir.join("resources.json");
+        let src_keys_dir = src_dir.join("keys");
+        let pass = Some("backup-secret-999".to_string());
+
+        // Key ids become file names: an id from an imported file must not escape keys_dir.
+        for bad_id in ["../../evil", "/tmp/evil"] {
+            let res = import_ssh_key_at(
+                &src_res_path,
+                &src_keys_dir,
+                Some(bad_id.into()),
+                "evil".into(),
+                "".into(),
+                "not a key".into(),
+                None,
+                None,
+            );
+            assert!(res.is_err(), "{bad_id} must be rejected");
+        }
+
+        let created_key = generate_ssh_key_at(
+            &src_res_path,
+            &src_keys_dir,
+            "prod-ed25519".into(),
+            "Primary key".into(),
+            "ed25519".into(),
+            Some("key-pass-123".into()),
+        )
+        .unwrap()
+        .ssh_keys[0]
+            .clone();
+        let other_key = generate_ssh_key_at(
+            &src_res_path,
+            &src_keys_dir,
+            "other".into(),
+            "".into(),
+            "ed25519".into(),
+            None,
+        )
+        .unwrap()
+        .ssh_keys[1]
+            .clone();
+
+        let ident_id = format!("id:{}", uuid::Uuid::new_v4());
+        upsert_identity_at(
+            &src_res_path,
+            IdentityItem {
+                id: ident_id.clone(),
+                name: "DevOps Admin".into(),
+                remark: "".into(),
+                user_name: "devops".into(),
+                ssh_key_id: Some(created_key.id.clone()),
+                has_password: false,
+                created_date: 0,
+            },
+            Some("ident-pw-456".into()),
+        )
+        .unwrap();
+
+        let host = HostEntry {
+            id: format!("custom:{}", uuid::Uuid::new_v4()),
+            alias: "prod-node".into(),
+            hostname: "10.20.30.40".into(),
+            user: "root".into(),
+            port: 22,
+            auth_method: "identity".into(),
+            identity_id: Some(ident_id.clone()),
+            ssh_key_id: None,
+            ..Default::default()
+        };
+        let other_host = HostEntry {
+            id: format!("custom:{}", uuid::Uuid::new_v4()),
+            alias: "other-node".into(),
+            auth_method: "passwordOrKey".into(),
+            identity_id: None,
+            ssh_key_id: Some(other_key.id.clone()),
+            ..host.clone()
+        };
+        vault::set_host_secret(&host.id, "host-pw-789").unwrap();
+
+        // Credentials never leave the machine unencrypted.
+        assert!(
+            export_machines_bundle_at(&src_res_path, vec![host.clone()], false, true, None)
+                .is_err()
+        );
+
+        // 1. Keys only: host downgrades to passwordOrKey but keeps the identity's user and key.
+        let keys_only_bundle =
+            export_machines_bundle_at(&src_res_path, vec![host.clone()], false, true, pass.clone())
+                .unwrap();
+        assert!(!keys_only_bundle.has_identities);
+        assert!(keys_only_bundle.has_ssh_keys);
+        assert_eq!(keys_only_bundle.items[0].auth_method, "passwordOrKey");
+        assert_eq!(keys_only_bundle.items[0].user, "devops");
+        assert_eq!(keys_only_bundle.items[0].identity_id, None);
+        assert_eq!(
+            keys_only_bundle.items[0].ssh_key_id.as_deref(),
+            Some(created_key.id.as_str())
+        );
+
+        // 2. Identities only: the identity loses its key link, and the login user still travels
+        // in the clear so an import without identities logs in as the right user.
+        let id_only_bundle =
+            export_machines_bundle_at(&src_res_path, vec![host.clone()], true, false, pass.clone())
+                .unwrap();
+        assert!(id_only_bundle.has_identities);
+        assert!(!id_only_bundle.has_ssh_keys);
+        assert_eq!(id_only_bundle.items[0].user, "devops");
+        let id_only_secrets = decrypt_bundle_secrets(
+            id_only_bundle.encrypted_secrets.as_deref().unwrap(),
+            "backup-secret-999",
+        )
+        .unwrap();
+        assert_eq!(id_only_secrets.identities[0].identity.ssh_key_id, None);
+
+        // 3. Both, two hosts, then import only the first into another "device".
+        let full_bundle = export_machines_bundle_at(
+            &src_res_path,
+            vec![host.clone(), other_host.clone()],
+            true,
+            true,
+            pass.clone(),
+        )
+        .unwrap();
+        assert!(full_bundle.encrypted_secrets.is_some());
+
+        // The vault is shared within this process: wipe the source secrets so the
+        // assertions below can only pass if the import restored them.
+        vault::delete_secret(&format!("identity:{ident_id}")).unwrap();
+        vault::delete_secret(&format!("sshkey:{}", created_key.id)).unwrap();
+        vault::delete_host_secret(&host.id).unwrap();
+
+        let dst_ssh_cfg = dst_dir.join("ssh_config");
+        let dst_hosts_path = dst_dir.join("hosts.json");
+        let dst_res_path = dst_dir.join("resources.json");
+        let dst_keys_dir = dst_dir.join("win_or_mac_keys");
+        let import = |bundle: &MachinesExportBundle, ids: bool, keys: bool, pw: &str| {
+            import_machines_bundle_at(
+                &dst_ssh_cfg,
+                &dst_hosts_path,
+                &dst_res_path,
+                &dst_keys_dir,
+                bundle.clone(),
+                vec![0],
+                ids,
+                keys,
+                Some(pw.into()),
+            )
+        };
+
+        assert!(import(&full_bundle, true, true, "wrong-pass").is_err());
+        assert!(load_resources_at(&dst_res_path).ssh_keys.is_empty());
+
+        import(&full_bundle, true, true, "backup-secret-999").unwrap();
+        let hosts = crate::host_store::load_merged_hosts(&dst_ssh_cfg, &dst_hosts_path);
+        let res = load_resources_at(&dst_res_path);
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(res.identities.len(), 1);
+        // other_host was not selected, so its key must stay behind.
+        assert_eq!(res.ssh_keys.len(), 1);
+        assert_eq!(res.ssh_keys[0].id, created_key.id);
+
+        let imported_key = &res.ssh_keys[0];
+        assert!(imported_key
+            .private_key_path
+            .starts_with(&dst_keys_dir.to_string_lossy().to_string()));
+        assert!(PathBuf::from(&imported_key.private_key_path).exists());
+        assert_eq!(
+            vault::get_secret(&format!("identity:{ident_id}"))
+                .unwrap()
+                .as_deref(),
+            Some("ident-pw-456")
+        );
+
+        let resolved = resolve_host_credentials_from(&res, &hosts[0], None);
+        assert_eq!(resolved.user, "devops");
+        assert_eq!(resolved.secret.as_deref(), Some("host-pw-789"));
+        assert_eq!(resolved.key_paths.len(), 1);
+        assert_eq!(
+            resolved.key_paths[0].0,
+            PathBuf::from(&imported_key.private_key_path)
+        );
+        assert_eq!(resolved.key_paths[0].1.as_deref(), Some("key-pass-123"));
+
+        // 4. A keys-only re-import over that host keeps its local identity auth.
+        import(&keys_only_bundle, false, true, "backup-secret-999").unwrap();
+        let h = &crate::host_store::load_merged_hosts(&dst_ssh_cfg, &dst_hosts_path)[0];
+        assert_eq!(h.auth_method, "identity");
+        assert_eq!(h.identity_id.as_deref(), Some(ident_id.as_str()));
+
+        // 5. An identities-only re-import keeps the key the identity already uses here.
+        import(&id_only_bundle, true, false, "backup-secret-999").unwrap();
+        assert_eq!(
+            load_resources_at(&dst_res_path).identities[0]
+                .ssh_key_id
+                .as_deref(),
+            Some(created_key.id.as_str())
+        );
+
+        // 6. Links to an identity or key that no longer exists are dropped, not exported dangling.
+        let dangling = HostEntry {
+            id: format!("custom:{}", uuid::Uuid::new_v4()),
+            identity_id: Some("id:gone".into()),
+            ssh_key_id: Some("key:gone".into()),
+            ..host.clone()
+        };
+        let b = export_machines_bundle_at(&src_res_path, vec![dangling], true, true, pass).unwrap();
+        assert_eq!(b.items[0].auth_method, "passwordOrKey");
+        assert_eq!(b.items[0].identity_id, None);
+        assert_eq!(b.items[0].ssh_key_id, None);
+
+        let _ = std::fs::remove_dir_all(&src_dir);
+        let _ = std::fs::remove_dir_all(&dst_dir);
     }
 }

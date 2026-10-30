@@ -196,6 +196,38 @@ pub struct Fail2banSnapshot {
     pub top_attacker_ips: Vec<AttackerIpSummary>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteAuthorizedKey {
+    pub index: u32,
+    pub key_type: String,
+    pub public_key_body: String,
+    pub comment: String,
+    pub short_preview: String,
+    pub raw_line: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LinuxAccountItem {
+    pub username: String,
+    pub uid: u32,
+    pub gid: u32,
+    pub home_dir: String,
+    pub shell: String,
+    pub locked: bool,
+    pub groups: Vec<String>,
+    pub has_sudo: bool,
+    pub nopasswd_sudo: bool,
+    pub authorized_keys: Vec<RemoteAuthorizedKey>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessKeysSnapshot {
+    pub accounts: Vec<LinuxAccountItem>,
+}
+
 fn is_public_bind_address(bind_addr: &str) -> bool {
     let clean = bind_addr
         .trim()
@@ -2215,6 +2247,599 @@ systemctl restart fail2ban 2>/dev/null || service fail2ban restart 2>/dev/null |
     get_fail2ban_snapshot(host_id, pool, sudo_password).await
 }
 
+pub fn is_valid_linux_username(username: &str) -> bool {
+    let mut chars = username.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_lowercase() || first == '_') {
+        return false;
+    }
+    let mut count = 1usize;
+    for c in chars {
+        count += 1;
+        if count > 31 {
+            return false;
+        }
+        if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_ssh_key_type(tok: &str) -> bool {
+    tok.starts_with("ssh-")
+        || tok.starts_with("ecdsa-sha2-")
+        || tok.starts_with("sk-ssh-")
+        || tok.starts_with("sk-ecdsa-")
+}
+
+fn format_key_short_preview(body: &str) -> String {
+    let clean = body.trim();
+    if clean.len() > 18 {
+        let prefix = &clean[..10];
+        let suffix = &clean[clean.len() - 6..];
+        format!("{prefix}...{suffix}")
+    } else {
+        clean.to_string()
+    }
+}
+
+pub fn parse_authorized_key_line(line: &str, index: u32) -> Option<RemoteAuthorizedKey> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    if tokens.len() < 2 {
+        return None;
+    }
+    let k_idx = tokens.iter().position(|t| is_ssh_key_type(t))?;
+    let key_type = tokens[k_idx].to_string();
+    let body = (*tokens.get(k_idx + 1)?).trim();
+    if body.is_empty()
+        || !body.chars().all(|c| {
+            c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=' || c == '_' || c == '-'
+        })
+    {
+        return None;
+    }
+    let public_key_body = body.to_string();
+    let comment = if k_idx + 2 < tokens.len() {
+        tokens[k_idx + 2..].join(" ")
+    } else {
+        String::new()
+    };
+    let short_preview = format_key_short_preview(&public_key_body);
+    Some(RemoteAuthorizedKey {
+        index,
+        key_type,
+        public_key_body,
+        comment,
+        short_preview,
+        raw_line: trimmed.to_string(),
+    })
+}
+
+fn default_linux_account() -> LinuxAccountItem {
+    LinuxAccountItem {
+        username: String::new(),
+        uid: u32::MAX,
+        gid: 0,
+        home_dir: String::new(),
+        shell: "/bin/sh".to_string(),
+        locked: false,
+        groups: Vec::new(),
+        has_sudo: false,
+        nopasswd_sudo: false,
+        authorized_keys: Vec::new(),
+    }
+}
+
+pub fn parse_access_keys_snapshot(raw: &str) -> AccessKeysSnapshot {
+    let mut snap = AccessKeysSnapshot::default();
+    let mut sudoers_lines: Vec<String> = Vec::new();
+    let mut current_acc: Option<LinuxAccountItem> = None;
+    let mut section = "";
+
+    let push_if_eligible = |acc: LinuxAccountItem, out: &mut Vec<LinuxAccountItem>| {
+        if !acc.username.is_empty() && (acc.uid == 0 || (acc.uid >= 1000 && acc.uid < 65534)) {
+            out.push(acc);
+        }
+    };
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        match trimmed {
+            "---SUDOERS---" => {
+                if let Some(acc) = current_acc.take() {
+                    push_if_eligible(acc, &mut snap.accounts);
+                }
+                section = "sudoers";
+                continue;
+            }
+            "---ACCOUNT---" => {
+                if let Some(acc) = current_acc.take() {
+                    push_if_eligible(acc, &mut snap.accounts);
+                }
+                current_acc = Some(default_linux_account());
+                section = "account";
+                continue;
+            }
+            "---AUTHORIZED_KEYS---" => {
+                section = "authorized_keys";
+                continue;
+            }
+            _ => {}
+        }
+
+        match section {
+            "sudoers" => {
+                if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                    sudoers_lines.push(trimmed.to_string());
+                }
+            }
+            "account" => {
+                let acc = current_acc.get_or_insert_with(default_linux_account);
+                if let Some(v) = trimmed.strip_prefix("PASSWD:") {
+                    let parts: Vec<&str> = v.split(':').collect();
+                    if parts.len() >= 7 {
+                        acc.username = parts[0].trim().to_string();
+                        acc.uid = parts[2].trim().parse::<u32>().unwrap_or(u32::MAX);
+                        acc.gid = parts[3].trim().parse::<u32>().unwrap_or(0);
+                        acc.home_dir = parts[5].trim().to_string();
+                        acc.shell = parts[6].trim().to_string();
+                    } else if parts.len() == 5 {
+                        acc.username = parts[0].trim().to_string();
+                        acc.uid = parts[1].trim().parse::<u32>().unwrap_or(u32::MAX);
+                        acc.gid = parts[2].trim().parse::<u32>().unwrap_or(0);
+                        acc.home_dir = parts[3].trim().to_string();
+                        acc.shell = parts[4].trim().to_string();
+                    }
+                } else if let Some(v) = trimmed.strip_prefix("GROUPS:") {
+                    for tok in v.split(|c: char| c.is_ascii_whitespace() || c == ',') {
+                        let g = tok.trim();
+                        if !g.is_empty() && !acc.groups.iter().any(|x| x == g) {
+                            acc.groups.push(g.to_string());
+                        }
+                    }
+                } else if let Some(v) = trimmed.strip_prefix("PASSWD_S:") {
+                    let toks: Vec<&str> = v.split_whitespace().collect();
+                    let st = if toks.len() >= 2 {
+                        toks[1]
+                    } else {
+                        toks.first().copied().unwrap_or("")
+                    };
+                    if st == "L" || st == "LK" {
+                        acc.locked = true;
+                    } else if st == "P" || st == "PS" || st == "NP" {
+                        acc.locked = false;
+                    }
+                } else if let Some(v) = trimmed
+                    .strip_prefix("SHADOW:")
+                    .or_else(|| trimmed.strip_prefix("SHADOW_PW:"))
+                {
+                    let pw_field = if v.contains(':') {
+                        v.split(':').nth(1).unwrap_or("").trim()
+                    } else {
+                        v.trim()
+                    };
+                    if pw_field.starts_with('!') || pw_field.starts_with('*') {
+                        acc.locked = true;
+                    } else if !pw_field.is_empty() {
+                        acc.locked = false;
+                    }
+                } else if let Some(v) = trimmed.strip_prefix("LOCKED:") {
+                    acc.locked = parse_yes_no(v, acc.locked);
+                } else if let Some(v) = trimmed.strip_prefix("HAS_SUDO:") {
+                    acc.has_sudo = parse_yes_no(v, acc.has_sudo);
+                } else if let Some(v) = trimmed.strip_prefix("NOPASSWD:") {
+                    acc.nopasswd_sudo = parse_yes_no(v, acc.nopasswd_sudo);
+                }
+            }
+            "authorized_keys" => {
+                if let Some(acc) = current_acc.as_mut() {
+                    let next_idx = (acc.authorized_keys.len() as u32) + 1;
+                    if let Some(key_item) = parse_authorized_key_line(trimmed, next_idx) {
+                        acc.authorized_keys.push(key_item);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(acc) = current_acc.take() {
+        push_if_eligible(acc, &mut snap.accounts);
+    }
+
+    for acc in &mut snap.accounts {
+        if acc.uid == 0 {
+            acc.has_sudo = true;
+            acc.nopasswd_sudo = true;
+        }
+        if acc
+            .groups
+            .iter()
+            .any(|g| g == "sudo" || g == "wheel" || g == "admin")
+        {
+            acc.has_sudo = true;
+        }
+        for sline in &sudoers_lines {
+            let clean_sline = sline.split('#').next().unwrap_or("").trim();
+            let mut s_tokens = clean_sline.split_whitespace();
+            let Some(principal) = s_tokens.next() else {
+                continue;
+            };
+            if principal.starts_with("Defaults")
+                || principal == "User_Alias"
+                || principal == "Runas_Alias"
+                || principal == "Host_Alias"
+                || principal == "Cmnd_Alias"
+            {
+                continue;
+            }
+            let matched = if let Some(grp) = principal.strip_prefix('%') {
+                acc.groups.iter().any(|g| g == grp)
+            } else {
+                principal == acc.username
+            };
+            if matched {
+                acc.has_sudo = true;
+                if clean_sline.contains("NOPASSWD") {
+                    acc.nopasswd_sudo = true;
+                }
+            }
+        }
+        if acc.nopasswd_sudo {
+            acc.has_sudo = true;
+        }
+    }
+
+    snap.accounts.sort_by(|a, b| {
+        (a.uid != 0)
+            .cmp(&(b.uid != 0))
+            .then_with(|| a.uid.cmp(&b.uid))
+            .then_with(|| a.username.cmp(&b.username))
+    });
+
+    snap
+}
+
+pub async fn get_access_keys_snapshot(
+    host_id: &str,
+    pool: &SshPool,
+    sudo_password: Option<String>,
+) -> Result<AccessKeysSnapshot, String> {
+    let script = r#"
+echo "---SUDOERS---"
+if [ -f /etc/sudoers ]; then
+  grep -vE '^[[:space:]]*(#|$)' /etc/sudoers 2>/dev/null || true
+fi
+if [ -d /etc/sudoers.d ]; then
+  for sf in /etc/sudoers.d/*; do
+    if [ -f "$sf" ]; then
+      grep -vE '^[[:space:]]*(#|$)' "$sf" 2>/dev/null || true
+    fi
+  done
+fi
+awk -F: '$3 == 0 || ($3 >= 1000 && $3 < 65534) { print $0 }' /etc/passwd 2>/dev/null | while IFS= read -r pwline; do
+  usr=$(printf '%s\n' "$pwline" | cut -d: -f1)
+  home=$(printf '%s\n' "$pwline" | cut -d: -f6)
+  [ -z "$usr" ] && continue
+  echo "---ACCOUNT---"
+  echo "PASSWD:$pwline"
+  grps=$(id -Gn "$usr" 2>/dev/null | tr '\n' ' ')
+  echo "GROUPS:$grps"
+  pstat=$(passwd -S "$usr" 2>/dev/null | head -n 1)
+  if [ -n "$pstat" ]; then
+    echo "PASSWD_S:$pstat"
+  else
+    shad=$(grep -E "^${usr}:" /etc/shadow 2>/dev/null | head -n 1 | cut -d: -f2)
+    echo "SHADOW:$shad"
+  fi
+  echo "---AUTHORIZED_KEYS---"
+  if [ -n "$home" ] && [ -f "$home/.ssh/authorized_keys" ]; then
+    cat "$home/.ssh/authorized_keys" 2>/dev/null || true
+  fi
+done
+"#;
+    let raw = run_privileged_script(host_id, pool, sudo_password, script).await?;
+    Ok(parse_access_keys_snapshot(&raw))
+}
+
+pub fn build_authorize_ssh_key_script(
+    username: &str,
+    public_key: &str,
+) -> Result<String, String> {
+    let clean_user = username.trim();
+    if !is_valid_linux_username(clean_user) {
+        return Err(format!("Invalid Linux username: {username}"));
+    }
+
+    let clean_line = public_key
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .ok_or_else(|| "Public key cannot be empty.".to_string())?;
+
+    let parsed = parse_authorized_key_line(clean_line, 1).ok_or_else(|| {
+        "Invalid SSH public key format. Expected 'ssh-ed25519 AAAA... [comment]' or 'ssh-rsa AAAA...'."
+            .to_string()
+    })?;
+
+    let user_q = shell_single_quote(clean_user);
+    let body_q = shell_single_quote(&parsed.public_key_body);
+    let line_q = shell_single_quote(&parsed.raw_line);
+
+    Ok(format!(
+        r#"home_dir=$(getent passwd {user_q} | cut -d: -f6)
+if [ -z "$home_dir" ]; then
+  echo "Could not resolve home directory for user {clean_user}."
+  exit 1
+fi
+mkdir -p "$home_dir/.ssh"
+chmod 700 "$home_dir/.ssh"
+touch "$home_dir/.ssh/authorized_keys"
+if ! grep -Fq {body_q} "$home_dir/.ssh/authorized_keys" 2>/dev/null; then
+  printf '%s\n' {line_q} >> "$home_dir/.ssh/authorized_keys"
+fi
+chmod 600 "$home_dir/.ssh/authorized_keys"
+chown -R {user_q}:{user_q} "$home_dir/.ssh" || chown -R {user_q} "$home_dir/.ssh""#
+    ))
+}
+
+pub fn build_revoke_ssh_key_script(
+    username: &str,
+    key_body: &str,
+) -> Result<String, String> {
+    let clean_user = username.trim();
+    if !is_valid_linux_username(clean_user) {
+        return Err(format!("Invalid Linux username: {username}"));
+    }
+    let clean_body = key_body.trim();
+    if clean_body.is_empty() || clean_body.chars().any(|c| c.is_whitespace()) {
+        return Err("Invalid SSH key body to revoke.".to_string());
+    }
+
+    let user_q = shell_single_quote(clean_user);
+    let body_q = shell_single_quote(clean_body);
+
+    Ok(format!(
+        r#"home_dir=$(getent passwd {user_q} | cut -d: -f6)
+if [ -z "$home_dir" ]; then
+  echo "Could not resolve home directory for user {clean_user}."
+  exit 1
+fi
+ak_file="$home_dir/.ssh/authorized_keys"
+if [ -f "$ak_file" ]; then
+  grep -Fv {body_q} "$ak_file" > "${{ak_file}}.sshbox.tmp" || true
+  mv "${{ak_file}}.sshbox.tmp" "$ak_file"
+  chmod 600 "$ak_file"
+  chown -R {user_q}:{user_q} "$home_dir/.ssh" || chown -R {user_q} "$home_dir/.ssh"
+fi"#
+    ))
+}
+
+pub fn build_create_linux_user_script(
+    username: &str,
+    shell: &str,
+    sudo_access: bool,
+    nopasswd_sudo: bool,
+    docker_access: bool,
+    initial_public_key: Option<&str>,
+) -> Result<String, String> {
+    let clean_user = username.trim();
+    if !is_valid_linux_username(clean_user) {
+        return Err(format!(
+            "Invalid username '{username}'. Must match ^[a-z_][a-z0-9_-]{{0,30}}$."
+        ));
+    }
+    if clean_user == "root" {
+        return Err("Account 'root' already exists.".to_string());
+    }
+
+    let clean_shell = {
+        let s = shell.trim();
+        if s.is_empty() {
+            "/bin/bash"
+        } else {
+            if !s.starts_with('/')
+                || !s
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '/' || c == '_' || c == '-' || c == '.')
+            {
+                return Err(format!("Invalid login shell path: {shell}"));
+            }
+            s
+        }
+    };
+
+    let user_q = shell_single_quote(clean_user);
+    let shell_q = shell_single_quote(clean_shell);
+    let sudoers_file = format!("/etc/sudoers.d/90-sshbox-{clean_user}");
+    let sudoers_file_q = shell_single_quote(&sudoers_file);
+    let sudoers_rule_q = shell_single_quote(&format!("{clean_user} ALL=(ALL) NOPASSWD:ALL"));
+
+    let mut steps: Vec<String> = vec![format!(
+        r#"if id -u {user_q} >/dev/null 2>&1; then
+  echo "User {clean_user} already exists on this server."
+  exit 1
+fi
+useradd -m -s {shell_q} {user_q}
+usermod -p '*' {user_q} 2>/dev/null || true"#
+    )];
+
+    if sudo_access || nopasswd_sudo {
+        steps.push(format!(
+            r#"if getent group sudo >/dev/null 2>&1; then
+  usermod -aG sudo {user_q}
+elif getent group wheel >/dev/null 2>&1; then
+  usermod -aG wheel {user_q}
+fi"#
+        ));
+    }
+
+    if docker_access {
+        steps.push(format!(
+            r#"if getent group docker >/dev/null 2>&1; then
+  usermod -aG docker {user_q}
+fi"#
+        ));
+    }
+
+    if nopasswd_sudo {
+        steps.push(format!(
+            r#"mkdir -p /etc/sudoers.d
+printf '%s\n' {sudoers_rule_q} > {sudoers_file_q}
+chmod 0440 {sudoers_file_q}
+if command -v visudo >/dev/null 2>&1; then
+  if ! visudo -cf {sudoers_file_q} >/dev/null 2>&1; then
+    rm -f {sudoers_file_q}
+    echo "visudo validation failed for {sudoers_file}"
+    exit 1
+  fi
+fi"#
+        ));
+    }
+
+    if let Some(pk) = initial_public_key {
+        if !pk.trim().is_empty() {
+            let auth_step = build_authorize_ssh_key_script(clean_user, pk)?;
+            steps.push(auth_step);
+        }
+    }
+
+    Ok(steps.join("\n"))
+}
+
+pub fn build_update_linux_user_privilege_script(
+    username: &str,
+    sudo_access: bool,
+    nopasswd_sudo: bool,
+    locked: bool,
+) -> Result<String, String> {
+    let clean_user = username.trim();
+    if !is_valid_linux_username(clean_user) {
+        return Err(format!("Invalid Linux username: {username}"));
+    }
+    if clean_user == "root" {
+        return Err("Cannot modify privilege or lock state of the root account.".to_string());
+    }
+
+    let user_q = shell_single_quote(clean_user);
+    let sudoers_file = format!("/etc/sudoers.d/90-sshbox-{clean_user}");
+    let sudoers_file_q = shell_single_quote(&sudoers_file);
+    let sudoers_rule_q = shell_single_quote(&format!("{clean_user} ALL=(ALL) NOPASSWD:ALL"));
+
+    let sudo_group_step = if sudo_access || nopasswd_sudo {
+        format!(
+            r#"if getent group sudo >/dev/null 2>&1; then
+  usermod -aG sudo {user_q}
+elif getent group wheel >/dev/null 2>&1; then
+  usermod -aG wheel {user_q}
+fi"#
+        )
+    } else {
+        format!(
+            r#"if getent group sudo >/dev/null 2>&1; then
+  gpasswd -d {user_q} sudo >/dev/null 2>&1 || deluser {user_q} sudo >/dev/null 2>&1 || true
+fi
+if getent group wheel >/dev/null 2>&1; then
+  gpasswd -d {user_q} wheel >/dev/null 2>&1 || deluser {user_q} wheel >/dev/null 2>&1 || true
+fi"#
+        )
+    };
+
+    let nopasswd_step = if nopasswd_sudo {
+        format!(
+            r#"mkdir -p /etc/sudoers.d
+printf '%s\n' {sudoers_rule_q} > {sudoers_file_q}
+chmod 0440 {sudoers_file_q}
+if command -v visudo >/dev/null 2>&1; then
+  if ! visudo -cf {sudoers_file_q} >/dev/null 2>&1; then
+    rm -f {sudoers_file_q}
+    echo "visudo validation failed for {sudoers_file}"
+    exit 1
+  fi
+fi"#
+        )
+    } else {
+        format!("rm -f {sudoers_file_q}")
+    };
+
+    let lock_step = if locked {
+        format!("usermod -L {user_q}")
+    } else {
+        format!("usermod -U {user_q} 2>/dev/null || usermod -p '*' {user_q} 2>/dev/null || true")
+    };
+
+    Ok(format!("{sudo_group_step}\n{nopasswd_step}\n{lock_step}"))
+}
+
+pub async fn authorize_ssh_key(
+    host_id: &str,
+    pool: &SshPool,
+    username: String,
+    public_key: String,
+    sudo_password: Option<String>,
+) -> Result<AccessKeysSnapshot, String> {
+    let script = build_authorize_ssh_key_script(&username, &public_key)?;
+    run_privileged_script(host_id, pool, sudo_password.clone(), &script).await?;
+    get_access_keys_snapshot(host_id, pool, sudo_password).await
+}
+
+pub async fn revoke_ssh_key(
+    host_id: &str,
+    pool: &SshPool,
+    username: String,
+    key_body: String,
+    sudo_password: Option<String>,
+) -> Result<AccessKeysSnapshot, String> {
+    let script = build_revoke_ssh_key_script(&username, &key_body)?;
+    run_privileged_script(host_id, pool, sudo_password.clone(), &script).await?;
+    get_access_keys_snapshot(host_id, pool, sudo_password).await
+}
+
+pub async fn create_linux_user(
+    host_id: &str,
+    pool: &SshPool,
+    username: String,
+    shell: String,
+    sudo_access: bool,
+    nopasswd_sudo: bool,
+    docker_access: bool,
+    initial_public_key: Option<String>,
+    sudo_password: Option<String>,
+) -> Result<AccessKeysSnapshot, String> {
+    let script = build_create_linux_user_script(
+        &username,
+        &shell,
+        sudo_access,
+        nopasswd_sudo,
+        docker_access,
+        initial_public_key.as_deref(),
+    )?;
+    run_privileged_script(host_id, pool, sudo_password.clone(), &script).await?;
+    get_access_keys_snapshot(host_id, pool, sudo_password).await
+}
+
+pub async fn update_linux_user_privilege(
+    host_id: &str,
+    pool: &SshPool,
+    username: String,
+    sudo_access: bool,
+    nopasswd_sudo: bool,
+    locked: bool,
+    sudo_password: Option<String>,
+) -> Result<AccessKeysSnapshot, String> {
+    let script =
+        build_update_linux_user_privilege_script(&username, sudo_access, nopasswd_sudo, locked)?;
+    run_privileged_script(host_id, pool, sudo_password.clone(), &script).await?;
+    get_access_keys_snapshot(host_id, pool, sudo_password).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2710,5 +3335,153 @@ Oct 30 06:13:15 prod-vps sshd[1030]: Accepted password for deploy from 198.51.10
         let unban_script =
             build_fail2ban_ban_action_script("sshd", "185.220.101.5", "unban").unwrap();
         assert!(unban_script.contains("fail2ban-client set 'sshd' unbanip '185.220.101.5'"));
+    }
+
+    #[test]
+    fn parses_access_keys_snapshot_with_sudoers_lock_state_and_authorized_keys() {
+        let raw = r#"
+---SUDOERS---
+# Defaults specification
+Defaults env_reset
+root ALL=(ALL:ALL) ALL
+%sudo ALL=(ALL:ALL) ALL
+deploy ALL=(ALL) NOPASSWD:ALL
+---ACCOUNT---
+PASSWD:root:x:0:0:root:/root:/bin/bash
+GROUPS:root
+PASSWD_S:root P 01/01/2025 0 99999 7 -1
+---AUTHORIZED_KEYS---
+# Root emergency key
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGbXz8J9R2vL3mK8pQ7wX1yZ4nB5vC6mD7eF8gH99x2Q== macbook-pro@local
+
+---ACCOUNT---
+PASSWD:sshd:x:105:65534::/run/sshd:/usr/sbin/nologin
+GROUPS:nogroup
+PASSWD_S:sshd L 01/01/2025 0 99999 7 -1
+---AUTHORIZED_KEYS---
+---ACCOUNT---
+PASSWD:ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash
+GROUPS:ubuntu adm sudo docker
+PASSWD_S:ubuntu P 01/01/2025 0 99999 7 -1
+---AUTHORIZED_KEYS---
+ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7vbqajDhA1234567890abcdefghijklmnop== legacy-ci-runner
+from="10.0.0.0/8",no-agent-forwarding ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBF1234567890xyz= bastion-key
+---ACCOUNT---
+PASSWD:deploy:x:1001:1001:Deploy Bot:/home/deploy:/bin/zsh
+GROUPS:deploy docker
+SHADOW:!$6$rounds=4096$saltsalt$hashedpasswordvalue
+---AUTHORIZED_KEYS---
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGbXz8J9R2vL3mK8pQ7wX1yZ4nB5vC6mD7eF8gH99x2Q==
+---ACCOUNT---
+PASSWD:nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin
+GROUPS:nogroup
+SHADOW:*
+---AUTHORIZED_KEYS---
+"#;
+
+        let snap = parse_access_keys_snapshot(raw);
+        // Should only include root (uid 0), ubuntu (uid 1000), and deploy (uid 1001); filtering out sshd (105) and nobody (65534)
+        assert_eq!(snap.accounts.len(), 3);
+
+        let root = &snap.accounts[0];
+        assert_eq!(root.username, "root");
+        assert_eq!(root.uid, 0);
+        assert_eq!(root.gid, 0);
+        assert_eq!(root.home_dir, "/root");
+        assert_eq!(root.shell, "/bin/bash");
+        assert!(!root.locked);
+        assert!(root.has_sudo);
+        assert!(root.nopasswd_sudo);
+        assert_eq!(root.authorized_keys.len(), 1);
+        assert_eq!(root.authorized_keys[0].index, 1);
+        assert_eq!(root.authorized_keys[0].key_type, "ssh-ed25519");
+        assert_eq!(
+            root.authorized_keys[0].public_key_body,
+            "AAAAC3NzaC1lZDI1NTE5AAAAIGbXz8J9R2vL3mK8pQ7wX1yZ4nB5vC6mD7eF8gH99x2Q=="
+        );
+        assert_eq!(root.authorized_keys[0].comment, "macbook-pro@local");
+        assert_eq!(root.authorized_keys[0].short_preview, "AAAAC3NzaC...9x2Q==");
+
+        let ubuntu = &snap.accounts[1];
+        assert_eq!(ubuntu.username, "ubuntu");
+        assert_eq!(ubuntu.uid, 1000);
+        assert_eq!(ubuntu.gid, 1000);
+        assert_eq!(ubuntu.home_dir, "/home/ubuntu");
+        assert_eq!(ubuntu.shell, "/bin/bash");
+        assert!(!ubuntu.locked);
+        assert_eq!(
+            ubuntu.groups,
+            vec!["ubuntu", "adm", "sudo", "docker"]
+        );
+        assert!(ubuntu.has_sudo);
+        assert!(!ubuntu.nopasswd_sudo);
+        assert_eq!(ubuntu.authorized_keys.len(), 2);
+        assert_eq!(ubuntu.authorized_keys[0].index, 1);
+        assert_eq!(ubuntu.authorized_keys[0].key_type, "ssh-rsa");
+        assert_eq!(ubuntu.authorized_keys[0].comment, "legacy-ci-runner");
+        assert_eq!(ubuntu.authorized_keys[1].index, 2);
+        assert_eq!(ubuntu.authorized_keys[1].key_type, "ecdsa-sha2-nistp256");
+        assert_eq!(
+            ubuntu.authorized_keys[1].public_key_body,
+            "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBF1234567890xyz="
+        );
+        assert_eq!(ubuntu.authorized_keys[1].comment, "bastion-key");
+
+        let deploy = &snap.accounts[2];
+        assert_eq!(deploy.username, "deploy");
+        assert_eq!(deploy.uid, 1001);
+        assert_eq!(deploy.shell, "/bin/zsh");
+        assert!(deploy.locked);
+        assert!(deploy.has_sudo);
+        assert!(deploy.nopasswd_sudo);
+        assert_eq!(deploy.authorized_keys.len(), 1);
+        assert_eq!(deploy.authorized_keys[0].comment, "");
+    }
+
+    #[test]
+    fn validates_usernames_and_builds_key_and_user_privilege_scripts() {
+        assert!(is_valid_linux_username("ubuntu"));
+        assert!(is_valid_linux_username("deploy_01-prod"));
+        assert!(!is_valid_linux_username(""));
+        assert!(!is_valid_linux_username("1invalid"));
+        assert!(!is_valid_linux_username("UpperCase"));
+        assert!(!is_valid_linux_username("bad;rm"));
+
+        let auth_script = build_authorize_ssh_key_script(
+            "ubuntu",
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGbXz8J9R2vL3mK8pQ7wX1yZ4nB5vC6mD7eF8gH99x2Q== macbook@local",
+        )
+        .unwrap();
+        assert!(auth_script.contains("getent passwd 'ubuntu' | cut -d: -f6"));
+        assert!(auth_script.contains("chmod 700"));
+        assert!(auth_script.contains("chmod 600"));
+        assert!(auth_script.contains("chown -R 'ubuntu':'ubuntu'"));
+        assert!(auth_script.contains("AAAAC3NzaC1lZDI1NTE5AAAAIGbXz8J9R2vL3mK8pQ7wX1yZ4nB5vC6mD7eF8gH99x2Q=="));
+
+        let revoke_script = build_revoke_ssh_key_script(
+            "ubuntu",
+            "AAAAC3NzaC1lZDI1NTE5AAAAIGbXz8J9R2vL3mK8pQ7wX1yZ4nB5vC6mD7eF8gH99x2Q==",
+        )
+        .unwrap();
+        assert!(revoke_script.contains("grep -Fv 'AAAAC3NzaC1lZDI1NTE5AAAAIGbXz8J9R2vL3mK8pQ7wX1yZ4nB5vC6mD7eF8gH99x2Q=='"));
+
+        let create_script = build_create_linux_user_script(
+            "deploy",
+            "/bin/bash",
+            true,
+            true,
+            true,
+            Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGbXz8J9R2vL3mK8pQ7wX1yZ4nB5vC6mD7eF8gH99x2Q== key1"),
+        )
+        .unwrap();
+        assert!(create_script.contains("useradd -m -s '/bin/bash' 'deploy'"));
+        assert!(create_script.contains("/etc/sudoers.d/90-sshbox-deploy"));
+        assert!(create_script.contains("deploy ALL=(ALL) NOPASSWD:ALL"));
+        assert!(create_script.contains("visudo -cf"));
+        assert!(create_script.contains("usermod -aG docker 'deploy'"));
+
+        let priv_script = build_update_linux_user_privilege_script("deploy", false, false, true).unwrap();
+        assert!(priv_script.contains("rm -f '/etc/sudoers.d/90-sshbox-deploy'"));
+        assert!(priv_script.contains("usermod -L 'deploy'"));
     }
 }

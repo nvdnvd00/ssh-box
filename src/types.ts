@@ -279,6 +279,32 @@ export interface Fail2banSnapshot {
   topAttackerIps: AttackerIpSummary[];
 }
 
+export interface RemoteAuthorizedKey {
+  index: number;
+  keyType: string;
+  publicKeyBody: string;
+  comment: string;
+  shortPreview: string;
+  rawLine: string;
+}
+
+export interface LinuxAccountItem {
+  username: string;
+  uid: number;
+  gid: number;
+  homeDir: string;
+  shell: string;
+  locked: boolean;
+  groups: string[];
+  hasSudo: boolean;
+  nopasswdSudo: boolean;
+  authorizedKeys: RemoteAuthorizedKey[];
+}
+
+export interface AccessKeysSnapshot {
+  accounts: LinuxAccountItem[];
+}
+
 export interface KnownHostEntry {
   id: string;
   hostPattern: string;

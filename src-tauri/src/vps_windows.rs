@@ -37,6 +37,21 @@ pub fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
+// The longest script (sshd apply with its 15s sshd -t bound, restarts and rollback) needs well under this.
+const WINDOWS_EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+// Seen once on the VM matrix: the bootstrap sat on stdin for 10+ minutes before running anything. Never wait forever.
+async fn bounded<T>(run: impl std::future::Future<Output = Result<T, String>>, limit: std::time::Duration) -> Result<T, String> {
+    tokio::time::timeout(limit, run).await.unwrap_or_else(|_| {
+        Err(vps_err(ERR_COMMAND_FAILED, format!("the Windows host did not answer within {}s", limit.as_secs())))
+    })
+}
+
+async fn exec_windows(pool: &SshPool, host: &HostEntry, script: &str, secret: Option<&str>) -> Result<Vec<u8>, String> {
+    let stdin = powershell_stdin(script, secret);
+    bounded(pool.exec_bytes_on_host(host, &build_powershell_command(), Some(&stdin)), WINDOWS_EXEC_TIMEOUT).await
+}
+
 pub async fn run_windows_script(
     host_id: &str,
     pool: &SshPool,
@@ -44,9 +59,7 @@ pub async fn run_windows_script(
     secret: Option<&str>,
 ) -> Result<String, String> {
     let host = find_remote_host(host_id)?;
-    let out = pool
-        .exec_bytes_on_host(&host, &build_powershell_command(), Some(&powershell_stdin(script, secret)))
-        .await?;
+    let out = exec_windows(pool, &host, script, secret).await?;
     classify_privileged_output(&String::from_utf8_lossy(&out))
 }
 
@@ -615,15 +628,16 @@ pub async fn get_windows_firewall(host_id: &str, pool: &SshPool, probe: &VpsProb
 }
 
 // The exec fails when the host has no powershell.exe (e.g. cmd.exe: "not recognized"): not a Windows we can manage.
-fn exec_failure(_detail: &str) -> String {
+// A timeout is not that: it keeps its own message.
+fn exec_failure(detail: &str) -> String {
+    if detail.starts_with(ERR_COMMAND_FAILED) {
+        return detail.to_string();
+    }
     vps_err(ERR_UNSUPPORTED, "unsupported_os")
 }
 
 pub async fn probe_windows(host: &HostEntry, pool: &SshPool) -> Result<VpsProbe, String> {
-    let out = pool
-        .exec_bytes_on_host(host, &build_powershell_command(), Some(&powershell_stdin(WINDOWS_PROBE_SCRIPT, None)))
-        .await
-        .map_err(|e| exec_failure(&e))?;
+    let out = exec_windows(pool, host, WINDOWS_PROBE_SCRIPT, None).await.map_err(|e| exec_failure(&e))?;
     let auth = pool
         .session_auth(&host.id)
         .await
@@ -745,6 +759,14 @@ mod tests {
     fn windows_probe_without_marker_is_unsupported() {
         let e = parse_windows_probe("'powershell.exe' is not recognized as an internal or external command", key_auth()).unwrap_err();
         assert!(e.starts_with("UNSUPPORTED: unsupported_os"));
+    }
+
+    // On the VM a bootstrap once sat on stdin for 10+ minutes before running anything; the app must give up, not hang, and not call it "unsupported OS".
+    #[tokio::test]
+    async fn windows_exec_gives_up_on_a_silent_host() {
+        let e = bounded(std::future::pending::<Result<Vec<u8>, String>>(), std::time::Duration::from_millis(20)).await.unwrap_err();
+        assert!(e.starts_with("COMMAND_FAILED: the Windows host did not answer"), "{e}");
+        assert_eq!(exec_failure(&e), e);
     }
 
     // Lỗi chạy lệnh (không có powershell.exe) được đổi thành unsupported_os, (lỗi kết nối đã được get_or_connect báo trước đó).

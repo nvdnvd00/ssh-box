@@ -12,8 +12,9 @@ pub mod vps_guard;
 use host_store::HostEntry;
 use local_pty::LocalPtyManager;
 use resources::{
-    ConnectionProxyProfile, IdentityItem, MachineGroup, MachineTag, PortForwardingRule,
-    ResourcesStoreData, SnippetExecutionRecord, SnippetItem, SnippetPackage,
+    ConnectionProxyProfile, IdentityItem, ImportMachinesResult, MachineGroup, MachineTag,
+    MachinesExportBundle, PortForwardingRule, ResourcesStoreData, SnippetExecutionRecord,
+    SnippetItem, SnippetPackage,
 };
 use serde::{Deserialize, Serialize};
 use sftp::{SftpListResponse, SftpTransferProgress, SftpTransferResult};
@@ -98,6 +99,47 @@ fn save_host(host: HostEntry, secret: Option<String>) -> Result<Vec<HostEntry>, 
 fn delete_host(host_id: String) -> Result<Vec<HostEntry>, String> {
     let _ = vault::delete_host_secret(&host_id);
     host_store::delete_custom_host(&host_id)
+}
+
+#[tauri::command]
+fn export_machines_bundle(
+    hosts: Vec<HostEntry>,
+    include_identities: bool,
+    include_ssh_keys: bool,
+    passphrase: Option<String>,
+) -> Result<MachinesExportBundle, String> {
+    resources::export_machines_bundle_at(
+        &resources::default_resources_path(),
+        hosts,
+        include_identities,
+        include_ssh_keys,
+        passphrase,
+    )
+}
+
+#[tauri::command]
+fn import_machines_bundle(
+    state: State<'_, AppState>,
+    bundle: MachinesExportBundle,
+    selected_indices: Vec<usize>,
+    include_identities: bool,
+    include_ssh_keys: bool,
+    passphrase: Option<String>,
+) -> Result<ImportMachinesResult, String> {
+    let (ssh_cfg, custom_cfg) = host_store::default_paths();
+    let mut res = resources::import_machines_bundle_at(
+        &ssh_cfg,
+        &custom_cfg,
+        &resources::default_resources_path(),
+        &resources::default_keys_dir(),
+        bundle,
+        selected_indices,
+        include_identities,
+        include_ssh_keys,
+        passphrase,
+    )?;
+    res.resources = enrich_resources(res.resources, &state.ssh_pool);
+    Ok(res)
 }
 
 #[tauri::command]
@@ -997,6 +1039,8 @@ pub fn run() {
             save_ui_settings,
             save_host,
             delete_host,
+            export_machines_bundle,
+            import_machines_bundle,
             get_resources,
             save_machine_group,
             delete_machine_group,

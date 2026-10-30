@@ -37,6 +37,8 @@ export const AccessKeysStudio: React.FC<VpsStudioProps & { sshKeys: SshKeyItem[]
 
   const { level, reason } = probe.support.access;
   const readOnly = level === "readOnly";
+  // Presentation only: Windows accounts have no uid/shell or sudo modes, just administrator or standard.
+  const isWindows = probe.osFamily === "windows";
   const ctx = probe.context;
   const appKey = ctx.auth.kind === "key" ? ctx.auth.publicKeyBody : null;
   const modeOptions = (["none", "noPassword", "withPassword"] as SudoMode[]).map((m) => ({ value: m, label: t.vpsUsersSudoModes[m] }));
@@ -129,13 +131,19 @@ export const AccessKeysStudio: React.FC<VpsStudioProps & { sshKeys: SshKeyItem[]
         const grantKey = sshKeys.find((k) => k.id === draft.keyId);
         return (
           <SettingGroup key={a.username} title={a.username}>
-            <SettingRow label={a.username} description={isRoot ? t.vpsUsersRootReadOnly : undefined} directive={`uid ${a.uid} · ${a.shell}`}>
+            <SettingRow
+              label={a.username}
+              description={isRoot ? t.vpsUsersRootReadOnly : undefined}
+              directive={isWindows ? undefined : `uid ${a.uid} · ${a.shell}`}
+            >
               <div className="flex flex-wrap gap-2">
-                <StatusBadge tone={current === "none" ? "neutral" : "ok"}>{t.vpsUsersSudoModes[current]}</StatusBadge>
+                <StatusBadge tone={current === "none" ? "neutral" : "ok"}>
+                  {isWindows ? (a.hasSudo ? t.vpsPrivAdmin : t.vpsPrivStandard) : t.vpsUsersSudoModes[current]}
+                </StatusBadge>
                 {a.locked && <StatusBadge tone="warn">{t.vpsUsersLocked}</StatusBadge>}
               </div>
             </SettingRow>
-            {!isRoot && (
+            {!isRoot && !isWindows && (
               <>
                 <SettingRow label={t.vpsUsersSudo}>
                   <div className="flex flex-col gap-2 sm:items-end">
@@ -194,8 +202,8 @@ export const AccessKeysStudio: React.FC<VpsStudioProps & { sshKeys: SshKeyItem[]
                 </div>
               </SettingRow>
             ))}
-            {a.keysFile && <p className="px-4 py-2 font-mono text-xs text-muted-foreground">{a.keysFile}</p>}
-            {!isRoot && (
+            {a.keysFile && <p className="px-4 py-2 font-mono text-xs text-muted-foreground break-all">{a.keysFile}</p>}
+            {!isRoot && !isWindows && (
               <SettingRow label={t.vpsUsersGrant} description={sshKeys.length === 0 ? t.vpsUsersNoLocalKeys : undefined}>
                 {sshKeys.length > 0 && (
                   <div className="flex gap-2">

@@ -150,7 +150,12 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
             {probe ? ` · ${probe.osId} ${probe.osVersion}` : ""}
           </span>
         )}
-        {probe && <StatusBadge tone={PRIVILEGE_TONE[probe.privilege]}>{privilegeLabel[probe.privilege]}</StatusBadge>}
+        {probe && (
+          <StatusBadge tone={PRIVILEGE_TONE[probe.privilege]}>
+            {/* Windows has no sudo: a non-admin login is simply a standard account. */}
+            {probe.osFamily === "windows" && probe.privilege === "none" ? t.vpsPrivStandard : privilegeLabel[probe.privilege]}
+          </StatusBadge>
+        )}
         {probe?.privilege === "none" && probe.osFamily !== "windows" && (
           <button
             type="button"

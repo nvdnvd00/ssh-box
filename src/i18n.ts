@@ -223,6 +223,7 @@ export interface AppI18nStrings {
   vpsPrivSudoPassword: string;
   vpsPrivAdmin: string;
   vpsPrivNone: string;
+  vpsPrivStandard: string;
   vpsSudoTitle: string;
   vpsSudoHint: string;
   vpsSudoOpen: string;
@@ -406,6 +407,7 @@ const VI_STRINGS: AppI18nStrings = {
   vpsPrivSudoPassword: "Sudo đã mở khoá",
   vpsPrivAdmin: "Quản trị viên",
   vpsPrivNone: "Chưa có quyền sudo",
+  vpsPrivStandard: "Tài khoản thường",
   vpsSudoTitle: "Mật khẩu sudo",
   vpsSudoHint: "Chỉ giữ trong bộ nhớ cho phiên làm việc này, không lưu lại.",
   vpsSudoOpen: "Nhập mật khẩu sudo",
@@ -672,6 +674,7 @@ const EN_STRINGS: AppI18nStrings = {
   vpsPrivSudoPassword: "Sudo unlocked",
   vpsPrivAdmin: "Administrator",
   vpsPrivNone: "No sudo yet",
+  vpsPrivStandard: "Standard account",
   vpsSudoTitle: "Sudo password",
   vpsSudoHint: "Kept in memory for this session only, never saved.",
   vpsSudoOpen: "Enter sudo password",

@@ -7,6 +7,7 @@ pub mod ssh_pool;
 pub mod telemetry;
 pub mod vault;
 pub mod vps_config;
+pub mod vps_guard;
 
 use host_store::HostEntry;
 use local_pty::LocalPtyManager;

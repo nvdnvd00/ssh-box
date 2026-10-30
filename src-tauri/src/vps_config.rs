@@ -111,6 +111,23 @@ pub struct SshdConfigUpdate {
     pub address_family: String,
 }
 
+// The sshd directives the SSH studio reads and writes (spec §1.1).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SshdSettings {
+    pub port: u16,
+    pub permit_root_login: String,
+    pub password_authentication: bool,
+    pub pubkey_authentication: bool,
+    pub allow_users: Vec<String>,
+    pub deny_users: Vec<String>,
+    pub max_auth_tries: u32,
+    pub max_sessions: u32,
+    pub login_grace_time: u32,
+    pub client_alive_interval: u32,
+    pub client_alive_count_max: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ListeningSocketItem {
@@ -208,7 +225,7 @@ fn is_public_bind_address(bind_addr: &str) -> bool {
         || host_part.starts_with("::ffff:127."))
 }
 
-fn rule_port_matches(rule_to_port: &str, rule_proto: &str, sock_port: u16, sock_proto: &str) -> bool {
+pub(crate) fn rule_port_matches(rule_to_port: &str, rule_proto: &str, sock_port: u16, sock_proto: &str) -> bool {
     if rule_proto != "any" && !rule_proto.eq_ignore_ascii_case(sock_proto) {
         return false;
     }
@@ -242,7 +259,7 @@ fn rule_port_matches(rule_to_port: &str, rule_proto: &str, sock_port: u16, sock_
     false
 }
 
-fn is_anywhere_source(src: &str) -> bool {
+pub(crate) fn is_anywhere_source(src: &str) -> bool {
     let s = src.trim().to_ascii_lowercase();
     s.is_empty() || s == "anywhere" || s == "any" || s == "0.0.0.0/0" || s == "::/0" || s == "*"
 }

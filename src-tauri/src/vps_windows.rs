@@ -431,6 +431,16 @@ struct WinFirewall {
     sockets: Vec<WinSocket>,
 }
 
+// Windows lists IPv4 subnets as "net/255.255.255.0"; the guard and the UI speak CIDR. Non-contiguous masks stay as they are.
+fn netmask_to_prefix(tok: &str) -> String {
+    match tok.split_once('/').map(|(n, m)| (n, m.parse::<std::net::Ipv4Addr>())) {
+        Some((net, Ok(mask))) if u32::from(mask).leading_ones() + u32::from(mask).trailing_zeros() == 32 => {
+            format!("{net}/{}", u32::from(mask).leading_ones())
+        }
+        _ => tok.to_string(),
+    }
+}
+
 pub fn parse_windows_firewall(json: &str) -> Result<FirewallSnapshot, String> {
     let w: WinFirewall = serde_json::from_str(json.trim())
         .map_err(|e| vps_err(ERR_COMMAND_FAILED, format!("cannot read the firewall: {e}")))?;
@@ -459,7 +469,7 @@ pub fn parse_windows_firewall(json: &str) -> Result<FirewallSnapshot, String> {
             if is_anywhere_source(tok) {
                 sources.extend([("Anywhere".to_string(), false), ("Anywhere".to_string(), true)]);
             } else {
-                sources.push((tok.to_string(), tok.contains(':')));
+                sources.push((netmask_to_prefix(tok), tok.contains(':')));
             }
         }
         if sources.is_empty() {
@@ -897,6 +907,16 @@ mod tests {
         let s = parse_windows_firewall(&j).unwrap();
         let got: Vec<_> = s.rules.iter().filter(|r| r.raw_spec == "Cho phép Đạt").map(|r| (r.from_source.as_str(), r.v6)).collect();
         assert_eq!(got, vec![("10.0.0.0/8", false), ("2001:db8::/64", true), ("LocalSubnet", false)]);
+    }
+
+    // Windows reports "10.0.0.0/8" as "10.0.0.0/255.0.0.0"; read as a host, a block covering the client would not count for the lockout guard.
+    #[test]
+    fn windows_netmask_sources_become_prefixes() {
+        let j = FW.replace(r#""remoteAddress":"10.0.0.0/8""#, r#""remoteAddress":"192.168.65.0/255.255.255.0,10.0.0.0/255.0.255.0""#);
+        let s = parse_windows_firewall(&j).unwrap();
+        let got: Vec<_> = s.rules.iter().filter(|r| r.raw_spec == "Cho phép Đạt").map(|r| r.from_source.as_str()).collect();
+        assert_eq!(got, vec!["192.168.65.0/24", "10.0.0.0/255.0.255.0"]);
+        assert!(crate::vps_guard::source_covers(got[0], "192.168.65.1"));
     }
 
     // Allow từ mọi nơi cộng block một nguồn: mọi người trừ nguồn đó vẫn vào được, nên phải là exposed.

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { RefreshCw, Server } from "lucide-react";
-import { HostEntry, PrivilegeLevel, ResourcesStoreData, VpsProbe, VpsStudioTab } from "../types";
+import { HostEntry, HostOs, PrivilegeLevel, ResourcesStoreData, VpsProbe, VpsStudioTab } from "../types";
 import { AppSettingsConfig } from "../themes";
 import { getI18n } from "../i18n";
 import { SelectField } from "./SelectField";
@@ -12,6 +12,7 @@ import { Notice } from "./vps/shared/Notice";
 import { SshHardeningStudio } from "./vps/SshHardeningStudio";
 import { FirewallStudio } from "./vps/FirewallStudio";
 import { AccessKeysStudio } from "./vps/AccessKeysStudio";
+import { InstallerStudio } from "./vps/InstallerStudio";
 
 interface VpsConfigWorkspaceProps {
   hosts: HostEntry[];
@@ -60,7 +61,12 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
   const host = hosts.find((h) => h.id === selectedHostId) ?? null;
   const isLocal = !host || host.id === "local";
   const probe = host ? probes[host.id] : undefined;
-  const sudoPassword = host ? sudoPasswords[host.id] : undefined;
+  const hostKey = isLocal ? "local" : host.id;
+  const sudoPassword = sudoPasswords[hostKey];
+  const [localOs, setLocalOs] = useState<HostOs | null>(null);
+  useEffect(() => {
+    if (isLocal && !localOs) invoke<HostOs>("installer_local_os").then(setLocalOs).catch(() => {});
+  }, [isLocal, localOs]);
 
   const runProbe = useCallback(
     async (hostId: string, password?: string) => {
@@ -85,8 +91,17 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
 
   const unlockSudo = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!host || !sudoInput) return;
+    if (!host && !isLocal) return;
+    if (!sudoInput) return;
     setSudoError(null);
+    if (isLocal) {
+      // Validated by the next installer action (SUDO_DENIED surfaces there).
+      setSudoPasswords((prev) => ({ ...prev, local: sudoInput }));
+      setSudoOpen(false);
+      setSudoInput("");
+      return;
+    }
+    if (!host) return;
     try {
       const result = await runProbe(host.id, sudoInput);
       if (result.privilege === "none") {
@@ -102,8 +117,8 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
   };
 
   const vps: VpsCtx = useMemo(
-    () => ({ hostId: host?.id ?? "", sudoPassword, requestSudo: () => setSudoOpen(true), t }),
-    [host?.id, sudoPassword, t],
+    () => ({ hostId: hostKey, sudoPassword, requestSudo: () => setSudoOpen(true), t }),
+    [hostKey, sudoPassword, t],
   );
 
   const privilegeLabel: Record<PrivilegeLevel, string> = {
@@ -113,12 +128,13 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
     admin: t.vpsPrivAdmin,
     none: t.vpsPrivNone,
   };
-  const allTabs: { id: Exclude<VpsStudioTab, "installer">; label: string }[] = [
+  const allTabs: { id: VpsStudioTab; label: string }[] = [
     { id: "ssh", label: t.vpsTabSsh },
     { id: "firewall", label: t.vpsTabFirewall },
     { id: "access", label: t.vpsTabAccess },
+    { id: "installer", label: t.vpsTabInstaller },
   ];
-  const tabs = probe ? allTabs.filter((tab) => probe.support[tab.id].level !== "hidden") : [];
+  const tabs = probe ? allTabs.filter((tab) => tab.id === "installer" || probe.support[tab.id].level !== "hidden") : [];
   const studio = tabs.some((tab) => tab.id === activeStudio) ? activeStudio : tabs[0]?.id;
 
   if (hosts.length === 0) {
@@ -173,7 +189,7 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
         )}
       </div>
 
-      {probe && (
+      {probe && !isLocal && (
       <div className="border-b border-border/70 px-2 flex gap-1 overflow-x-auto">
         {tabs.map((tab) => (
           <button
@@ -194,7 +210,7 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
 
       <div className="flex-1 overflow-y-auto select-text">
         <div className="max-w-4xl mx-auto w-full p-4 sm:p-6 space-y-4">
-          {isLocal && <Notice tone="warn">{t.vpsUnsupportedReasons.linux_only}</Notice>}
+          {isLocal && localOs && <InstallerStudio key="local" vps={vps} os={localOs} />}
           {!isLocal && probeError && <Notice tone="danger">{probeError}</Notice>}
           {!isLocal && probing && !probe && <p className="text-sm text-muted-foreground">{t.vpsShellProbing}</p>}
           {!isLocal && probe && host && !probeError && studio === "ssh" && (
@@ -202,6 +218,9 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
           )}
           {!isLocal && probe && host && !probeError && studio === "firewall" && (
             <FirewallStudio key={host.id} vps={vps} probe={probe} host={host} onSaveHost={onSaveHost} />
+          )}
+          {!isLocal && probe && host && !probeError && studio === "installer" && (
+            <InstallerStudio key={host.id} vps={vps} os={probe.osFamily} />
           )}
           {!isLocal && probe && host && !probeError && studio === "access" && (
             <AccessKeysStudio

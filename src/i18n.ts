@@ -190,6 +190,27 @@ export interface AppI18nStrings {
   vpsFwOff: string;
   vpsFwExposure: Record<string, string>;
   vpsFwActions: Record<string, string>;
+  vpsUsersCreateTitle: string;
+  vpsUsersName: string;
+  vpsUsersInvalidName: string;
+  vpsUsersSudo: string;
+  vpsUsersPassword: string;
+  vpsUsersCreate: string;
+  vpsUsersLocked: string;
+  vpsUsersLock: string;
+  vpsUsersLockHint: string;
+  vpsUsersLockConfirm: string;
+  vpsUsersUnlock: string;
+  vpsUsersKeysTitle: string;
+  vpsUsersNoKeys: string;
+  vpsUsersRevoke: string;
+  vpsUsersRevokeConfirm: string;
+  vpsUsersKeyInUse: string;
+  vpsUsersGrant: string;
+  vpsUsersGrantBtn: string;
+  vpsUsersNoLocalKeys: string;
+  vpsUsersRootReadOnly: string;
+  vpsUsersSudoModes: Record<string, string>;
   vpsShellSelectHost: string;
   vpsShellNoHosts: string;
   vpsShellProbing: string;
@@ -204,7 +225,6 @@ export interface AppI18nStrings {
   vpsSudoHint: string;
   vpsSudoOpen: string;
   vpsSudoUnlock: string;
-  vpsStudioPending: string;
 }
 
 const VI_STRINGS: AppI18nStrings = {
@@ -369,7 +389,6 @@ const VI_STRINGS: AppI18nStrings = {
   vpsSudoHint: "Chỉ giữ trong bộ nhớ cho phiên làm việc này, không lưu lại.",
   vpsSudoOpen: "Nhập mật khẩu sudo",
   vpsSudoUnlock: "Mở khoá",
-  vpsStudioPending: "Phần này đang được làm lại.",
   vpsSshStatusTitle: "Tình trạng",
   vpsSshCheckPassword: "Tắt đăng nhập bằng mật khẩu",
   vpsSshCheckRoot: "Không cho root đăng nhập bằng mật khẩu",
@@ -431,6 +450,27 @@ const VI_STRINGS: AppI18nStrings = {
   vpsFwOff: "tắt",
   vpsFwExposure: { exposed: "Mở công khai", restricted: "Giới hạn IP", blocked: "Bị chặn", loopback: "Chỉ nội bộ" },
   vpsFwActions: { allow: "Cho phép", limit: "Cho phép, giới hạn tần suất", deny: "Chặn", reject: "Từ chối" },
+  vpsUsersCreateTitle: "Tạo user mới",
+  vpsUsersName: "Tên user",
+  vpsUsersInvalidName: "Tên user chỉ gồm chữ thường, số, _ và -, bắt đầu bằng chữ.",
+  vpsUsersSudo: "Quyền sudo",
+  vpsUsersPassword: "Mật khẩu của user (dùng khi gõ sudo)",
+  vpsUsersCreate: "Tạo",
+  vpsUsersLocked: "Đã khoá",
+  vpsUsersLock: "Khoá đăng nhập",
+  vpsUsersLockHint: "Khoá cả đăng nhập bằng mật khẩu lẫn bằng SSH key.",
+  vpsUsersLockConfirm: "Khoá user này",
+  vpsUsersUnlock: "Mở khoá",
+  vpsUsersKeysTitle: "SSH key được phép",
+  vpsUsersNoKeys: "Chưa có key nào.",
+  vpsUsersRevoke: "Thu hồi",
+  vpsUsersRevokeConfirm: "Thu hồi key",
+  vpsUsersKeyInUse: "Ứng dụng đang dùng",
+  vpsUsersGrant: "Cấp key từ kho của ssh-box",
+  vpsUsersGrantBtn: "Cấp",
+  vpsUsersNoLocalKeys: "Kho key của ssh-box đang trống.",
+  vpsUsersRootReadOnly: "Tài khoản root chỉ xem được ở đây.",
+  vpsUsersSudoModes: { none: "Không có sudo", noPassword: "Sudo không cần mật khẩu", withPassword: "Sudo có mật khẩu" },
 };
 
 const EN_STRINGS: AppI18nStrings = {
@@ -595,7 +635,6 @@ const EN_STRINGS: AppI18nStrings = {
   vpsSudoHint: "Kept in memory for this session only, never saved.",
   vpsSudoOpen: "Enter sudo password",
   vpsSudoUnlock: "Unlock",
-  vpsStudioPending: "This section is being rebuilt.",
   vpsSshStatusTitle: "Status",
   vpsSshCheckPassword: "Password login is off",
   vpsSshCheckRoot: "Root cannot sign in with a password",
@@ -657,6 +696,27 @@ const EN_STRINGS: AppI18nStrings = {
   vpsFwOff: "off",
   vpsFwExposure: { exposed: "Public", restricted: "Limited to some IPs", blocked: "Blocked", loopback: "Local only" },
   vpsFwActions: { allow: "Allow", limit: "Allow, rate-limited", deny: "Deny", reject: "Reject" },
+  vpsUsersCreateTitle: "Create a user",
+  vpsUsersName: "Username",
+  vpsUsersInvalidName: "Use lowercase letters, digits, _ and -, starting with a letter.",
+  vpsUsersSudo: "Sudo access",
+  vpsUsersPassword: "The user's password (asked by sudo)",
+  vpsUsersCreate: "Create",
+  vpsUsersLocked: "Locked",
+  vpsUsersLock: "Lock login",
+  vpsUsersLockHint: "Blocks both password and SSH key login.",
+  vpsUsersLockConfirm: "Lock this user",
+  vpsUsersUnlock: "Unlock",
+  vpsUsersKeysTitle: "Authorized SSH keys",
+  vpsUsersNoKeys: "No keys yet.",
+  vpsUsersRevoke: "Revoke",
+  vpsUsersRevokeConfirm: "Revoke key",
+  vpsUsersKeyInUse: "Used by this app",
+  vpsUsersGrant: "Grant a key from ssh-box",
+  vpsUsersGrantBtn: "Grant",
+  vpsUsersNoLocalKeys: "ssh-box has no saved keys.",
+  vpsUsersRootReadOnly: "The root account is read only here.",
+  vpsUsersSudoModes: { none: "No sudo", noPassword: "Sudo without password", withPassword: "Sudo with password" },
 };
 
 export function getI18n(lang?: AppLanguage): AppI18nStrings {

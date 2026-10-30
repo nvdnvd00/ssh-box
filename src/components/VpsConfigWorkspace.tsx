@@ -11,6 +11,7 @@ import { VpsCtx } from "./vps/shared/useVpsResource";
 import { Notice } from "./vps/shared/Notice";
 import { SshHardeningStudio } from "./vps/SshHardeningStudio";
 import { FirewallStudio } from "./vps/FirewallStudio";
+import { AccessKeysStudio } from "./vps/AccessKeysStudio";
 
 interface VpsConfigWorkspaceProps {
   hosts: HostEntry[];
@@ -31,6 +32,7 @@ const PRIVILEGE_TONE: Record<PrivilegeLevel, StatusTone> = {
 
 export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
   hosts,
+  resources,
   activeHostId,
   appSettings,
   onSelectHost,
@@ -196,8 +198,14 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
             <FirewallStudio key={host.id} vps={vps} probe={probe} host={host} onSaveHost={onSaveHost} />
           )}
           {!isLocal && probe && host && !probeError && activeStudio === "access" && (
-            // ponytail: placeholder until Task 13 mounts the rebuilt Users & Keys studio.
-            <p className="text-sm text-muted-foreground">{t.vpsStudioPending}</p>
+            <AccessKeysStudio
+              key={host.id}
+              vps={vps}
+              probe={probe}
+              host={host}
+              onSaveHost={onSaveHost}
+              sshKeys={resources.sshKeys ?? []}
+            />
           )}
         </div>
       </div>

@@ -154,16 +154,6 @@ export type TabResources =
 
 export type VpsStudioTab = "ssh" | "firewall" | "access";
 
-export interface VpsPrivilegeInfo {
-  user: string;
-  uid: number;
-  isRoot: boolean;
-  passwordlessSudo: boolean;
-  sudoUnlocked: boolean;
-  osPrettyName: string;
-  detectedClientIp: string;
-}
-
 export type AuthUsed = { kind: "password" } | { kind: "key"; publicKeyBody: string };
 export type PrivilegeLevel = "root" | "sudoNoPassword" | "sudoPassword" | "none";
 export type FirewallEngine = "ufw" | "firewalld" | "iptables" | "none";

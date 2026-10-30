@@ -550,25 +550,31 @@ pub fn parse_windows_firewall(json: &str, server_port: u16) -> Result<FirewallSn
             sources.extend([("Anywhere".to_string(), false), ("Anywhere".to_string(), true)]);
         }
         let allow = r.action.eq_ignore_ascii_case("allow");
-        // A block tied to the sshd service still cuts SSH; any other service filter means not a plain port rule.
-        let service_scoped = !is_any(&r.service) && (allow || !r.service.trim().eq_ignore_ascii_case("sshd"));
-        // A port-less program/service block reaches only that program's ports: pin it to the SSH port it was checked on,
-        // or it would show every other port "blocked".
-        let to_port = if is_any(&r.local_port) && !(is_any(&r.program) && is_any(&r.service)) { server_port.to_string() } else { r.local_port.clone() };
+        // A block tied to the sshd service cuts SSH when its ports hold the SSH port; any other service filter means not a plain port rule.
+        let sshd_service = !allow && r.service.trim().eq_ignore_ascii_case("sshd");
+        let service_scoped = !is_any(&r.service) && !sshd_service;
+        // An sshd-service block or a port-less program block reaches only that program's ports: the display counts it on the
+        // SSH port it was checked on, or every other port in its range would read "blocked". The list keeps the real ports.
+        let pinned = sshd_service || (is_any(&r.local_port) && !is_any(&r.program));
         for (from_source, v6) in sources {
             let item = FirewallRuleItem {
                 index: rules.len() as u32 + 1,
-                to_port: to_port.clone(),
+                to_port: r.local_port.clone(),
                 protocol: protocol.to_string(),
                 action: if allow { "ALLOW" } else { "DENY" }.to_string(),
                 from_source,
                 v6,
                 comment: r.group.clone(),
                 raw_spec: r.display_name.clone(),
-                effective: !r.scoped && !service_scoped && !(allow && allows_off) && applies(&r.profile, !allow) && program_owns(r, protocol),
+                effective: !r.scoped
+                    && !service_scoped
+                    && (!sshd_service || rule_port_matches(&r.local_port, protocol, server_port, "tcp"))
+                    && !(allow && allows_off)
+                    && applies(&r.profile, !allow)
+                    && program_owns(r, protocol),
             };
             if item.effective && (allow || applies(&r.profile, false)) {
-                counted.push(item.clone());
+                counted.push(if pinned { FirewallRuleItem { to_port: server_port.to_string(), ..item.clone() } } else { item.clone() });
             }
             if r.local_port.trim().eq_ignore_ascii_case("any") {
                 unlisted_blocks.push(item);
@@ -1339,6 +1345,30 @@ mod tests {
         assert_eq!(build_windows_set_state(&admin_ctx(), &snap, true), Err("LOCKOUT_BLOCKED: windows_block_covers_me".to_string()));
         assert!(snap.rules.iter().all(|r| !r.effective), "the Private-only allow still does not count");
         assert!(build_windows_set_state(&admin_ctx(), &fw_off(blk), true).is_ok(), "known Private SSH NIC: the Public block is elsewhere");
+    }
+
+    // A block tied to the sshd service only reaches sshd: on 8080 (owned by app.exe) it blocks nothing, and on a range holding the
+    // SSH port it cuts SSH but must not show the app's port "blocked".
+    #[test]
+    fn windows_sshd_service_block_counts_only_on_the_ssh_port() {
+        let with = |port: &str| {
+            let rules = format!(
+                r#",{{"displayName":"svc block","service":"sshd","group":"tmp","program":"Any","profile":"Any","action":"Block","localPort":"{port}","protocol":"TCP","remoteAddress":"Any"}},{{"displayName":"app","service":"Any","group":"tmp","program":"C:\\app.exe","profile":"Any","action":"Allow","localPort":"8080","protocol":"TCP","remoteAddress":"Any"}}"#
+            );
+            let j = FW_OFF
+                .replace(r#""enabled":false"#, r#""enabled":true"#)
+                .replace("EXTRA", &rules)
+                .replace(r#""sockets":["#, r#""sockets":[{"protocol":"tcp","addr":"0.0.0.0","port":8080,"pid":2,"process":"app","path":"C:\\app.exe"},"#);
+            parse_windows_firewall(&j, 22).unwrap()
+        };
+        let exposure = |s: &FirewallSnapshot| s.listening_sockets.iter().map(|x| (x.port, x.exposure.clone())).collect::<Vec<_>>();
+        let only_8080 = with("8080");
+        assert_eq!(exposure(&only_8080), vec![(8080, "exposed".to_string()), (22, "exposed".to_string())]);
+        assert!(build_windows_set_state(&admin_ctx(), &only_8080, true).is_ok());
+        let range = with("20-8080");
+        assert_eq!(exposure(&range), vec![(8080, "exposed".to_string()), (22, "blocked".to_string())]);
+        assert_eq!(build_windows_set_state(&admin_ctx(), &range, true), Err("LOCKOUT_BLOCKED: windows_block_covers_me".to_string()));
+        assert!(range.rules.iter().any(|r| r.raw_spec == "svc block" && r.to_port == "20-8080"), "the list keeps the rule's real ports");
     }
 
     // Should Windows report TCP/UDP by number, a 22/TCP block must not vanish from the list and the guard.

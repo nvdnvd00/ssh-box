@@ -1848,6 +1848,9 @@ async fn run_sshd_script(
     }
 }
 
+// Runs in sh, cmd.exe and PowerShell alike (a Windows login shell has no `true`).
+const VERIFY_COMMAND: &str = "exit 0";
+
 // Opens a brand-new SSH connection on `new_port`; the live session proves nothing (spec §4.1).
 pub async fn verify_new_connection(
     pool: &SshPool,
@@ -1859,7 +1862,7 @@ pub async fn verify_new_connection(
     let before = crate::ssh_pool::list_known_hosts_at(&known_hosts);
     let mut target = host.clone();
     target.port = new_port;
-    let reason = match pool.test_exec(&target, "true").await {
+    let reason = match pool.test_exec(&target, VERIFY_COMMAND).await {
         Ok(fp) if fp == expected_fp => return Ok(()),
         Ok(fp) => format!("host key changed on port {new_port} ({fp})"),
         Err(e) => e,
@@ -2472,6 +2475,14 @@ pub async fn revoke_ssh_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // cmd.exe and PowerShell have no `true`: with it every Windows change failed its new-connection check and rolled back.
+    #[test]
+    fn verify_command_is_a_builtin_of_sh_cmd_and_powershell() {
+        assert_eq!(VERIFY_COMMAND, "exit 0");
+        let ok = std::process::Command::new("/bin/sh").args(["-c", VERIFY_COMMAND]).env_clear().status().unwrap();
+        assert!(ok.success());
+    }
 
     // Runs shell snippets locally against fake `sudo`/`id` binaries placed first in PATH.
     #[cfg(unix)]

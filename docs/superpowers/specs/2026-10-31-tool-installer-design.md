@@ -130,7 +130,9 @@ Exact catalog entries per OS, timeout values, how local sudo password is asked, 
 | Linux — throwaway ubuntu:24.04 container (root, real systemd) | scan → Refresh → install fail2ban, jq → install npm (manager) → enable fail2ban → search → uninstall jq → scan | all pass; statuses flip as expected; no prompt hangs |
 | Linux — same, non-root user with sudo password | install jq twice via `sudo -k -S` (second with cached creds) | pass; password never in output (old `sudo -S` leaked it) |
 | macOS 27.0.1 — disposable UTM VM, user `sshbox`, over SSH, no Homebrew at start | scan → install brew (manager) → scan → install jq → scan → uninstall jq → scan | all exit 0; brew false→true; jq External (system `/usr/bin/jq`) → Installed via brew → External |
-| Windows | — | not yet run (PowerShell scripts unexecuted) |
+| Windows 11 — UTM VM, admin user with spaces, over SSH (run in parallel with Server Config tests) | scan → search jq → install jq (winget) → enable Spooler → uninstall jq → scan | scan OK (winget present, npm absent); Spooler enable OK; winget install/search fail with `0x8a15000f Data required by the source is missing` — **now reported as a failure** (before fix 6ab47cb: scan died on missing npm and the failed install reported success) |
 | UI in the running app | — | not yet opened |
+
+Known limit: winget's source data is often missing in an SSH (non-interactive) session on a fresh Windows, so remote winget installs fail until someone runs winget once in that user's desktop session. The app surfaces the error; no workaround built.
 
 Note: macOS ships `/usr/bin/jq`, so jq shows "installed (outside package managers)" before a brew install. That is correct per §7, and it means the brew install is reached only through search.

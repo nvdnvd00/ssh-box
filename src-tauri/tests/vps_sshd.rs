@@ -256,3 +256,34 @@ fn verify_fails_when_sessions_are_refused() {
         assert!(err.starts_with("VERIFY_FAILED"), "{err}");
     });
 }
+
+// Users & Keys writes must be refused on a non-Linux host before anything runs; this host (the Mac) probes as macOS.
+// Deleting a require_linux call from any of the five fns makes its assertion fail.
+#[test]
+#[ignore]
+fn access_writes_are_refused_on_macos_host() {
+    use ssh_box_lib::vps_config::{authorize_ssh_key, create_linux_user, revoke_ssh_key, set_user_lock, set_user_sudo, SudoMode};
+    fake_home();
+    let sshd = start_sshd("ro", &[22915], None);
+    let host = host_for(&sshd, 22915);
+    ssh_box_lib::host_store::upsert_custom_host(host.clone()).unwrap();
+    let user = "sshboxit".to_string();
+    let key = format!("ssh-ed25519 {} it", sshd.client_pub_body);
+    block_on(async {
+        let pool = SshPool::default();
+        let id = host.id.as_str();
+        let results = [
+            ("create", create_linux_user(id, &pool, None, user.clone(), SudoMode::None, None).await),
+            ("lock", set_user_lock(id, &pool, None, user.clone(), true).await),
+            ("sudo", set_user_sudo(id, &pool, None, user.clone(), SudoMode::NoPassword, None).await),
+            ("authorize", authorize_ssh_key(id, &pool, None, user.clone(), key.clone()).await),
+            ("revoke", revoke_ssh_key(id, &pool, None, user.clone(), sshd.client_pub_body.clone()).await),
+        ];
+        for (name, r) in results {
+            let e = r.map(|_| ()).unwrap_err();
+            assert!(e.starts_with("UNSUPPORTED: read_only_os"), "{name}: {e}");
+        }
+    });
+    let created = Command::new("id").arg(&user).stderr(std::process::Stdio::null()).stdout(std::process::Stdio::null()).status().unwrap();
+    assert!(!created.success(), "user must not have been created");
+}

@@ -62,7 +62,8 @@ dscl . -list /Users UniqueID 2>/dev/null | while read -r usr uid; do
   case "$usr" in _*) continue ;; esac
   [ "$usr" = root ] || [ "$uid" -ge 501 ] 2>/dev/null || continue
   dsget() { dscl . -read "/Users/$usr" "$1" 2>/dev/null | sed -n "s/^$1: //p"; }
-  home=$(dsget NFSHomeDirectory)
+  # dscl lists several homes for root; dscacheutil gives the single effective one (spaces stay intact).
+  home=$(dscacheutil -q user -a name "$usr" 2>/dev/null | sed -n 's/^dir: //p')
   echo "---ACCOUNT---"
   echo "PASSWD:$usr:*:$uid:$(dsget PrimaryGroupID)::$home:$(dsget UserShell)"
   echo "GROUPS:$(id -Gn "$usr" 2>/dev/null | tr '\n' ' ')"

@@ -3103,6 +3103,16 @@ SSH_CONNECTION:203.0.113.7 51000 198.51.100.2 2222\nSYSTEMD:1\nSSH_SOCKET:active
         }
     }
 
+    // dscl returns two space-separated homes for root; the PASSWD home must be the single real one so keys are found.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_script_reports_root_home_exactly() {
+        let out = std::process::Command::new("sh").arg("-c").arg(crate::vps_macos::MACOS_ACCOUNTS_READ_SCRIPT).output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        let line = text.lines().find(|l| l.starts_with("PASSWD:root:")).expect("root account line");
+        assert_eq!(line.split(':').nth(6), Some("/var/root"), "{line}");
+    }
+
     const PROBE_MAC: &str = "UNAME:Darwin\nUSER:me\nUID:501\nSUDO:none\nSSH_CONNECTION:203.0.113.7 51000 198.51.100.2 22\nSYSTEMD:0\nFW:none\nMAC_VERSION:15.1\n---SSHD_MAIN---\n";
 
     // The drop-in decision on macOS decides which file we write; wrong means edits that never take effect.

@@ -133,6 +133,69 @@ impl Default for FirewallSnapshot {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Fail2banJailItem {
+    pub name: String,
+    pub currently_failed: u32,
+    pub total_failed: u32,
+    pub currently_banned: u32,
+    pub total_banned: u32,
+    pub banned_ips: Vec<String>,
+    pub findtime_secs: u32,
+    pub bantime_secs: i64,
+    pub maxretry: u32,
+}
+
+impl Default for Fail2banJailItem {
+    fn default() -> Self {
+        Self {
+            name: "sshd".to_string(),
+            currently_failed: 0,
+            total_failed: 0,
+            currently_banned: 0,
+            total_banned: 0,
+            banned_ips: Vec::new(),
+            findtime_secs: 600,
+            bantime_secs: 3600,
+            maxretry: 5,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SshAuthAuditEvent {
+    pub timestamp: String,
+    pub event_type: String,
+    pub username: String,
+    pub ip: String,
+    pub method: String,
+    pub port: u16,
+    pub raw_line: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AttackerIpSummary {
+    pub ip: String,
+    pub failed_count: u32,
+    pub last_target_user: String,
+    pub is_currently_banned: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Fail2banSnapshot {
+    pub installed: bool,
+    pub running: bool,
+    pub detected_client_ip: String,
+    pub jails: Vec<Fail2banJailItem>,
+    pub ignore_ips: Vec<String>,
+    pub auth_events: Vec<SshAuthAuditEvent>,
+    pub top_attacker_ips: Vec<AttackerIpSummary>,
+}
+
 fn is_public_bind_address(bind_addr: &str) -> bool {
     let clean = bind_addr
         .trim()
@@ -1650,6 +1713,508 @@ fi
     get_sshd_config(host_id, pool, sudo_password).await
 }
 
+fn parse_auth_log_line(line: &str) -> Option<SshAuthAuditEvent> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let (timestamp, msg) = if let Some(sshd_idx) = trimmed.find("sshd") {
+        let before = trimmed[..sshd_idx].trim();
+        let ts = match before.rsplit_once(char::is_whitespace) {
+            Some((prefix, _hostname)) if !prefix.trim().is_empty() => prefix.trim().to_string(),
+            _ => before.to_string(),
+        };
+        let after_sshd = &trimmed[sshd_idx + 4..];
+        let body = match after_sshd.find(':') {
+            Some(colon_idx) => after_sshd[colon_idx + 1..].trim(),
+            None => after_sshd.trim(),
+        };
+        (ts, body)
+    } else {
+        (String::new(), trimmed)
+    };
+
+    let extract_from_and_port = |tokens: &[&str], start_idx: usize| -> Option<(String, u16)> {
+        let from_rel = tokens[start_idx..].iter().position(|&t| t == "from")?;
+        let from_idx = start_idx + from_rel;
+        let ip = (*tokens.get(from_idx + 1)?).trim().to_string();
+        if ip.is_empty() {
+            return None;
+        }
+        let port = tokens[from_idx + 2..]
+            .iter()
+            .position(|&t| t == "port")
+            .and_then(|p_rel| tokens.get(from_idx + 2 + p_rel + 1))
+            .and_then(|p_str| p_str.parse::<u16>().ok())
+            .unwrap_or(22);
+        Some((ip, port))
+    };
+
+    if let Some(rest) = msg.strip_prefix("Accepted ") {
+        let tokens: Vec<&str> = rest.split_whitespace().collect();
+        if tokens.len() < 5 || tokens.get(1) != Some(&"for") {
+            return None;
+        }
+        let raw_method = tokens[0].to_ascii_lowercase();
+        let method = if raw_method == "publickey" {
+            "publickey".to_string()
+        } else if raw_method == "password" || raw_method.starts_with("keyboard-interactive") {
+            "password".to_string()
+        } else {
+            "unknown".to_string()
+        };
+        let username = tokens[2].to_string();
+        let (ip, port) = extract_from_and_port(&tokens, 3)?;
+        return Some(SshAuthAuditEvent {
+            timestamp,
+            event_type: "accepted".to_string(),
+            username,
+            ip,
+            method,
+            port,
+            raw_line: trimmed.to_string(),
+        });
+    }
+
+    if let Some(rest) = msg.strip_prefix("Failed ") {
+        let tokens: Vec<&str> = rest.split_whitespace().collect();
+        if tokens.len() < 5 || tokens.get(1) != Some(&"for") {
+            return None;
+        }
+        let raw_method = tokens[0].to_ascii_lowercase();
+        let method = if raw_method == "publickey" {
+            "publickey".to_string()
+        } else if raw_method == "password" || raw_method.starts_with("keyboard-interactive") {
+            "password".to_string()
+        } else {
+            "unknown".to_string()
+        };
+        let (username, search_start) =
+            if tokens.get(2) == Some(&"invalid") && tokens.get(3) == Some(&"user") {
+                let u = (*tokens.get(4)?).to_string();
+                (u, 5)
+            } else {
+                (tokens[2].to_string(), 3)
+            };
+        let (ip, port) = extract_from_and_port(&tokens, search_start)?;
+        return Some(SshAuthAuditEvent {
+            timestamp,
+            event_type: "failed".to_string(),
+            username,
+            ip,
+            method,
+            port,
+            raw_line: trimmed.to_string(),
+        });
+    }
+
+    let inv_rest = msg
+        .strip_prefix("Invalid user ")
+        .or_else(|| msg.strip_prefix("invalid user "));
+    if let Some(rest) = inv_rest {
+        let tokens: Vec<&str> = rest.split_whitespace().collect();
+        if tokens.is_empty() {
+            return None;
+        }
+        let (username, search_start) = if tokens[0] == "from" {
+            ("unknown".to_string(), 0)
+        } else {
+            (tokens[0].to_string(), 1)
+        };
+        let (ip, port) = extract_from_and_port(&tokens, search_start)?;
+        return Some(SshAuthAuditEvent {
+            timestamp,
+            event_type: "invalid_user".to_string(),
+            username,
+            ip,
+            method: "invalid_user".to_string(),
+            port,
+            raw_line: trimmed.to_string(),
+        });
+    }
+
+    None
+}
+
+pub fn parse_fail2ban_and_auth_snapshot(raw: &str) -> Fail2banSnapshot {
+    let mut snap = Fail2banSnapshot::default();
+    let mut section = "";
+    let mut current_jail: Option<Fail2banJailItem> = None;
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        match trimmed {
+            "---F2B_META---" => {
+                if let Some(j) = current_jail.take() {
+                    snap.jails.push(j);
+                }
+                section = "meta";
+                continue;
+            }
+            "---F2B_JAIL---" => {
+                if let Some(j) = current_jail.take() {
+                    snap.jails.push(j);
+                }
+                current_jail = Some(Fail2banJailItem::default());
+                section = "jail";
+                continue;
+            }
+            "---AUTH_LOG---" => {
+                if let Some(j) = current_jail.take() {
+                    snap.jails.push(j);
+                }
+                section = "auth";
+                continue;
+            }
+            _ => {}
+        }
+
+        match section {
+            "meta" => {
+                if let Some(v) = trimmed.strip_prefix("INSTALLED:") {
+                    snap.installed = parse_yes_no(v, false);
+                } else if let Some(v) = trimmed.strip_prefix("RUNNING:") {
+                    snap.running = parse_yes_no(v, false);
+                } else if let Some(v) = trimmed.strip_prefix("CLIENT_IP:") {
+                    snap.detected_client_ip = v.trim().to_string();
+                } else if let Some(v) = trimmed.strip_prefix("IGNORE_IPS:") {
+                    for tok in v.split(|c: char| c.is_ascii_whitespace() || c == ',') {
+                        let clean = tok.trim();
+                        if !clean.is_empty()
+                            && clean != "127.0.0.1/8"
+                            && clean != "127.0.0.1"
+                            && clean != "::1"
+                            && !snap.ignore_ips.iter().any(|x| x == clean)
+                        {
+                            snap.ignore_ips.push(clean.to_string());
+                        }
+                    }
+                }
+            }
+            "jail" => {
+                let jail = current_jail.get_or_insert_with(Fail2banJailItem::default);
+                let clean = trimmed
+                    .trim_start_matches(|c: char| c == '|' || c == '`' || c == '-' || c.is_whitespace());
+                if let Some(v) = clean.strip_prefix("JAIL_NAME:") {
+                    let name = v.trim();
+                    if !name.is_empty() {
+                        jail.name = name.to_string();
+                    }
+                } else if let Some(v) = clean.strip_prefix("Status for the jail:") {
+                    let name = v.trim();
+                    if !name.is_empty() {
+                        jail.name = name.to_string();
+                    }
+                } else if let Some(v) = clean.strip_prefix("Currently failed:") {
+                    jail.currently_failed = v.trim().parse::<u32>().unwrap_or(0);
+                } else if let Some(v) = clean.strip_prefix("Total failed:") {
+                    jail.total_failed = v.trim().parse::<u32>().unwrap_or(0);
+                } else if let Some(v) = clean.strip_prefix("Currently banned:") {
+                    jail.currently_banned = v.trim().parse::<u32>().unwrap_or(0);
+                } else if let Some(v) = clean.strip_prefix("Total banned:") {
+                    jail.total_banned = v.trim().parse::<u32>().unwrap_or(0);
+                } else if let Some(v) = clean.strip_prefix("Banned IP list:") {
+                    jail.banned_ips = v
+                        .split_whitespace()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                } else if let Some(v) = clean.strip_prefix("MAXRETRY:") {
+                    if let Ok(n) = v.trim().parse::<u32>() {
+                        jail.maxretry = n.max(1);
+                    }
+                } else if let Some(v) = clean.strip_prefix("FINDTIME:") {
+                    jail.findtime_secs = parse_time_seconds(v, jail.findtime_secs);
+                } else if let Some(v) = clean.strip_prefix("BANTIME:") {
+                    if let Ok(n) = v.trim().parse::<i64>() {
+                        jail.bantime_secs = n;
+                    }
+                }
+            }
+            "auth" => {
+                if let Some(ev) = parse_auth_log_line(trimmed) {
+                    snap.auth_events.push(ev);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(j) = current_jail.take() {
+        snap.jails.push(j);
+    }
+
+    let mut banned_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for j in &snap.jails {
+        for ip in &j.banned_ips {
+            banned_set.insert(ip.clone());
+        }
+    }
+
+    let mut attacker_map: std::collections::HashMap<String, (u32, String)> =
+        std::collections::HashMap::new();
+    for ev in &snap.auth_events {
+        if ev.event_type == "failed" || ev.event_type == "invalid_user" {
+            let entry = attacker_map
+                .entry(ev.ip.clone())
+                .or_insert_with(|| (0, ev.username.clone()));
+            entry.0 += 1;
+            entry.1 = ev.username.clone();
+        }
+    }
+
+    let mut attackers: Vec<AttackerIpSummary> = attacker_map
+        .into_iter()
+        .map(|(ip, (failed_count, last_target_user))| {
+            let is_currently_banned = banned_set.contains(&ip);
+            AttackerIpSummary {
+                ip,
+                failed_count,
+                last_target_user,
+                is_currently_banned,
+            }
+        })
+        .collect();
+
+    attackers.sort_by(|a, b| {
+        b.failed_count
+            .cmp(&a.failed_count)
+            .then_with(|| a.ip.cmp(&b.ip))
+    });
+    snap.top_attacker_ips = attackers;
+
+    snap
+}
+
+pub async fn get_fail2ban_snapshot(
+    host_id: &str,
+    pool: &SshPool,
+    sudo_password: Option<String>,
+) -> Result<Fail2banSnapshot, String> {
+    let script = r#"
+installed=0
+running=0
+if command -v fail2ban-client >/dev/null 2>&1 || command -v fail2ban-server >/dev/null 2>&1; then
+  installed=1
+  if fail2ban-client ping >/dev/null 2>&1 || systemctl is-active --quiet fail2ban 2>/dev/null; then
+    running=1
+  fi
+fi
+ssh_p=$(grep -iE '^[[:space:]]*Port[[:space:]]+[0-9]+' /etc/ssh/sshd_config 2>/dev/null | head -n 1 | awk '{print $2}')
+[ -z "$ssh_p" ] && ssh_p=22
+cip=$(echo "${SSH_CLIENT%% *}")
+[ -z "$cip" ] && cip=$(echo "${SSH_CONNECTION%% *}")
+if [ -z "$cip" ] && command -v ss >/dev/null 2>&1; then
+  cip=$(ss -tnH state established "( sport = :$ssh_p or sport = :22 )" 2>/dev/null | awk 'NR==1 {print $4}' | sed 's/^\[//;s/\]:[0-9]*$//;s/:[0-9]*$//')
+fi
+ignore_ips=""
+if [ -f /etc/fail2ban/jail.d/99-sshbox.local ]; then
+  ignore_ips=$(grep -iE '^[[:space:]]*ignoreip[[:space:]]*=' /etc/fail2ban/jail.d/99-sshbox.local 2>/dev/null | tail -n 1 | cut -d= -f2-)
+elif [ -f /etc/fail2ban/jail.local ]; then
+  ignore_ips=$(grep -iE '^[[:space:]]*ignoreip[[:space:]]*=' /etc/fail2ban/jail.local 2>/dev/null | tail -n 1 | cut -d= -f2-)
+fi
+if [ -z "$ignore_ips" ] && [ "$running" = "1" ]; then
+  ignore_ips=$(fail2ban-client get sshd ignoreip 2>/dev/null | tr '\n' ' ' | sed 's/[|`-]//g')
+fi
+echo "---F2B_META---"
+echo "INSTALLED:$installed"
+echo "RUNNING:$running"
+echo "CLIENT_IP:$cip"
+echo "IGNORE_IPS:$ignore_ips"
+if [ "$running" = "1" ]; then
+  jails=$(fail2ban-client status 2>/dev/null | sed -n 's/.*Jail list:[[:space:]]*//p' | tr ',' ' ')
+  for j in $jails; do
+    echo "---F2B_JAIL---"
+    echo "JAIL_NAME:$j"
+    fail2ban-client status "$j" 2>/dev/null || true
+    mr=$(fail2ban-client get "$j" maxretry 2>/dev/null | tr -d '[:space:]')
+    ft=$(fail2ban-client get "$j" findtime 2>/dev/null | tr -d '[:space:]')
+    bt=$(fail2ban-client get "$j" bantime 2>/dev/null | tr -d '[:space:]')
+    echo "MAXRETRY:${mr:-5}"
+    echo "FINDTIME:${ft:-600}"
+    echo "BANTIME:${bt:-3600}"
+  done
+fi
+echo "---AUTH_LOG---"
+if [ -s /var/log/auth.log ]; then
+  grep -E 'sshd\[[0-9]+\]: (Accepted|Failed|Invalid user)' /var/log/auth.log 2>/dev/null | tail -n 150 || true
+elif [ -s /var/log/secure ]; then
+  grep -E 'sshd\[[0-9]+\]: (Accepted|Failed|Invalid user)' /var/log/secure 2>/dev/null | tail -n 150 || true
+elif command -v journalctl >/dev/null 2>&1; then
+  journalctl -u ssh -u sshd -n 200 --no-pager 2>/dev/null | grep -E 'sshd\[[0-9]+\]: (Accepted|Failed|Invalid user)' | tail -n 150 || true
+fi
+"#;
+    let raw = run_privileged_script(host_id, pool, sudo_password, script).await?;
+    Ok(parse_fail2ban_and_auth_snapshot(&raw))
+}
+
+pub fn build_fail2ban_ban_action_script(
+    jail: &str,
+    ip: &str,
+    action: &str,
+) -> Result<String, String> {
+    let clean_jail = jail.trim();
+    if clean_jail.is_empty()
+        || !clean_jail
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!("Invalid Fail2ban jail name: {jail}"));
+    }
+
+    let clean_ip = ip.trim();
+    if clean_ip.is_empty()
+        || !clean_ip
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || c == '.' || c == ':' || c == '/')
+    {
+        return Err(format!("Invalid IP address: {ip}"));
+    }
+
+    let subcmd = match action.trim().to_ascii_lowercase().as_str() {
+        "ban" | "banip" => "banip",
+        "unban" | "unbanip" => "unbanip",
+        other => return Err(format!("Unsupported Fail2ban action: {other}")),
+    };
+
+    Ok(format!(
+        "fail2ban-client set {} {} {}",
+        shell_single_quote(clean_jail),
+        subcmd,
+        shell_single_quote(clean_ip)
+    ))
+}
+
+pub fn build_update_fail2ban_jail_script(
+    maxretry: u32,
+    findtime_secs: u32,
+    bantime_secs: i64,
+    ignore_ips: &[String],
+) -> Result<String, String> {
+    let safe_maxretry = maxretry.clamp(1, 100);
+    let safe_findtime = findtime_secs.max(10);
+    let safe_bantime = if bantime_secs < 0 {
+        -1
+    } else {
+        bantime_secs.max(60)
+    };
+
+    let mut extra_ips: Vec<String> = Vec::new();
+    for raw_ip in ignore_ips {
+        for tok in raw_ip.split(|c: char| c.is_ascii_whitespace() || c == ',') {
+            let clean = tok.trim();
+            if clean.is_empty()
+                || clean == "127.0.0.1/8"
+                || clean == "127.0.0.1"
+                || clean == "::1"
+            {
+                continue;
+            }
+            if !clean
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == '.' || c == ':' || c == '/')
+            {
+                return Err(format!("Invalid ignoreip entry: {clean}"));
+            }
+            if !extra_ips.iter().any(|x| x == clean) {
+                extra_ips.push(clean.to_string());
+            }
+        }
+    }
+
+    let ignore_line = if extra_ips.is_empty() {
+        "ignoreip = 127.0.0.1/8 ::1".to_string()
+    } else {
+        format!("ignoreip = 127.0.0.1/8 ::1 {}", extra_ips.join(" "))
+    };
+
+    Ok(format!(
+        r#"mkdir -p /etc/fail2ban/jail.d
+cat << 'SSHBOX_F2B_EOF' > /etc/fail2ban/jail.d/99-sshbox.local
+[DEFAULT]
+{ignore_line}
+bantime = {safe_bantime}
+findtime = {safe_findtime}
+maxretry = {safe_maxretry}
+
+[sshd]
+enabled = true
+SSHBOX_F2B_EOF
+fail2ban-client reload 2>/dev/null || systemctl restart fail2ban 2>/dev/null || service fail2ban restart"#
+    ))
+}
+
+pub async fn fail2ban_ban_action(
+    host_id: &str,
+    pool: &SshPool,
+    jail: String,
+    ip: String,
+    action: String,
+    sudo_password: Option<String>,
+) -> Result<Fail2banSnapshot, String> {
+    let script = build_fail2ban_ban_action_script(&jail, &ip, &action)?;
+    run_privileged_script(host_id, pool, sudo_password.clone(), &script).await?;
+    get_fail2ban_snapshot(host_id, pool, sudo_password).await
+}
+
+pub async fn update_fail2ban_jail(
+    host_id: &str,
+    pool: &SshPool,
+    maxretry: u32,
+    findtime_secs: u32,
+    bantime_secs: i64,
+    ignore_ips: Vec<String>,
+    sudo_password: Option<String>,
+) -> Result<Fail2banSnapshot, String> {
+    let script =
+        build_update_fail2ban_jail_script(maxretry, findtime_secs, bantime_secs, &ignore_ips)?;
+    run_privileged_script(host_id, pool, sudo_password.clone(), &script).await?;
+    get_fail2ban_snapshot(host_id, pool, sudo_password).await
+}
+
+pub async fn install_fail2ban(
+    host_id: &str,
+    pool: &SshPool,
+    sudo_password: Option<String>,
+) -> Result<Fail2banSnapshot, String> {
+    let script = r#"
+if ! command -v fail2ban-client >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y epel-release 2>/dev/null || true
+    dnf install -y fail2ban
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y epel-release 2>/dev/null || true
+    yum install -y fail2ban
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache fail2ban
+  else
+    echo "No supported package manager (apt-get, dnf, yum, apk) found to install fail2ban."
+    exit 1
+  fi
+fi
+mkdir -p /etc/fail2ban/jail.d
+if [ ! -f /etc/fail2ban/jail.d/99-sshbox.local ]; then
+  cat << 'SSHBOX_F2B_EOF' > /etc/fail2ban/jail.d/99-sshbox.local
+[DEFAULT]
+ignoreip = 127.0.0.1/8 ::1
+bantime = 3600
+findtime = 600
+maxretry = 5
+
+[sshd]
+enabled = true
+SSHBOX_F2B_EOF
+fi
+systemctl enable fail2ban 2>/dev/null || rc-update add fail2ban default 2>/dev/null || true
+systemctl restart fail2ban 2>/dev/null || service fail2ban restart 2>/dev/null || fail2ban-client reload 2>/dev/null || fail2ban-client -x start
+"#;
+    run_privileged_script(host_id, pool, sudo_password.clone(), script).await?;
+    get_fail2ban_snapshot(host_id, pool, sudo_password).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2034,5 +2599,116 @@ tcp        0      0 127.0.0.1:6379          0.0.0.0:*               LISTEN      
         )
         .unwrap();
         assert!(whitelist_all.contains("ufw allow from 203.0.113.42 to any"));
+    }
+
+    #[test]
+    fn parses_fail2ban_jails_and_ssh_auth_audit_timeline_with_attacker_aggregation() {
+        let raw = r#"
+---F2B_META---
+INSTALLED:1
+RUNNING:1
+CLIENT_IP:203.0.113.42
+IGNORE_IPS:127.0.0.1/8 ::1 203.0.113.42 10.8.0.0/24
+---F2B_JAIL---
+JAIL_NAME:sshd
+Status for the jail: sshd
+|- Filter
+|  |- Currently failed:	4
+|  |- Total failed:	128
+|  `- File list:	/var/log/auth.log
+`- Actions
+   |- Currently banned:	2
+   |- Total banned:	19
+   `- Banned IP list:	185.220.101.5 45.155.205.233
+MAXRETRY:5
+FINDTIME:600
+BANTIME:3600
+---AUTH_LOG---
+Oct 30 06:10:12 prod-vps sshd[1010]: Accepted publickey for ubuntu from 203.0.113.42 port 54322 ssh2: ED25519 SHA256:abcd
+Oct 30 06:11:01 prod-vps sshd[1015]: Failed password for root from 185.220.101.5 port 48120 ssh2
+Oct 30 06:11:04 prod-vps sshd[1016]: Failed password for root from 185.220.101.5 port 48124 ssh2
+Oct 30 06:11:09 prod-vps sshd[1017]: Failed password for invalid user admin from 185.220.101.5 port 48130 ssh2
+Oct 30 06:12:00 prod-vps sshd[1020]: Invalid user postgres from 91.240.118.172 port 39100
+Oct 30 06:12:03 prod-vps sshd[1021]: Failed password for invalid user deploy from 91.240.118.172 port 39104 ssh2
+Oct 30 06:13:15 prod-vps sshd[1030]: Accepted password for deploy from 198.51.100.25 port 51234 ssh2
+"#;
+
+        let snap = parse_fail2ban_and_auth_snapshot(raw);
+        assert!(snap.installed);
+        assert!(snap.running);
+        assert_eq!(snap.detected_client_ip, "203.0.113.42");
+        assert_eq!(
+            snap.ignore_ips,
+            vec!["203.0.113.42".to_string(), "10.8.0.0/24".to_string()]
+        );
+        assert_eq!(snap.jails.len(), 1);
+
+        let sshd = &snap.jails[0];
+        assert_eq!(sshd.name, "sshd");
+        assert_eq!(sshd.currently_failed, 4);
+        assert_eq!(sshd.total_failed, 128);
+        assert_eq!(sshd.currently_banned, 2);
+        assert_eq!(sshd.total_banned, 19);
+        assert_eq!(
+            sshd.banned_ips,
+            vec!["185.220.101.5".to_string(), "45.155.205.233".to_string()]
+        );
+        assert_eq!(sshd.maxretry, 5);
+        assert_eq!(sshd.findtime_secs, 600);
+        assert_eq!(sshd.bantime_secs, 3600);
+
+        assert_eq!(snap.auth_events.len(), 7);
+        assert_eq!(snap.auth_events[0].timestamp, "Oct 30 06:10:12");
+        assert_eq!(snap.auth_events[0].event_type, "accepted");
+        assert_eq!(snap.auth_events[0].method, "publickey");
+        assert_eq!(snap.auth_events[0].username, "ubuntu");
+        assert_eq!(snap.auth_events[0].ip, "203.0.113.42");
+        assert_eq!(snap.auth_events[0].port, 54322);
+
+        assert_eq!(snap.auth_events[3].event_type, "failed");
+        assert_eq!(snap.auth_events[3].method, "password");
+        assert_eq!(snap.auth_events[3].username, "admin");
+        assert_eq!(snap.auth_events[3].ip, "185.220.101.5");
+        assert_eq!(snap.auth_events[3].port, 48130);
+
+        assert_eq!(snap.auth_events[4].event_type, "invalid_user");
+        assert_eq!(snap.auth_events[4].method, "invalid_user");
+        assert_eq!(snap.auth_events[4].username, "postgres");
+        assert_eq!(snap.auth_events[4].ip, "91.240.118.172");
+        assert_eq!(snap.auth_events[4].port, 39100);
+
+        assert_eq!(snap.top_attacker_ips.len(), 2);
+        assert_eq!(snap.top_attacker_ips[0].ip, "185.220.101.5");
+        assert_eq!(snap.top_attacker_ips[0].failed_count, 3);
+        assert_eq!(snap.top_attacker_ips[0].last_target_user, "admin");
+        assert!(snap.top_attacker_ips[0].is_currently_banned);
+
+        assert_eq!(snap.top_attacker_ips[1].ip, "91.240.118.172");
+        assert_eq!(snap.top_attacker_ips[1].failed_count, 2);
+        assert_eq!(snap.top_attacker_ips[1].last_target_user, "deploy");
+        assert!(!snap.top_attacker_ips[1].is_currently_banned);
+    }
+
+    #[test]
+    fn builds_fail2ban_policy_and_ban_action_scripts_safely() {
+        let policy_script = build_update_fail2ban_jail_script(
+            3,
+            900,
+            -1,
+            &["203.0.113.42".to_string(), "127.0.0.1/8".to_string()],
+        )
+        .unwrap();
+        assert!(policy_script.contains("ignoreip = 127.0.0.1/8 ::1 203.0.113.42"));
+        assert!(policy_script.contains("bantime = -1"));
+        assert!(policy_script.contains("findtime = 900"));
+        assert!(policy_script.contains("maxretry = 3"));
+        assert!(policy_script.contains("[sshd]\nenabled = true"));
+
+        let ban_script = build_fail2ban_ban_action_script("sshd", "185.220.101.5", "ban").unwrap();
+        assert!(ban_script.contains("fail2ban-client set 'sshd' banip '185.220.101.5'"));
+
+        let unban_script =
+            build_fail2ban_ban_action_script("sshd", "185.220.101.5", "unban").unwrap();
+        assert!(unban_script.contains("fail2ban-client set 'sshd' unbanip '185.220.101.5'"));
     }
 }

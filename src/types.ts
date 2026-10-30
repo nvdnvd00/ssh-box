@@ -240,6 +240,45 @@ export interface FirewallSnapshot {
   listeningSockets: ListeningSocketItem[];
 }
 
+export interface Fail2banJailItem {
+  name: string;
+  currentlyFailed: number;
+  totalFailed: number;
+  currentlyBanned: number;
+  totalBanned: number;
+  bannedIps: string[];
+  findtimeSecs: number;
+  bantimeSecs: number;
+  maxretry: number;
+}
+
+export interface SshAuthAuditEvent {
+  timestamp: string;
+  eventType: "accepted" | "failed" | "invalid_user" | string;
+  username: string;
+  ip: string;
+  method: "publickey" | "password" | "invalid_user" | "unknown" | string;
+  port: number;
+  rawLine: string;
+}
+
+export interface AttackerIpSummary {
+  ip: string;
+  failedCount: number;
+  lastTargetUser: string;
+  isCurrentlyBanned: boolean;
+}
+
+export interface Fail2banSnapshot {
+  installed: boolean;
+  running: boolean;
+  detectedClientIp: string;
+  jails: Fail2banJailItem[];
+  ignoreIps: string[];
+  authEvents: SshAuthAuditEvent[];
+  topAttackerIps: AttackerIpSummary[];
+}
+
 export interface KnownHostEntry {
   id: string;
   hostPattern: string;

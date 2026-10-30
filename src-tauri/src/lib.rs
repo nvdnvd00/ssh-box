@@ -25,7 +25,7 @@ use tauri::State;
 use telemetry::{DockerFullSnapshot, ServerMetrics};
 use tokio::sync::mpsc;
 use vps_config::{
-    FirewallSnapshot, SshdConfigSnapshot, SshdConfigUpdate, VpsPrivilegeInfo,
+    Fail2banSnapshot, FirewallSnapshot, SshdConfigSnapshot, SshdConfigUpdate, VpsPrivilegeInfo,
 };
 
 pub struct AppState {
@@ -946,6 +946,59 @@ async fn vps_set_firewall_state(
     .await
 }
 
+#[tauri::command]
+async fn vps_get_fail2ban_snapshot(
+    state: State<'_, AppState>,
+    host_id: String,
+    sudo_password: Option<String>,
+) -> Result<Fail2banSnapshot, String> {
+    vps_config::get_fail2ban_snapshot(&host_id, &state.ssh_pool, sudo_password).await
+}
+
+#[tauri::command]
+async fn vps_fail2ban_ban_action(
+    state: State<'_, AppState>,
+    host_id: String,
+    jail: String,
+    ip: String,
+    action: String,
+    sudo_password: Option<String>,
+) -> Result<Fail2banSnapshot, String> {
+    vps_config::fail2ban_ban_action(&host_id, &state.ssh_pool, jail, ip, action, sudo_password)
+        .await
+}
+
+#[tauri::command]
+async fn vps_update_fail2ban_jail(
+    state: State<'_, AppState>,
+    host_id: String,
+    maxretry: u32,
+    findtime_secs: u32,
+    bantime_secs: i64,
+    ignore_ips: Vec<String>,
+    sudo_password: Option<String>,
+) -> Result<Fail2banSnapshot, String> {
+    vps_config::update_fail2ban_jail(
+        &host_id,
+        &state.ssh_pool,
+        maxretry,
+        findtime_secs,
+        bantime_secs,
+        ignore_ips,
+        sudo_password,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn vps_install_fail2ban(
+    state: State<'_, AppState>,
+    host_id: String,
+    sudo_password: Option<String>,
+) -> Result<Fail2banSnapshot, String> {
+    vps_config::install_fail2ban(&host_id, &state.ssh_pool, sudo_password).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1021,6 +1074,10 @@ pub fn run() {
             vps_add_firewall_rule,
             vps_delete_firewall_rule,
             vps_set_firewall_state,
+            vps_get_fail2ban_snapshot,
+            vps_fail2ban_ban_action,
+            vps_update_fail2ban_jail,
+            vps_install_fail2ban,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

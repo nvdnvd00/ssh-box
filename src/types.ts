@@ -238,6 +238,7 @@ export interface FirewallRuleItem {
   v6: boolean;
   comment: string;
   rawSpec: string;
+  effective?: boolean;
 }
 
 export interface FirewallSnapshot {

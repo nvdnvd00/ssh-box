@@ -121,9 +121,10 @@ pub fn check_firewall_delete_windows(
             && rule_port_matches(&r.to_port, &r.protocol, ctx.server_port, "tcp")
             && source_covers(&r.from_source, &ctx.client_ip)
     };
-    let removes_mine = std::iter::once(target).chain(rules.iter().filter(|r| removed(r))).any(|r| allows_my_ssh(ctx, r));
-    let still_open = rules.iter().any(|r| !removed(r) && allows_my_ssh(ctx, r))
-        && !rules.iter().any(|r| !removed(r) && blocks_me(r));
+    // Only effective allows carry the client in; blocks count either way (conservative).
+    let carries = |r: &FirewallRuleItem| r.effective && allows_my_ssh(ctx, r);
+    let removes_mine = std::iter::once(target).chain(rules.iter().filter(|r| removed(r))).any(carries);
+    let still_open = rules.iter().any(|r| !removed(r) && carries(r)) && !rules.iter().any(|r| !removed(r) && blocks_me(r));
     if removes_mine && !still_open {
         return block("only_ssh_rule");
     }
@@ -263,6 +264,7 @@ mod tests {
             v6: false,
             comment: String::new(),
             raw_spec: format!("{to} {action} IN {from}"),
+            effective: true,
         }
     }
     fn account(name: &str, sudo: bool) -> LinuxAccountItem {
@@ -495,5 +497,30 @@ mod tests {
         let mut r = rule(1, "ALLOW", "2222/tcp", "2001:db8::/64");
         r.v6 = true;
         assert!(blocked(check_firewall_delete_windows(&c, std::slice::from_ref(&r), &r)));
+    }
+
+    // Allow của profile không dùng hoặc gắn chương trình không cho máy khách vào; không được coi là đường dự phòng.
+    #[test]
+    fn windows_delete_ignores_ineffective_backup_allows() {
+        let c = deploy_key();
+        let real = rule(1, "ALLOW", "2222/tcp", "Anywhere");
+        for name in ["inactive-profile", "program-scoped"] {
+            let mut backup = rule(2, "ALLOW", "2222/tcp", "Anywhere");
+            backup.raw_spec = name.into();
+            backup.effective = false;
+            assert!(blocked(check_firewall_delete_windows(&c, &[real.clone(), backup.clone()], &real)), "{name}");
+            // Xoá chính allow vô hiệu thì không mất đường vào nào.
+            assert!(check_firewall_delete_windows(&c, &[real.clone(), backup.clone()], &backup).is_ok(), "{name}");
+        }
+    }
+
+    // Từ JSON thật: allow IPv6 duy nhất cho /64 của máy khách, xoá phải bị chặn (parser + guard cùng chạy).
+    #[test]
+    fn windows_delete_from_parsed_json_blocks_only_ipv6_allow() {
+        let j = r#"{"profiles":[{"name":"Private","enabled":true,"defaultInbound":"Block"}],"active":["Private"],"rules":[{"displayName":"ssh6","group":"","profile":"Any","scoped":false,"action":"Allow","localPort":"2222","protocol":"TCP","remoteAddress":"2001:db8::/64"}],"sockets":[]}"#;
+        let rules = crate::vps_windows::parse_windows_firewall(j).unwrap().rules;
+        let mut c = deploy_key();
+        c.client_ip = "2001:db8::7".to_string();
+        assert!(blocked(check_firewall_delete_windows(&c, &rules, &rules[0])));
     }
 }

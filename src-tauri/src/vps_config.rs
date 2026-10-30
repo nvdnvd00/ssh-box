@@ -137,6 +137,13 @@ pub struct FirewallRuleItem {
     pub v6: bool,
     pub comment: String,
     pub raw_spec: String,
+    // false: listed, but not a plain port rule of an active profile (Windows only); true everywhere else.
+    #[serde(default = "default_effective")]
+    pub effective: bool,
+}
+
+fn default_effective() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -416,7 +423,7 @@ fn parse_ufw_numbered_line(line: &str) -> Option<FirewallRuleItem> {
         from_source: from_clean,
         v6,
         comment,
-        raw_spec: after_bracket.to_string(),
+        raw_spec: after_bracket.to_string(), effective: true,
     })
 }
 
@@ -504,7 +511,7 @@ fn parse_iptables_input_line(line: &str, next_index: u32) -> Option<FirewallRule
         from_source,
         v6: false,
         comment,
-        raw_spec: spec.to_string(),
+        raw_spec: spec.to_string(), effective: true,
     })
 }
 
@@ -985,7 +992,7 @@ pub fn parse_firewalld_list_all(raw: &str) -> Vec<FirewallRuleItem> {
             let protocol = to.rsplit_once('/').map(|(_, p)| p.to_string()).unwrap_or_else(|| "any".to_string());
             keyed.push(((2, 0), FirewallRuleItem {
                 index: 0, to_port: to.clone(), protocol, action: "ALLOW".to_string(),
-                from_source: "Anywhere".to_string(), v6, comment: String::new(), raw_spec: raw_spec.clone(),
+                from_source: "Anywhere".to_string(), v6, comment: String::new(), raw_spec: raw_spec.clone(), effective: true,
             }));
         }
     }
@@ -1027,7 +1034,7 @@ pub fn parse_firewalld_list_all(raw: &str) -> Vec<FirewallRuleItem> {
                 keyed.push((key, FirewallRuleItem {
                     index: 0, to_port: to_port.clone(), protocol: protocol.clone(),
                     action: if deny { "DENY" } else { "ALLOW" }.to_string(),
-                    from_source: source.clone(), v6, comment: String::new(), raw_spec: t.to_string(),
+                    from_source: source.clone(), v6, comment: String::new(), raw_spec: t.to_string(), effective: true,
                 }));
             }
         } else if !t.is_empty() && t.contains(':') {
@@ -3429,7 +3436,7 @@ tcp        0      0 127.0.0.1:6379          0.0.0.0:*               LISTEN      
             from_source: from.to_string(),
             v6,
             comment: String::new(),
-            raw_spec: format!("{to} {action} IN {from}"),
+            raw_spec: format!("{to} {action} IN {from}"), effective: true,
         }
     }
 

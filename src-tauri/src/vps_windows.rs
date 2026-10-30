@@ -303,7 +303,7 @@ pub fn parse_windows_firewall(json: &str) -> Result<FirewallSnapshot, String> {
             || p.split(',').any(|x| w.active.iter().any(|a| a.eq_ignore_ascii_case(x.trim())))
     };
     // Every rule is listed; only plain port rules of an active profile take part in the exposure, the rest leave the port "unknown".
-    let (mut rules, mut counted) = (Vec::new(), Vec::new());
+    let mut rules = Vec::new();
     for r in &w.rules {
         let protocol = match r.protocol.to_ascii_lowercase().as_str() {
             "tcp" => "tcp",
@@ -332,13 +332,12 @@ pub fn parse_windows_firewall(json: &str) -> Result<FirewallSnapshot, String> {
                 v6,
                 comment: r.group.clone(),
                 raw_spec: r.display_name.clone(),
+                effective: !r.scoped && applies(&r.profile),
             };
-            if !r.scoped && applies(&r.profile) {
-                counted.push(item.clone());
-            }
             rules.push(item);
         }
     }
+    let counted: Vec<FirewallRuleItem> = rules.iter().filter(|r| r.effective).cloned().collect();
     let listening_sockets = w
         .sockets
         .iter()
@@ -589,7 +588,7 @@ mod tests {
         ListeningSocketItem { protocol: "tcp".into(), bind_addr: "0.0.0.0".into(), port, is_public: true, process_name: String::new(), pid: None, exposure: String::new() }
     }
     fn wrule(action: &str, port: &str, from: &str) -> FirewallRuleItem {
-        FirewallRuleItem { index: 1, to_port: port.into(), protocol: "tcp".into(), action: action.into(), from_source: from.into(), v6: false, comment: String::new(), raw_spec: format!("{action} {port}") }
+        FirewallRuleItem { index: 1, to_port: port.into(), protocol: "tcp".into(), action: action.into(), from_source: from.into(), v6: false, comment: String::new(), raw_spec: format!("{action} {port}"), effective: true }
     }
 
     // ufw: luật khớp đầu tiên thắng. Windows: block luôn thắng dù đứng sau allow.

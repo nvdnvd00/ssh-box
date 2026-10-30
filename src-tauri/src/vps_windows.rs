@@ -491,12 +491,14 @@ pub fn parse_windows_firewall(json: &str) -> Result<FirewallSnapshot, String> {
     let enabled = w.profiles.iter().filter(in_use).any(|p| p.enabled);
     let blocks = w.profiles.iter().filter(in_use).any(|p| p.default_inbound.eq_ignore_ascii_case("block"));
     // A rule carries (or blocks) this session only on the profile of the interface SSH arrives on: on a multi-NIC host
-    // another active profile says nothing about it. Unknown profile: only rules for every profile count.
+    // another active profile says nothing about it. Unknown profile: only allows for every profile count, while a block
+    // of any profile may be on the SSH NIC and counts (conservative).
     let ssh_profile = w.ssh_profile.trim();
-    let applies = |profile: &str| {
+    let applies = |profile: &str, block: bool| {
         let p = profile.trim();
         p.is_empty()
             || p.eq_ignore_ascii_case("any")
+            || (ssh_profile.is_empty() && block)
             || (!ssh_profile.is_empty() && p.split(',').any(|x| x.trim().eq_ignore_ascii_case(ssh_profile)))
     };
     // A program-scoped rule (the stock OpenSSH one is limited to sshd.exe) applies only while exactly that file owns every
@@ -531,17 +533,18 @@ pub fn parse_windows_firewall(json: &str) -> Result<FirewallSnapshot, String> {
         if sources.is_empty() {
             sources.extend([("Anywhere".to_string(), false), ("Anywhere".to_string(), true)]);
         }
+        let allow = r.action.eq_ignore_ascii_case("allow");
         for (from_source, v6) in sources {
             let item = FirewallRuleItem {
                 index: rules.len() as u32 + 1,
                 to_port: r.local_port.clone(),
                 protocol: protocol.to_string(),
-                action: if r.action.eq_ignore_ascii_case("allow") { "ALLOW" } else { "DENY" }.to_string(),
+                action: if allow { "ALLOW" } else { "DENY" }.to_string(),
                 from_source,
                 v6,
                 comment: r.group.clone(),
                 raw_spec: r.display_name.clone(),
-                effective: !r.scoped && applies(&r.profile) && program_owns(r, protocol),
+                effective: !r.scoped && applies(&r.profile, !allow) && program_owns(r, protocol),
             };
             if r.local_port.trim().eq_ignore_ascii_case("any") {
                 unlisted_blocks.push(item);
@@ -1241,6 +1244,16 @@ mod tests {
         assert!(s.starts_with("$sshIp = '10.0.0.9'\n"), "{s}");
         assert!(s.contains("Get-NetIPAddress -IPAddress $sshIp") && s.contains("Get-NetConnectionProfile -InterfaceIndex") && s.contains("sshProfile = $sshProfile"));
         assert!(windows_firewall_read_script("10.0.0.9'; calc").starts_with("$sshIp = ''\n"));
+    }
+
+    // SSH profile unknown: a Public-only block covering me may sit on the SSH NIC, so it must refuse enabling (allows stay Any-only).
+    #[test]
+    fn windows_unknown_ssh_profile_counts_blocks_of_every_profile() {
+        let blk = r#",{"displayName":"pub block","group":"tmp","program":"Any","profile":"Public","action":"Block","localPort":"Any","protocol":"Any","remoteAddress":"10.0.0.0/255.255.255.0"}"#;
+        let snap = parse_windows_firewall(&FW_OFF.replace(r#","sshProfile":"Private""#, "").replace("EXTRA", blk)).unwrap();
+        assert_eq!(build_windows_set_state(&admin_ctx(), &snap, true), Err("LOCKOUT_BLOCKED: windows_block_covers_me".to_string()));
+        assert!(snap.rules.iter().all(|r| !r.effective), "the Private-only allow still does not count");
+        assert!(build_windows_set_state(&admin_ctx(), &fw_off(blk), true).is_ok(), "known Private SSH NIC: the Public block is elsewhere");
     }
 
     // Arming the 60s rollback before restarting sshd is what makes a bad config recoverable.

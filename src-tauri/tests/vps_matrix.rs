@@ -9,6 +9,8 @@
 //! `sshbox-std` a standard account accepting the same key; W8-W11 (sshd writes) run only when
 //! WINDOWS_SSH_WRITE_VERIFIED is true; W7 reboots the VM (Restart-Computer) unless MX_NO_REBOOT is set.
 //! W13 adds a temporary port-less block for 192.168.65.0/24 (raw admin PowerShell, not the app) while the firewall is off.
+//! W14-W16 do the same with an ICMPv4 block, a 192.168.65.1-192.168.65.10 block and AllowInboundRules False on Private;
+//! a SYSTEM task undoes each after 120s in case an enable that should be refused goes through.
 //! Run (MX_DISTRO = ubuntu | debian | rocky; MX_ONLY=S1,S5 runs a subset):
 //!   MX_VM=u24 MX_IP=<lima0 address> MX_USER=$USER MX_KEY=$HOME/.lima/_config/user MX_DISTRO=ubuntu \
 //!   env -u SSH_AUTH_SOCK cargo test --manifest-path src-tauri/Cargo.toml --test vps_matrix -- --ignored --nocapture
@@ -584,6 +586,75 @@ Register-ScheduledTask -TaskName '{TMP}' -Action $a -Trigger (New-ScheduledTaskT
     Ok(format!("block seen unlisted {hidden:?}; enable -> windows_block_covers_me, SSH kept, firewall stayed off; rule removed; enable ok, SSH ok, auto-added {auto:?}"))
 }
 
+// A temporary firewall change (raw admin PowerShell) plus a SYSTEM task that undoes it after 120s, should SSH be cut.
+async fn win_temp(pool: &SshPool, h: &HostEntry, tag: &str, setup: &str, undo: &str) -> Result<(), String> {
+    let added = ps(pool, h, &format!("{setup}
+$a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument \"-NoProfile -Command {undo}\"
+Register-ScheduledTask -TaskName '{tag}' -Action $a -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(120)) -User SYSTEM -RunLevel Highest -Force | Out-Null
+'ADDED'")).await;
+    ensure(added.ends_with("ADDED"), format!("{tag} setup: {added}"))
+}
+
+async fn win_temp_undo(pool: &SshPool, h: &HostEntry, tag: &str, undo: &str) -> Result<(), String> {
+    let out = ps(pool, h, &format!("{undo}; Unregister-ScheduledTask -TaskName '{tag}' -Confirm:$false -ErrorAction SilentlyContinue; 'LEFT:' + @(Get-ScheduledTask -TaskName '{tag}' -ErrorAction SilentlyContinue).Count")).await;
+    ensure(out.ends_with("LEFT:0"), format!("{tag} cleanup: {out}"))
+}
+
+// R1: an ICMP block never touches SSH, so enabling with one saved must work and port 22 must still read exposed.
+async fn w14_icmp_block_does_not_refuse(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    const TMP: &str = "sshbox-w14-temp";
+    let undo = format!("Remove-NetFirewallRule -Group '{TMP}' -ErrorAction SilentlyContinue");
+    ensure(!set_firewall_state(&h.id, pool, None, false).await?.enabled, "still enabled after disable".into())?;
+    win_temp(pool, h, TMP, &format!("New-NetFirewallRule -DisplayName 'Block ICMPv4 from Any' -Group '{TMP}' -Direction Inbound -Action Block -Protocol ICMPv4 -RemoteAddress Any | Out-Null"), &undo).await?;
+    let checked = async {
+        let on = set_firewall_state(&h.id, pool, None, true).await?;
+        ensure(on.enabled, "not enabled with the ICMP block".into())?;
+        ssh_works(h, "enable with the ICMP block").await?;
+        ensure(!on.unlisted_blocks.iter().any(|r| r.raw_spec == "Block ICMPv4 from Any"), "ICMP block read as a TCP block".into())?;
+        let s22: Vec<_> = on.listening_sockets.iter().filter(|s| s.port == 22 && s.protocol == "tcp" && s.is_public).map(|s| format!("{} {}", s.bind_addr, s.exposure)).collect();
+        ensure(!s22.is_empty() && s22.iter().all(|e| e.ends_with(" exposed")), format!("port 22: {s22:?}"))?;
+        Ok::<_, String>(s22)
+    }
+    .await;
+    let cleaned = win_temp_undo(pool, h, TMP, &undo).await;
+    let s22 = checked?;
+    cleaned?;
+    Ok(format!("ICMP block saved; enable ok, SSH ok, ICMP rule not among blocks, port 22 {s22:?}; rule removed"))
+}
+
+// R2/R5: with the firewall off, a temporary change makes enabling cut SSH; enabling must be refused with `reason`,
+// SSH must keep working and the firewall must stay off; after the undo enabling works again.
+async fn win_enable_refused(pool: &SshPool, h: &HostEntry, tag: &str, setup: &str, undo: &str, reason: &str) -> Result<String, String> {
+    ensure(!set_firewall_state(&h.id, pool, None, false).await?.enabled, "still enabled after disable".into())?;
+    win_temp(pool, h, tag, setup, undo).await?;
+    let checked = async {
+        let on = set_firewall_state(&h.id, pool, None, true).await;
+        ensure(on == Err(format!("LOCKOUT_BLOCKED: {reason}")), format!("enable: {:?}", on.map(|s| s.enabled)))?;
+        ssh_works(h, "refused enable").await?;
+        ensure(!get_firewall_snapshot(&h.id, pool, None).await?.enabled, "firewall on after the refused enable".into())
+    }
+    .await;
+    let cleaned = win_temp_undo(pool, h, tag, undo).await;
+    checked?;
+    cleaned?;
+    let on = set_firewall_state(&h.id, pool, None, true).await?;
+    ensure(on.enabled, "not enabled after the undo".into())?;
+    ssh_works(h, "enable after the undo").await?;
+    Ok(format!("enable -> {reason}, SSH kept, firewall stayed off; undone; enable ok, SSH ok"))
+}
+
+async fn w15_range_block_refuses(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    const TMP: &str = "sshbox-w15-temp";
+    let setup = format!("New-NetFirewallRule -DisplayName '{TMP}' -Group '{TMP}' -Direction Inbound -Action Block -RemoteAddress 192.168.65.1-192.168.65.10 -Protocol Any | Out-Null");
+    win_enable_refused(pool, h, TMP, &setup, &format!("Remove-NetFirewallRule -Group '{TMP}' -ErrorAction SilentlyContinue"), "windows_block_covers_me").await
+}
+
+async fn w16_inbound_allows_off_refuses(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    const TMP: &str = "sshbox-w16-temp";
+    let undo = "Set-NetFirewallProfile -Profile Private -AllowInboundRules NotConfigured";
+    win_enable_refused(pool, h, TMP, "Set-NetFirewallProfile -Profile Private -AllowInboundRules False", undo, "windows_inbound_allows_off").await
+}
+
 async fn win_apply_finish(pool: &SshPool, h: &HostEntry, desired: SshdSettings) -> Result<SshdView, String> {
     let s = apply_sshd_settings(&h.id, pool, None, desired).await?;
     let armed = win_leftovers(pool, h).await;
@@ -732,6 +803,9 @@ fn run_windows(only: &str) {
         // W7 reboots the VM: start over with a fresh session.
         let pool = win_ready_pool(&h).await.expect("reconnect");
         run!("W13 enable refused by port-less block", w13_enable_refused_by_port_less_block(&pool, &h));
+        run!("W14 ICMP block does not refuse enable", w14_icmp_block_does_not_refuse(&pool, &h));
+        run!("W15 range block refuses enable", w15_range_block_refuses(&pool, &h));
+        run!("W16 AllowInboundRules False refuses enable", w16_inbound_allows_off_refuses(&pool, &h));
         if WINDOWS_SSH_WRITE_VERIFIED {
             run!("W8 MaxAuthTries change kept", w8_max_auth_tries(&pool, &h));
             run!("W9 password off/on (coupled)", w9_password_off_on(&pool, &h));

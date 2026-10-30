@@ -1,7 +1,7 @@
 use crate::host_store::HostEntry;
 use crate::ssh_pool::{AuthUsed, SshPool};
 use crate::vps_config::{
-    classify_privileged_output, find_remote_host, parse_authorized_key_line, parse_ssh_connection, parse_sshd_view,
+    classify_privileged_output, find_remote_host, parse_authorized_key_line, parse_ssh_connection, parse_sshd_view, rule_port_matches,
     compute_socket_exposure_windows, is_anywhere_source, is_public_bind_address, vps_err, AccessKeysSnapshot,
     ConnectionContext, FirewallEngine, FirewallRuleItem, FirewallSnapshot, LinuxAccountItem, ListeningSocketItem,
     PrivilegeLevel, SshdView, VpsProbe, WriteTarget, ERR_COMMAND_FAILED, ERR_UNSUPPORTED, SSHD_PART,
@@ -366,8 +366,8 @@ $ifs = @{}; Get-NetFirewallInterfaceTypeFilter -All | ForEach-Object { $ifs[$_.I
 $rules = @(Get-NetFirewallRule -Direction Inbound -Enabled True | ForEach-Object {
   $p = $ports[$_.InstanceID]; $a = $addrs[$_.InstanceID]
   if ($p -and $a -and (@($p.LocalPort) -join ',') -ne 'Any') {
-    $scoped = ([string]$apps[$_.InstanceID].Program -ne 'Any') -or ([string]$svcs[$_.InstanceID].Service -ne 'Any') -or ((@($a.LocalAddress) -join ',') -ne 'Any') -or ([string]$ifs[$_.InstanceID].InterfaceType -ne 'Any')
-    [ordered]@{ displayName = [string]$_.DisplayName; group = [string]$_.Group; profile = [string]$_.Profile; scoped = [bool]$scoped; action = [string]$_.Action; localPort = (@($p.LocalPort) -join ','); protocol = [string]$p.Protocol; remoteAddress = (@($a.RemoteAddress) -join ',') }
+    $scoped = ([string]$svcs[$_.InstanceID].Service -ne 'Any') -or ((@($a.LocalAddress) -join ',') -ne 'Any') -or ([string]$ifs[$_.InstanceID].InterfaceType -ne 'Any')
+    [ordered]@{ displayName = [string]$_.DisplayName; group = [string]$_.Group; profile = [string]$_.Profile; program = [string]$apps[$_.InstanceID].Program; scoped = [bool]$scoped; action = [string]$_.Action; localPort = (@($p.LocalPort) -join ','); protocol = [string]$p.Protocol; remoteAddress = (@($a.RemoteAddress) -join ',') }
   }
 })
 $names = @{}; Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $names[[int]$_.Id] = $_.ProcessName }
@@ -399,7 +399,10 @@ struct WinRule {
     group: String,
     #[serde(default)]
     profile: String,
-    // Program, service, local-address or interface-type scoped: not a plain port rule.
+    // "Any" or the program path the rule is limited to.
+    #[serde(default)]
+    program: String,
+    // Service, local-address or interface-type scoped: not a plain port rule.
     #[serde(default)]
     scoped: bool,
     action: String,
@@ -455,6 +458,17 @@ pub fn parse_windows_firewall(json: &str) -> Result<FirewallSnapshot, String> {
             || p.eq_ignore_ascii_case("any")
             || p.split(',').any(|x| w.active.iter().any(|a| a.eq_ignore_ascii_case(x.trim())))
     };
+    // A program-scoped rule (the stock OpenSSH one is limited to sshd.exe) applies only while that program owns every socket on its port.
+    let program_owns = |r: &WinRule, protocol: &str| {
+        let p = r.program.trim();
+        if p.is_empty() || p.eq_ignore_ascii_case("any") {
+            return true;
+        }
+        let exe = p.rsplit(['\\', '/']).next().unwrap_or(p).to_ascii_lowercase();
+        let stem = exe.strip_suffix(".exe").unwrap_or(&exe);
+        let mut on_port = w.sockets.iter().filter(|s| rule_port_matches(&r.local_port, protocol, s.port, &s.protocol)).peekable();
+        on_port.peek().is_some() && on_port.all(|s| s.process.eq_ignore_ascii_case(stem))
+    };
     // Every rule is listed; only plain port rules of an active profile take part in the exposure, the rest leave the port "unknown".
     let mut rules = Vec::new();
     for r in &w.rules {
@@ -485,7 +499,7 @@ pub fn parse_windows_firewall(json: &str) -> Result<FirewallSnapshot, String> {
                 v6,
                 comment: r.group.clone(),
                 raw_spec: r.display_name.clone(),
-                effective: !r.scoped && applies(&r.profile),
+                effective: !r.scoped && applies(&r.profile) && program_owns(r, protocol),
             };
             rules.push(item);
         }
@@ -897,7 +911,24 @@ mod tests {
         let j = FW.replace(r#""displayName":"OpenSSH-Server-In-TCP""#, r#""displayName":"OpenSSH-Server-In-TCP","scoped":true"#).replace(r#""action":"Allow""#, r#""action":"Block""#);
         let s = parse_windows_firewall(&j).unwrap();
         assert_eq!(s.listening_sockets[0].exposure, "unknown");
+        let other = j.replace(r#","scoped":true"#, r#","program":"C:\\tools\\other.exe""#);
+        assert_eq!(parse_windows_firewall(&other).unwrap().listening_sockets[0].exposure, "unknown");
         assert!(s.rules.iter().any(|r| r.raw_spec == "OpenSSH-Server-In-TCP"));
+    }
+
+    // The stock "OpenSSH SSH Server (sshd)" rule is scoped to sshd.exe: it carries SSH while sshd owns the port.
+    // Ignoring it showed port 22 "unknown" and made enabling add an allow for every profile (Public included).
+    #[test]
+    fn windows_program_rule_counts_when_its_program_owns_the_port() {
+        let j = FW.replace(r#""displayName":"OpenSSH-Server-In-TCP""#, r#""displayName":"OpenSSH-Server-In-TCP","program":"%SystemRoot%\\system32\\OpenSSH\\sshd.exe""#);
+        let s = parse_windows_firewall(&j).unwrap();
+        assert!(s.rules.iter().filter(|r| r.raw_spec == "OpenSSH-Server-In-TCP").all(|r| r.effective));
+        assert_eq!(s.listening_sockets[0].exposure, "exposed");
+        let ctx = parse_windows_probe(&raw("1", "admin", CONN), key_auth()).unwrap().context;
+        assert_eq!(windows_ensure_port(&ctx, &s.rules), None);
+        let s = parse_windows_firewall(&j.replace(r#""process":"sshd""#, r#""process":"nginx""#)).unwrap();
+        assert!(s.rules.iter().filter(|r| r.raw_spec == "OpenSSH-Server-In-TCP").all(|r| !r.effective));
+        assert_eq!(s.listening_sockets[0].exposure, "unknown");
     }
 
     // Mỗi địa chỉ nguồn phải thành mục riêng đúng họ v4/v6, nếu không guard khoá không thấy allow của máy khách IPv6.

@@ -120,6 +120,7 @@ export const AccessKeysStudio: React.FC<VpsStudioProps & { sshKeys: SshKeyItem[]
       </SettingGroup>
       )}
 
+      <fieldset disabled={readOnly} className="space-y-5 min-w-0">
       {res.data.accounts.map((a) => {
         const isRoot = a.username === "root";
         const current = sudoModeOf(a);
@@ -166,7 +167,7 @@ export const AccessKeysStudio: React.FC<VpsStudioProps & { sshKeys: SshKeyItem[]
                     <button type="button" className={buttonClass} onClick={() => act("vps_set_user_lock", { username: a.username, lock: false })}>
                       {t.vpsUsersUnlock}
                     </button>
-                  ) : !readOnly && (
+                  ) : (
                     <ConfirmButton
                       label={t.vpsUsersLock}
                       confirmLabel={t.vpsUsersLockConfirm}
@@ -182,7 +183,7 @@ export const AccessKeysStudio: React.FC<VpsStudioProps & { sshKeys: SshKeyItem[]
               <SettingRow key={k.rawLine} label={k.comment || k.shortPreview} directive={`${k.keyType} ${k.shortPreview}`}>
                 <div className="flex items-center gap-2">
                   {appKey === k.publicKeyBody && a.username === ctx.loginUser && <StatusBadge tone="ok">{t.vpsUsersKeyInUse}</StatusBadge>}
-                  {!isRoot && !readOnly && (
+                  {!isRoot && (
                     <ConfirmButton
                       label={t.vpsUsersRevoke}
                       confirmLabel={t.vpsUsersRevokeConfirm}
@@ -225,6 +226,7 @@ export const AccessKeysStudio: React.FC<VpsStudioProps & { sshKeys: SshKeyItem[]
           </SettingGroup>
         );
       })}
+      </fieldset>
 
       <ChangePreviewDialog
         t={t}

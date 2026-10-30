@@ -106,7 +106,7 @@ Windows mà tài khoản đăng nhập không có quyền quản trị: mọi ta
 
 ### 5.1. Nhận diện hệ máy
 - **Lệnh đầu tiên gửi sang máy phải vô hại** trên cả `sh`, `cmd.exe` và PowerShell. Lý do: SSH vào Windows thì shell mặc định là `cmd` hoặc PowerShell, nên `PROBE_SCRIPT` hiện tại (viết cho `sh`) không được phép chạy thẳng trên đó. Gợi ý: gửi riêng `uname -s` trước. Trên `sh` lệnh trả `Linux` / `Darwin`; trên `cmd` và PowerShell lệnh chỉ báo "không có lệnh này".
-- `Linux` thì chạy probe Linux như cũ. `Darwin` thì chạy probe Unix có nhánh cho macOS: `OS_ID=macos`, phiên bản lấy từ `sw_vers -productVersion`. Không trả lời được thì chạy probe Windows qua bộ chạy lệnh §5.2. Kết quả khác (ví dụ `MINGW64_NT…`, `CYGWIN_NT…`) thì báo `UNSUPPORTED`.
+- `Linux` thì chạy probe Linux như cũ. `Darwin` thì chạy probe Unix có nhánh cho macOS: `OS_ID=macos`, phiên bản lấy từ `sw_vers -productVersion`. Mọi kết quả khác, kể cả lỗi "không có lệnh này" và `MINGW64_NT…` / `CYGWIN_NT…` / `MSYS…`, đều chuyển sang chạy probe Windows qua bộ chạy lệnh §5.2. Lý do: máy Windows có cài Git for Windows trong PATH vẫn trả `MINGW64_NT…` cho lệnh `uname -s`, dù shell là `cmd`. Probe Windows không nhận ra máy thì mới báo `UNSUPPORTED` *(sửa khi viết plan)*.
 - `VpsProbe` có thêm `os_family: linux | macos | windows` và bảng mức hỗ trợ (§3). `parse_probe_output` thôi từ chối mọi máy không phải Linux.
 - Nhánh Linux giữ nguyên các trường `ConnectionContext`. macOS và Windows cũng phải điền đủ các trường này (xem §8 về `SSH_CONNECTION` trên Windows).
 
@@ -167,7 +167,7 @@ Windows mà tài khoản đăng nhập không có quyền quản trị: mọi ta
 
 ### 7.1. Unit test Rust (`cargo test`)
 Mỗi test có một câu nói rõ nó bảo vệ điều gì, và phải được chạy một lần trên code chưa sửa để thấy nó bắt được lỗi (giống spec gốc §6.1).
-- Đọc kết quả probe của macOS và Windows; `MINGW…` / `CYGWIN…` ra `UNSUPPORTED`.
+- Đọc kết quả probe của macOS và Windows. `MINGW…` / `CYGWIN…` chuyển sang probe Windows. Output không có dấu hiệu của Windows thì ra `UNSUPPORTED`.
 - Bảng mức hỗ trợ: mỗi ô của bảng §4 có một test. Mỗi điều kiện ở §3.1 có một test: thiếu điều kiện đó thì ô tương ứng về Chỉ xem. Thêm một test chứng minh bảng của Linux cho ra đúng hành vi hiện tại (§3.2).
 - Bộ chạy lệnh Windows: bí mật không bao giờ xuất hiện trong dòng lệnh; script có `'`, `"`, `$`, `` ` ``, ký tự Unicode tiếng Việt vẫn tới nguyên vẹn sau khi mã hoá.
 - Chèn directive vào `sshd_config` của Windows: nằm trước `Match` đầu tiên, giữ CRLF nếu file dùng CRLF.

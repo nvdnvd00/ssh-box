@@ -512,10 +512,12 @@ pub fn parse_windows_firewall(json: &str) -> Result<FirewallSnapshot, String> {
     // Every port rule is listed; only plain port rules of the SSH profile take part in the exposure, the rest leave the port "unknown".
     let (mut rules, mut unlisted_blocks) = (Vec::new(), Vec::new());
     for r in &w.rules {
+        // ICMPv4/ICMPv6/protocol-number rules (only port-less blocks reach here) never touch a TCP/UDP port: skip them.
         let protocol = match r.protocol.to_ascii_lowercase().as_str() {
             "tcp" => "tcp",
             "udp" => "udp",
-            _ => "any",
+            "any" => "any",
+            _ => continue,
         };
         // One item per address (as firewalld twins) so the lockout guard sees single addresses/CIDRs and the right family.
         let mut sources: Vec<(String, bool)> = Vec::new();
@@ -1201,6 +1203,16 @@ mod tests {
         assert!(!snap.rules.iter().any(|r| r.raw_spec == "block subnet"));
         assert_eq!(build_windows_delete(&admin_ctx(), &snap, "ssh-box: ALLOW 22/tcp from any"), Err("LOCKOUT_BLOCKED: only_ssh_rule".to_string()));
         assert!(build_windows_delete(&admin_ctx(), &fw_off(MY_ALLOW), "ssh-box: ALLOW 22/tcp from any").is_ok());
+    }
+
+    // An ICMP (or protocol-number) block never touches TCP: read as "any protocol" it refused enabling, showed SSH "blocked" and refused deletes.
+    #[test]
+    fn windows_icmp_block_does_not_count_for_ssh() {
+        let icmp = r#",{"displayName":"Block ICMPv4 from Any","group":"tmp","program":"Any","profile":"Any","action":"Block","localPort":"Any","protocol":"ICMPv4","remoteAddress":"Any"},{"displayName":"gre","group":"tmp","program":"Any","profile":"Any","action":"Block","localPort":"Any","protocol":"47","remoteAddress":"Any"}"#;
+        assert!(build_windows_set_state(&admin_ctx(), &fw_off(icmp), true).unwrap().contains("-Enabled True"));
+        let on = parse_windows_firewall(&FW_OFF.replace(r#""enabled":false"#, r#""enabled":true"#).replace("EXTRA", icmp)).unwrap();
+        assert_eq!(on.listening_sockets[0].exposure, "exposed");
+        assert!(build_windows_delete(&admin_ctx(), &fw_off(&format!("{MY_ALLOW}{icmp}")), "ssh-box: ALLOW 22/tcp from any").is_ok());
     }
 
     // Multi-NIC host: SSH arrives on a Public NIC while another NIC is Private. The Private-only stock rule does not carry

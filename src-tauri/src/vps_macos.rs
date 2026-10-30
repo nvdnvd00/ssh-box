@@ -37,10 +37,10 @@ if ! sshd -t 2>&1; then sshbox_restore; echo SSHBOX_SSHD_INVALID; exit 1; fi
 cat > "$R" << 'SSHBOX_ROLLBACK_EOF'
 {rollback}SSHBOX_ROLLBACK_EOF
 chmod 700 "$R"
+trap 'rc=$?; [ "$rc" -eq 0 ] || /bin/sh "$R"; exit "$rc"' EXIT
 cat > "$PL" << 'SSHBOX_PLIST_EOF'
 {plist}SSHBOX_PLIST_EOF
 chmod 644 "$PL"
-trap 'rc=$?; [ "$rc" -eq 0 ] || /bin/sh "$R"; exit "$rc"' EXIT
 launchctl bootstrap system "$PL"
 echo "NOW:$(date +%s)"
 echo "ROLLBACK_AT:$(( $(date +%s) + 60 ))"

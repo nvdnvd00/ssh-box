@@ -83,11 +83,11 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
   const changes: PendingChange[] = useMemo(() => {
     if (!current || !draft) return [];
     return (Object.keys(labels) as (keyof SshdSettings)[])
-      .filter((k) => k !== "kbdInteractiveAuthentication")
-      .map((k) => (k === "passwordAuthentication" ? { k, from: passwordOn(current), to: passwordOn(draft) } : { k, from: current[k], to: draft[k] }))
+      .map((k) => ({ k, from: current[k], to: draft[k] }))
+      .filter((c) => c.k !== "kbdInteractiveAuthentication" || passwordCoupled)
       .filter((c) => show(c.k, c.from) !== show(c.k, c.to))
-      .map((c) => ({ label: labels[c.k], from: show(c.k, c.from), to: show(c.k, c.to) }));
-  }, [current, draft, t]);
+      .map((c) => ({ label: c.k === "kbdInteractiveAuthentication" ? "KbdInteractiveAuthentication" : labels[c.k], from: show(c.k, c.from), to: show(c.k, c.to) }));
+  }, [current, draft, t, passwordCoupled]);
   const valid =
     !!draft &&
     Number.isInteger(draft.port) && draft.port >= 1 && draft.port <= 65535 &&

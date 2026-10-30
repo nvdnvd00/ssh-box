@@ -140,9 +140,9 @@ mod tests {
         assert_eq!(compute_support(&linux(true, "firewalld")).firewall.level, SupportLevel::Full);
     }
 
-    // Until later tasks add real probes, a non-Linux host must not expose any write path.
+    // Until a later task adds a real probe, a Windows host must not expose any write path.
     #[test]
-    fn macos_and_windows_start_hidden() {
+    fn windows_starts_hidden() {
         let mut p = linux(true, "ufw");
         p.os_family = OsFamily::Windows;
         let s = compute_support(&p);

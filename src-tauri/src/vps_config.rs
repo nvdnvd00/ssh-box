@@ -2860,18 +2860,23 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
     // Runs the macOS apply script locally with fake sshd/launchctl; `launchctl print` exits FAKE_PENDING (default 1).
     #[cfg(unix)]
     fn run_mac_apply(existing: Option<&str>, envs: &[(&str, &str)]) -> MacRun {
+        run_mac_apply_at("rb.plist", existing, envs)
+    }
+
+    #[cfg(unix)]
+    fn run_mac_apply_at(plist_rel: &str, existing: Option<&str>, envs: &[(&str, &str)]) -> MacRun {
         let dir = shell::temp_dir();
         let bin = dir.join("bin");
         let log = dir.join("calls.log");
         shell::fake_bin(&bin, "sshd", r#"echo "sshd $*" >> "$FAKE_LOG"; [ "$1" = "-t" ] && exit "${FAKE_SSHD_T:-0}"; exit 0"#);
-        shell::fake_bin(&bin, "launchctl", r#"[ "$1" = print ] && exit "${FAKE_PENDING:-1}"; echo "launchctl $*" >> "$FAKE_LOG"; exit 0"#);
+        shell::fake_bin(&bin, "launchctl", r#"[ "$1" = print ] && exit "${FAKE_PENDING:-1}"; echo "launchctl $*" >> "$FAKE_LOG"; [ "$1" = bootstrap ] && exit "${FAKE_BOOTSTRAP:-0}"; exit 0"#);
         let file = dir.join("00-sshbox.conf");
         if let Some(c) = existing {
             std::fs::write(&file, c).unwrap();
         }
         let secret = dir.join("secret");
         std::fs::write(&secret, "PasswordAuthentication no\n").unwrap();
-        let (plist, rollback) = (dir.join("rb.plist"), dir.join("sshbox-rollback.sh"));
+        let (plist, rollback) = (dir.join(plist_rel), dir.join("sshbox-rollback.sh"));
         let script = crate::vps_macos::build_sshd_apply_script_macos(
             file.to_str().unwrap(), rollback.to_str().unwrap(), plist.to_str().unwrap());
         let mut all = vec![("FAKE_LOG", log.to_str().unwrap()), ("SSHBOX_SECRET_FILE", secret.to_str().unwrap())];
@@ -2902,6 +2907,19 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         assert!(r.out.contains("SSHBOX_SSHD_INVALID"), "{}", r.out);
         assert_eq!(std::fs::read_to_string(&r.file).unwrap(), "Port 22\n");
         assert!(!r.log.contains("launchctl"), "{}", r.log);
+    }
+
+    // If the timer cannot be armed (plist unwritable or bootstrap fails), the new config must not stay.
+    #[cfg(unix)]
+    #[test]
+    fn macos_apply_restores_when_timer_cannot_be_armed() {
+        let cases = [("no-such-dir/rb.plist", "0"), ("rb.plist", "1")];
+        for (plist, bootstrap) in cases {
+            let r = run_mac_apply_at(plist, Some("Port 22\n"), &[("FAKE_BOOTSTRAP", bootstrap)]);
+            assert_eq!(std::fs::read_to_string(&r.file).unwrap(), "Port 22\n", "{plist}: {}", r.out);
+            assert!(!r.plist.exists() && !r.rollback.exists(), "{plist}");
+            assert!(!r.out.contains("ROLLBACK_AT:"), "{plist}: {}", r.out);
+        }
     }
 
     // Rolling back must restore the file and leave no plist that would re-fire at the next boot.

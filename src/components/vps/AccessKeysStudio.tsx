@@ -194,6 +194,7 @@ export const AccessKeysStudio: React.FC<VpsStudioProps & { sshKeys: SshKeyItem[]
                 </div>
               </SettingRow>
             ))}
+            {a.keysFile && <p className="px-4 py-2 font-mono text-xs text-muted-foreground">{a.keysFile}</p>}
             {!isRoot && (
               <SettingRow label={t.vpsUsersGrant} description={sshKeys.length === 0 ? t.vpsUsersNoLocalKeys : undefined}>
                 {sshKeys.length > 0 && (

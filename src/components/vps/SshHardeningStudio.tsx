@@ -23,8 +23,10 @@ const NUMBER_FIELDS = ["maxAuthTries", "maxSessions", "loginGraceTime", "clientA
 
 export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host, onSaveHost }) => {
   const { t, hostId } = vps;
-  const res = useVpsResource<SshdView>(vps, (pw) =>
-    invoke<SshdView>("vps_get_sshd_settings", { hostId, sudoPassword: pw ?? null }),
+  // Non-admin Windows cannot read sshd -T: the backend refuses, and the notice below already says why.
+  const skipRead = probe.support.ssh.reason === "windows_not_admin";
+  const res = useVpsResource<SshdView | null>(vps, (pw) =>
+    skipRead ? Promise.resolve(null) : invoke<SshdView>("vps_get_sshd_settings", { hostId, sudoPassword: pw ?? null }),
   );
   const current = res.data?.settings ?? null;
   const [draft, setDraft] = useState<SshdSettings | null>(null);
@@ -143,6 +145,7 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
   };
 
   if (res.loading && !res.data) return <p className="text-sm text-muted-foreground">{t.vpsCommonLoading}</p>;
+  if (skipRead) return <Notice tone="warn">{t.vpsUnsupportedReasons[ssh.reason!] ?? ssh.reason}</Notice>;
   if (!draft || !current) return res.error ? <Notice tone="danger">{res.error}</Notice> : null;
 
   const checks = [

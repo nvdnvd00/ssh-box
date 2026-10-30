@@ -189,6 +189,9 @@ pub struct LinuxAccountItem {
     pub has_sudo: bool,
     pub nopasswd_sudo: bool,
     pub authorized_keys: Vec<RemoteAuthorizedKey>,
+    // Windows only: the file the keys were read from; empty elsewhere.
+    #[serde(default)]
+    pub keys_file: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -1510,7 +1513,7 @@ fn stop_rollback_timer_cmd(os: OsFamily) -> String {
     }
 }
 
-const SSHD_PART: &str = "---SSHBOX-PART---";
+pub(crate) const SSHD_PART: &str = "---SSHBOX-PART---";
 
 pub fn parse_sshd_view(raw: &str) -> Result<SshdView, String> {
     let parts: Vec<&str> = raw.split(SSHD_PART).collect();
@@ -1537,6 +1540,9 @@ pub async fn get_sshd_view(
 ) -> Result<SshdView, String> {
     let probe = probe(host_id, pool, sudo_password.clone()).await?;
     let c = &probe.context;
+    if probe.os_family == OsFamily::Windows {
+        return crate::vps_windows::get_windows_sshd_view(host_id, pool, &probe).await;
+    }
     // -C applies Match blocks for this exact connection, so the result is what the app gets.
     let spec = format!(
         "user={},host={},addr={},laddr={},lport={}",
@@ -1929,6 +1935,7 @@ fn default_linux_account() -> LinuxAccountItem {
         has_sudo: false,
         nopasswd_sudo: false,
         authorized_keys: Vec::new(),
+        keys_file: String::new(),
     }
 }
 
@@ -2119,6 +2126,9 @@ pub async fn get_access_keys_snapshot(
     sudo_password: Option<String>,
 ) -> Result<AccessKeysSnapshot, String> {
     let os = probe(host_id, pool, sudo_password.clone()).await?.os_family;
+    if os == OsFamily::Windows {
+        return crate::vps_windows::get_windows_accounts(host_id, pool).await;
+    }
     let script = if os == OsFamily::Macos { crate::vps_macos::MACOS_ACCOUNTS_READ_SCRIPT } else { ACCOUNTS_READ_SCRIPT };
     let raw = run_privileged_script(host_id, pool, sudo_password, script, None).await?;
     Ok(parse_access_keys_snapshot(&raw))

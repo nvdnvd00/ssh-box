@@ -1,11 +1,13 @@
 use crate::host_store::HostEntry;
 use crate::ssh_pool::{AuthUsed, SshPool};
 use crate::vps_config::{
-    classify_privileged_output, find_remote_host, parse_ssh_connection, vps_err, ConnectionContext,
-    FirewallEngine, PrivilegeLevel, VpsProbe, ERR_COMMAND_FAILED, ERR_UNSUPPORTED,
+    classify_privileged_output, find_remote_host, parse_authorized_key_line, parse_ssh_connection, parse_sshd_view,
+    vps_err, AccessKeysSnapshot, ConnectionContext, FirewallEngine, LinuxAccountItem, PrivilegeLevel, SshdView,
+    VpsProbe, WriteTarget, ERR_COMMAND_FAILED, ERR_UNSUPPORTED, SSHD_PART,
 };
 use crate::vps_support::{compute_support, OsCaps, OsFamily, VpsSupport};
 use base64::Engine;
+use serde::Deserialize;
 
 // Fixed and short: cmd.exe caps a command line at 8191 chars, so the real script travels on stdin.
 pub const PS_BOOTSTRAP: &str = r#"$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'
@@ -98,6 +100,112 @@ pub fn parse_windows_probe(raw: &str, auth: AuthUsed) -> Result<VpsProbe, String
     };
     probe.support = compute_support(&probe);
     Ok(probe)
+}
+
+pub const WINDOWS_SSHD_CONFIG: &str = r"C:\ProgramData\ssh\sshd_config";
+const SSHD_EXE: &str = r#""$env:WINDIR\System32\OpenSSH\sshd.exe""#;
+
+// PS 5.1 does not throw when a native command fails, so $LASTEXITCODE is checked and thrown by hand.
+pub fn windows_sshd_view_script(spec: &str) -> String {
+    format!(
+        r#"$t = & {SSHD_EXE} -T -C {spec}
+if ($LASTEXITCODE -ne 0) {{ throw "sshd -T failed with exit code $LASTEXITCODE" }}
+$t
+'{SSHD_PART}'
+Get-Content -Raw -LiteralPath '{WINDOWS_SSHD_CONFIG}'
+'{SSHD_PART}'
+'{SSHD_PART}'
+if ((Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) -and (Get-ScheduledTask -TaskName sshbox-rollback -ErrorAction SilentlyContinue)) {{ 'active' }} else {{ 'inactive' }}
+"#,
+        spec = ps_quote(spec)
+    )
+}
+
+// sshd -T needs the host keys, which only an administrator can read: refuse before running anything.
+fn check_windows_readable(p: &VpsProbe) -> Result<(), String> {
+    if p.privilege != PrivilegeLevel::Admin {
+        return Err(vps_err(ERR_UNSUPPORTED, "windows_not_admin"));
+    }
+    Ok(())
+}
+
+pub fn parse_windows_sshd_view(raw: &str) -> Result<SshdView, String> {
+    let mut view = parse_sshd_view(&raw.replace("\r\n", "\n"))?;
+    // No drop-in directory is managed on Windows.
+    view.write_target = WriteTarget::MainFile;
+    Ok(view)
+}
+
+pub async fn get_windows_sshd_view(host_id: &str, pool: &SshPool, probe: &VpsProbe) -> Result<SshdView, String> {
+    check_windows_readable(probe)?;
+    let c = &probe.context;
+    let spec = format!("user={},host={},addr={},laddr={},lport={}", c.login_user, c.client_ip, c.client_ip, c.server_ip, c.server_port);
+    parse_windows_sshd_view(&run_windows_script(host_id, pool, &windows_sshd_view_script(&spec), None).await?)
+}
+
+pub const WINDOWS_ACCOUNTS_READ_SCRIPT: &str = r#"$sshd = "$env:WINDIR\System32\OpenSSH\sshd.exe"
+$admins = @(Get-LocalGroupMember -SID S-1-5-32-544 -ErrorAction SilentlyContinue | ForEach-Object { $_.Name.Split('\')[-1] })
+$rows = foreach ($u in Get-LocalUser) {
+  $isAdmin = $admins -contains $u.Name
+  $file = "C:\Users\$($u.Name)\.ssh\authorized_keys"
+  if ($isAdmin) {
+    try {
+      $eff = & $sshd -T -C "user=$($u.Name),host=localhost,addr=127.0.0.1" 2>$null | Where-Object { $_ -match '^authorizedkeysfile ' }
+      if ($eff -match 'administrators_authorized_keys') { $file = 'C:\ProgramData\ssh\administrators_authorized_keys' }
+    } catch { }
+  }
+  $keys = @()
+  try { $keys = @(Get-Content -LiteralPath $file -ErrorAction Stop) } catch { }
+  [ordered]@{ name = $u.Name; enabled = [bool]$u.Enabled; isAdmin = [bool]$isAdmin; keysFile = $file; keys = $keys }
+}
+ConvertTo-Json -InputObject @($rows) -Depth 4 -Compress
+"#;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WinAccount {
+    name: String,
+    enabled: bool,
+    #[serde(default)]
+    is_admin: bool,
+    #[serde(default)]
+    keys_file: String,
+    #[serde(default)]
+    keys: Vec<String>,
+}
+
+pub fn parse_windows_accounts(json: &str) -> Result<AccessKeysSnapshot, String> {
+    let json = json.trim();
+    // PS 5.1 can still unwrap a one-element array into a bare object.
+    let rows: Vec<WinAccount> = if json.is_empty() {
+        Ok(Vec::new())
+    } else if json.starts_with('[') {
+        serde_json::from_str(json)
+    } else {
+        serde_json::from_str(json).map(|a| vec![a])
+    }
+    .map_err(|e| vps_err(ERR_COMMAND_FAILED, format!("cannot read the account list: {e}")))?;
+    let accounts = rows
+        .into_iter()
+        .map(|a| LinuxAccountItem {
+            username: a.name,
+            uid: 0,
+            gid: 0,
+            home_dir: String::new(),
+            shell: String::new(),
+            locked: !a.enabled,
+            groups: if a.is_admin { vec!["Administrators".to_string()] } else { Vec::new() },
+            has_sudo: a.is_admin,
+            nopasswd_sudo: false,
+            authorized_keys: a.keys.iter().enumerate().filter_map(|(i, l)| parse_authorized_key_line(l, i as u32)).collect(),
+            keys_file: a.keys_file,
+        })
+        .collect();
+    Ok(AccessKeysSnapshot { accounts })
+}
+
+pub async fn get_windows_accounts(host_id: &str, pool: &SshPool) -> Result<AccessKeysSnapshot, String> {
+    parse_windows_accounts(&run_windows_script(host_id, pool, WINDOWS_ACCOUNTS_READ_SCRIPT, None).await?)
 }
 
 // The exec fails when the host has no powershell.exe (e.g. cmd.exe: "not recognized"): not a Windows we can manage.
@@ -217,5 +325,66 @@ mod tests {
     #[test]
     fn exec_failure_maps_to_unsupported_os() {
         assert!(exec_failure("exit 1: 'powershell.exe' is not recognized").starts_with("UNSUPPORTED: unsupported_os"));
+    }
+
+    const SSHD_RAW: &str = "port 22\r\npermitrootlogin no\r\n---SSHBOX-PART---\r\nPort 22\r\nMatch Group administrators\r\n       AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys\r\n---SSHBOX-PART---\r\n---SSHBOX-PART---\r\ninactive\r\n";
+
+    // Windows has no drop-in directory, so the write target must always be the main file even if the file looks like Include.
+    #[test]
+    fn windows_sshd_view_parses_and_forces_main_file() {
+        let v = parse_windows_sshd_view(SSHD_RAW).unwrap();
+        assert_eq!(v.settings.port, 22);
+        assert_eq!(v.write_target, WriteTarget::MainFile);
+        assert!(!v.rollback_pending && v.main_raw.contains("Match Group administrators"));
+        let inc = SSHD_RAW.replace("Port 22\r\n", "Include sshd_config.d/*.conf\r\n");
+        assert_eq!(parse_windows_sshd_view(&inc).unwrap().write_target, WriteTarget::MainFile);
+    }
+
+    // sshd -T cannot read host keys without admin; running it would only produce a confusing error box.
+    #[test]
+    fn windows_view_non_admin_is_refused_without_running() {
+        let p = parse_windows_probe(&raw("0", "bob", CONN), key_auth()).unwrap();
+        assert_eq!(check_windows_readable(&p).unwrap_err(), "UNSUPPORTED: windows_not_admin");
+        let a = parse_windows_probe(&raw("1", "adm", CONN), key_auth()).unwrap();
+        assert!(check_windows_readable(&a).is_ok());
+    }
+
+    // PS 5.1 ignores native exit codes; without the throw a failed sshd -T would parse as empty settings.
+    #[test]
+    fn windows_view_script_checks_exit_code_and_quotes_spec() {
+        let s = windows_sshd_view_script("user=o'x,host=h");
+        assert!(s.contains("-T -C 'user=o''x,host=h'"));
+        assert!(s.contains("$LASTEXITCODE -ne 0") && s.contains("throw"));
+        assert_eq!(s.matches("---SSHBOX-PART---").count(), 3);
+        assert!(s.contains(WINDOWS_SSHD_CONFIG) && s.contains("sshbox-rollback"));
+    }
+
+    // The accounts script must keep one-element arrays as arrays and survive an unreadable keys file.
+    #[test]
+    fn windows_accounts_script_is_array_safe_and_per_file_guarded() {
+        let s = WINDOWS_ACCOUNTS_READ_SCRIPT;
+        assert!(s.contains("ConvertTo-Json -InputObject @($rows) -Depth 4"));
+        assert!(s.contains("catch { }") && s.contains("administrators_authorized_keys"));
+    }
+
+    const ACC: &str = r#"{"name":"sshbox","enabled":true,"isAdmin":true,"keysFile":"C:\\ProgramData\\ssh\\administrators_authorized_keys","keys":["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHkeyone me@pc"]}"#;
+    const STD: &str = r#"{"name":"sshbox-std","enabled":false,"isAdmin":false,"keysFile":"C:\\Users\\sshbox-std\\.ssh\\authorized_keys","keys":[]}"#;
+
+    // The UI shows Windows admins as sudo, disabled accounts as locked, and where the keys came from.
+    #[test]
+    fn windows_accounts_map_admin_keys_file_and_disabled() {
+        let s = parse_windows_accounts(&format!("[{ACC},{STD}]")).unwrap();
+        let (a, b) = (&s.accounts[0], &s.accounts[1]);
+        assert!(a.has_sudo && !a.locked && a.keys_file.ends_with("administrators_authorized_keys"));
+        assert_eq!((a.authorized_keys.len(), a.groups.clone()), (1, vec!["Administrators".to_string()]));
+        assert!(!b.has_sudo && b.locked && b.authorized_keys.is_empty() && b.keys_file.contains(r"sshbox-std\.ssh"));
+    }
+
+    // PS 5.1 drops the array brackets for a single account; the list must still load.
+    #[test]
+    fn windows_accounts_accept_single_object_json() {
+        assert_eq!(parse_windows_accounts(ACC).unwrap().accounts.len(), 1);
+        assert!(parse_windows_accounts("").unwrap().accounts.is_empty());
+        assert!(parse_windows_accounts("not json").unwrap_err().starts_with("COMMAND_FAILED"));
     }
 }

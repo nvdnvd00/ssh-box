@@ -1,5 +1,5 @@
 // Which Server Config tabs and sshd rows each host OS gets (spec §3). Pure: no I/O.
-use crate::vps_config::{FirewallEngine, SshdSettings, VpsProbe, ERR_UNSUPPORTED};
+use crate::vps_config::{FirewallEngine, PrivilegeLevel, SshdSettings, VpsProbe, ERR_UNSUPPORTED};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -55,6 +55,9 @@ pub struct OsCaps {
     pub has_net_security: bool,
 }
 
+// Flipped only once the Windows write path is verified on a real host (Task 10).
+pub const WINDOWS_SSH_WRITE_VERIFIED: bool = false;
+
 fn tab(level: SupportLevel, reason: Option<&str>) -> TabSupport {
     TabSupport { level, reason: reason.map(str::to_string) }
 }
@@ -81,12 +84,17 @@ pub fn compute_support(p: &VpsProbe) -> VpsSupport {
             access: tab(ReadOnly, Some("read_only_os")),
             password_coupled: true,
         },
-        // Later tasks open these tab by tab.
+        // Later tasks open the firewall tab.
         OsFamily::Windows => VpsSupport {
-            ssh: tab(Hidden, None),
-            ssh_rows: all_rows,
+            ssh: match (p.privilege == PrivilegeLevel::Admin, p.caps.sshd_running) {
+                (false, _) => tab(ReadOnly, Some("windows_not_admin")),
+                (_, false) => tab(ReadOnly, Some("windows_no_sshd")),
+                _ if WINDOWS_SSH_WRITE_VERIFIED && p.caps.has_scheduled_tasks => tab(Full, None),
+                _ => tab(ReadOnly, Some("windows_ssh_read_only")),
+            },
+            ssh_rows: SshRows { permit_root_login: false, allow_deny_users: false, ..all_rows },
             firewall: tab(Hidden, None),
-            access: tab(Hidden, None),
+            access: tab(ReadOnly, Some("read_only_os")),
             password_coupled: false,
         },
     }
@@ -148,13 +156,31 @@ mod tests {
         assert_eq!(compute_support(&linux(true, "firewalld")).firewall.level, SupportLevel::Full);
     }
 
-    // Until a later task adds a real probe, a Windows host must not expose any write path.
+    // Until the Windows write path is verified, no Windows tab may expose a write path; firewall stays hidden.
     #[test]
-    fn windows_starts_hidden() {
+    fn windows_has_no_write_path_yet() {
         let mut p = linux(true, "ufw");
         p.os_family = OsFamily::Windows;
+        p.privilege = PrivilegeLevel::Admin;
+        p.caps.sshd_running = true;
+        p.caps.has_scheduled_tasks = true;
         let s = compute_support(&p);
-        assert!([s.ssh.level, s.firewall.level, s.access.level].iter().all(|l| *l == SupportLevel::Hidden));
+        assert_eq!((s.ssh.level, s.access.level, s.firewall.level), (SupportLevel::ReadOnly, SupportLevel::ReadOnly, SupportLevel::Hidden));
+        assert!(!s.ssh_rows.permit_root_login && !s.ssh_rows.allow_deny_users && s.ssh_rows.port);
+    }
+
+    // The notice must name the real blocker first: no admin, then no sshd, then the generic read-only note.
+    #[test]
+    fn windows_support_reasons_in_priority_order() {
+        let mut p = linux(true, "ufw");
+        p.os_family = OsFamily::Windows;
+        let why = |p: &VpsProbe| compute_support(p).ssh.reason.unwrap();
+        assert_eq!(why(&p), "windows_not_admin");
+        p.privilege = PrivilegeLevel::Admin;
+        assert_eq!(why(&p), "windows_no_sshd");
+        p.caps.sshd_running = true;
+        assert_eq!(why(&p), "windows_ssh_read_only");
+        assert_eq!(compute_support(&p).access, tab(SupportLevel::ReadOnly, Some("read_only_os")));
     }
 
     // Git for Windows answers `uname`; it must still reach the Windows probe, not be treated as unix.

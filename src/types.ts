@@ -270,6 +270,7 @@ export interface LinuxAccountItem {
   hasSudo: boolean;
   nopasswdSudo: boolean;
   authorizedKeys: RemoteAuthorizedKey[];
+  keysFile?: string;
 }
 
 export interface AccessKeysSnapshot {

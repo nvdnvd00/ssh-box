@@ -156,7 +156,8 @@ export type VpsStudioTab = "ssh" | "firewall" | "access" | "installer";
 
 export type HostOs = "linux" | "macos" | "windows";
 export interface InstallMethod { os: HostOs; manager: string; package: string; service: string | null }
-export type ToolStatus = { kind: "notInstalled" } | { kind: "installed"; via: string[] } | { kind: "external" };
+export type ToolStatus = { kind: "notInstalled" } | { kind: "installed"; via: Owner[] } | { kind: "external" };
+export interface Owner { manager: string; package: string }
 export interface ServiceState { enabled: boolean; active: boolean }
 export interface ManagerState { id: string; present: boolean }
 export interface ToolView {

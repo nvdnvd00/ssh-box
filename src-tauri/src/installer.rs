@@ -72,8 +72,15 @@ pub fn valid_name(s: &str) -> bool {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ToolStatus {
     NotInstalled,
-    Installed { via: Vec<String> },
+    Installed { via: Vec<Owner> },
     External,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Owner {
+    pub manager: String,
+    pub package: String,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -205,9 +212,9 @@ pub fn parse_scan(os: HostOs, raw: &str) -> InstallerScan {
         .iter()
         .filter_map(|t| {
             let first = os_methods(t, os).next()?;
-            let via: Vec<String> = os_methods(t, os)
+            let via: Vec<Owner> = os_methods(t, os)
                 .filter(|m| pkgs.contains(&(m.manager.as_str(), m.package.as_str())))
-                .map(|m| m.manager.clone())
+                .map(|m| Owner { manager: m.manager.clone(), package: m.package.clone() })
                 .collect();
             let status = if !via.is_empty() {
                 ToolStatus::Installed { via }
@@ -587,6 +594,10 @@ mod tests {
         assert!(!valid_name(&"a".repeat(129)));
     }
 
+    fn own(manager: &str, package: &str) -> Owner {
+        Owner { manager: manager.into(), package: package.into() }
+    }
+
     fn scan_tool<'a>(s: &'a InstallerScan, id: &str) -> &'a ToolView {
         s.tools.iter().find(|t| t.id == id).unwrap()
     }
@@ -595,7 +606,7 @@ mod tests {
     fn parse_scan_linux_owner_detection() {
         let s = parse_scan(HostOs::Linux, "MGR:apt:1\nPKG:apt:docker.io\nSVC:docker:1:0\n");
         let d = scan_tool(&s, "docker");
-        assert_eq!(d.status, ToolStatus::Installed { via: vec!["apt".into()] });
+        assert_eq!(d.status, ToolStatus::Installed { via: vec![own("apt", "docker.io")] });
         assert_eq!(d.service_state, Some(ServiceState { enabled: true, active: false }));
     }
 
@@ -603,7 +614,7 @@ mod tests {
     fn parse_scan_two_owners() {
         // docker is the catalog tool that has both an apt and a snap method.
         let s = parse_scan(HostOs::Linux, "MGR:apt:1\nMGR:snap:1\nPKG:apt:docker.io\nPKG:snap:docker\n");
-        assert_eq!(scan_tool(&s, "docker").status, ToolStatus::Installed { via: vec!["apt".into(), "snap".into()] });
+        assert_eq!(scan_tool(&s, "docker").status, ToolStatus::Installed { via: vec![own("apt", "docker.io"), own("snap", "docker")] });
     }
 
     #[test]
@@ -624,7 +635,7 @@ mod tests {
     fn windows_npm_paths_normalized_and_matched() {
         assert!(scan_script(HostOs::Windows).contains("-replace '\\\\','/'"));
         let s = parse_scan(HostOs::Windows, "MGR:npm:1\nPKG:npm:@anthropic-ai/claude-code\n");
-        assert_eq!(scan_tool(&s, "claude-code").status, ToolStatus::Installed { via: vec!["npm".into()] });
+        assert_eq!(scan_tool(&s, "claude-code").status, ToolStatus::Installed { via: vec![own("npm", "@anthropic-ai/claude-code")] });
     }
 
     #[test]

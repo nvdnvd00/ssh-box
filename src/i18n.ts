@@ -237,6 +237,7 @@ export interface AppI18nStrings {
   instStatus: Record<"waiting" | "running" | "done" | "failed", string>;
   instWindowsPopupNote: string;
   instWingetManual: string;
+  instRefresh: string;
   vpsPrivRoot: string;
   vpsPrivSudoNoPassword: string;
   vpsPrivSudoPassword: string;
@@ -435,6 +436,7 @@ const VI_STRINGS: AppI18nStrings = {
   instSearchSkipped: (list) => `Bỏ qua (chưa có trình quản lý): ${list}`,
   instStatus: { waiting: "Đang chờ", running: "Đang chạy", done: "Xong", failed: "Lỗi" },
   instWindowsPopupNote: "Windows có thể hiện hộp thoại xin quyền quản trị; hãy bấm đồng ý trên máy chủ.",
+  instRefresh: "Cập nhật danh sách gói",
   instWingetManual: "winget không cài được từ xa. Hãy cài \"App Installer\" từ Microsoft Store trên máy chủ rồi quét lại.",
   vpsPrivRoot: "Root",
   vpsPrivSudoNoPassword: "Sudo không cần mật khẩu",
@@ -716,6 +718,7 @@ const EN_STRINGS: AppI18nStrings = {
   instSearchSkipped: (list) => `Skipped (no package manager): ${list}`,
   instStatus: { waiting: "Waiting", running: "Running", done: "Done", failed: "Failed" },
   instWindowsPopupNote: "Windows may show an administrator prompt; approve it on the server.",
+  instRefresh: "Refresh package lists",
   instWingetManual: "winget cannot be installed remotely. Install \"App Installer\" from the Microsoft Store on the server, then rescan.",
   vpsPrivRoot: "Root",
   vpsPrivSudoNoPassword: "Sudo, no password",

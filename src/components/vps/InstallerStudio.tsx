@@ -51,7 +51,11 @@ export const InstallerStudio: React.FC<{ vps: VpsCtx; os: HostOs }> = ({ vps, os
   const toggle = (key: string, on?: boolean) =>
     setSel((s) => {
       const n = new Set(s);
-      (on ?? !n.has(key)) ? n.add(key) : n.delete(key);
+      if (on ?? !n.has(key)) n.add(key);
+      else {
+        n.delete(key);
+        if (key.startsWith("mgr:")) scan?.tools.forEach((tl) => tl.blockedBy === key.slice(4) && n.delete(`tool:${tl.id}`));
+      }
       return n;
     });
   const pickHit = (h: SearchHit) => {
@@ -66,7 +70,7 @@ export const InstallerStudio: React.FC<{ vps: VpsCtx; os: HostOs }> = ({ vps, os
       case "uninstall": return `${a.manager}: ${t.instUninstall.toLowerCase()} ${a.package}`;
       case "enableService": return `${t.instEnable} ${a.service}`;
       case "installManager": return `${t.instInstall} ${a.manager}`;
-      case "refresh": return os === "linux" ? "apt/dnf: update" : "refresh";
+      case "refresh": return t.instRefresh;
     }
   };
 
@@ -85,11 +89,12 @@ export const InstallerStudio: React.FC<{ vps: VpsCtx; os: HostOs }> = ({ vps, os
   };
   const count = buildActions().filter((a) => a.kind !== "refresh").length;
 
-  const runBatch = async (actions: InstallAction[]) => {
+  const runBatch = async (actions: InstallAction[], clearSelection = false) => {
     const items: BatchItem[] = actions.map((a) => ({ label: verb(a), action: a, status: "waiting", output: "" }));
     setBatch(items);
     setBusy(true);
     const patch = (i: number, p: Partial<BatchItem>) => setBatch((b) => b.map((x, j) => (j === i ? { ...x, ...p } : x)));
+    let stopped = false;
     for (let i = 0; i < items.length; i++) {
       patch(i, { status: "running" });
       try {
@@ -99,13 +104,14 @@ export const InstallerStudio: React.FC<{ vps: VpsCtx; os: HostOs }> = ({ vps, os
         if (parseVpsError(e).code === "SUDO_REQUIRED") {
           patch(i, { status: "waiting" });
           vps.requestSudo();
+          stopped = true;
           break;
         }
         patch(i, { status: "failed", output: vpsErrorText(t, e) });
       }
     }
     setBusy(false);
-    setSel(new Set());
+    if (clearSelection && !stopped) setSel(new Set());
     await res.refresh();
   };
 
@@ -124,8 +130,7 @@ export const InstallerStudio: React.FC<{ vps: VpsCtx; os: HostOs }> = ({ vps, os
   const toolRow = (tl: ToolView) => {
     const warn = needsAttention(tl);
     const vias = tl.status.kind === "installed" ? tl.status.via : [];
-    const chosen = via[tl.id] ?? vias[0];
-    const pkg = tl.install?.package ?? tl.id; // ponytail: assumes same package name across managers
+    const chosen = vias.find((o) => o.manager === via[tl.id]) ?? vias[0];
     return (
       <div key={tl.id} className={`flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:justify-between ${warn ? "bg-warning/5" : ""}`}>
         <label className="min-w-0 flex items-start gap-3">
@@ -143,7 +148,7 @@ export const InstallerStudio: React.FC<{ vps: VpsCtx; os: HostOs }> = ({ vps, os
               {tl.name}
               {tl.recommended && tl.status.kind === "notInstalled" && <StatusBadge tone="ok">{t.instRecommended}</StatusBadge>}
               {warn && <StatusBadge tone="warn">{t.instNotRunning}</StatusBadge>}
-              {vias.length > 0 && <span className="text-xs text-muted-foreground">· {vias.join(", ")}</span>}
+              {vias.length > 0 && <span className="text-xs text-muted-foreground">· {vias.map((o) => o.manager).join(", ")}</span>}
               {tl.status.kind === "external" && <span className="text-xs text-muted-foreground">· {t.instExternal}</span>}
             </span>
             <span className="block text-xs text-muted-foreground">{en ? tl.descriptionEn : tl.descriptionVi}</span>
@@ -161,17 +166,17 @@ export const InstallerStudio: React.FC<{ vps: VpsCtx; os: HostOs }> = ({ vps, os
             </button>
           )}
           {vias.length > 1 && (
-            <select className="ui-input text-xs w-auto" value={chosen} onChange={(e) => setVia({ ...via, [tl.id]: e.target.value })}>
-              {vias.map((m) => <option key={m}>{m}</option>)}
+            <select className="ui-input text-xs w-auto" value={chosen?.manager} onChange={(e) => setVia({ ...via, [tl.id]: e.target.value })}>
+              {vias.map((o) => <option key={o.manager}>{o.manager}</option>)}
             </select>
           )}
           {chosen && (
             <ConfirmButton
               label={t.instUninstall}
-              confirmLabel={t.instUninstallConfirm(tl.name, chosen)}
+              confirmLabel={t.instUninstallConfirm(tl.name, chosen.manager)}
               cancelLabel={t.vpsCommonCancel}
               disabled={busy}
-              onConfirm={() => runBatch([{ kind: "uninstall", manager: chosen, package: pkg }])}
+              onConfirm={() => runBatch([{ kind: "uninstall", manager: chosen.manager, package: chosen.package }])}
             />
           )}
         </div>
@@ -273,7 +278,7 @@ export const InstallerStudio: React.FC<{ vps: VpsCtx; os: HostOs }> = ({ vps, os
 
       {count > 0 && (
         <div className="sticky bottom-0 flex justify-end rounded-2xl border border-border/80 bg-card/95 px-4 py-3">
-          <button type="button" className={PRIMARY} disabled={busy} onClick={() => runBatch(buildActions())}>
+          <button type="button" className={PRIMARY} disabled={busy} onClick={() => runBatch(buildActions(), true)}>
             {t.instInstallSelected(count)}
           </button>
         </div>

@@ -92,8 +92,10 @@ fn compute_support_with(p: &VpsProbe, windows_ssh_write: bool) -> VpsSupport {
             ssh: match (p.privilege == PrivilegeLevel::Admin, p.caps.sshd_running) {
                 (false, _) => tab(ReadOnly, Some("windows_not_admin")),
                 (_, false) => tab(ReadOnly, Some("windows_no_sshd")),
-                _ if windows_ssh_write && p.caps.has_scheduled_tasks => tab(Full, None),
-                _ => tab(ReadOnly, Some("windows_ssh_read_only")),
+                _ if !windows_ssh_write => tab(ReadOnly, Some("windows_ssh_read_only")),
+                // The rollback timer is a scheduled task: no module, no safe write.
+                _ if !p.caps.has_scheduled_tasks => tab(ReadOnly, Some("windows_no_scheduled_tasks")),
+                _ => tab(Full, None),
             },
             ssh_rows: SshRows { permit_root_login: false, allow_deny_users: false, ..all_rows },
             firewall: match (p.caps.has_net_security, p.privilege == PrivilegeLevel::Admin) {
@@ -178,10 +180,11 @@ mod tests {
         assert_eq!((s.ssh, s.access.level, s.firewall.level), (tab(SupportLevel::Full, None), SupportLevel::ReadOnly, SupportLevel::Hidden));
         assert!(!s.ssh_rows.permit_root_login && !s.ssh_rows.allow_deny_users && s.ssh_rows.port && s.password_coupled);
         p.caps.has_scheduled_tasks = false;
-        assert_eq!(compute_support_with(&p, true).ssh.level, SupportLevel::ReadOnly);
+        assert_eq!(compute_support_with(&p, true).ssh, tab(SupportLevel::ReadOnly, Some("windows_no_scheduled_tasks")));
+        assert_eq!(compute_support_with(&p, false).ssh, tab(SupportLevel::ReadOnly, Some("windows_ssh_read_only")));
     }
 
-    // The notice must name the real blocker first: no admin, then no sshd, then the generic read-only note.
+    // The notice must name the real blocker first: no admin, then no sshd, then the missing rollback timer (ScheduledTasks).
     #[test]
     fn windows_support_reasons_in_priority_order() {
         let mut p = linux(true, "ufw");
@@ -191,7 +194,7 @@ mod tests {
         p.privilege = PrivilegeLevel::Admin;
         assert_eq!(why(&p), "windows_no_sshd");
         p.caps.sshd_running = true;
-        assert_eq!(why(&p), "windows_ssh_read_only");
+        assert_eq!(why(&p), "windows_no_scheduled_tasks");
         assert_eq!(compute_support(&p).access, tab(SupportLevel::ReadOnly, Some("read_only_os")));
     }
 

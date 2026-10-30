@@ -97,31 +97,12 @@ const TAG_PALETTE = [
   "#ec4899",
 ];
 
-function downloadJson(fileName: string, data: unknown) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], {
-    type: "application/json",
-  });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = fileName;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
 interface MachinesExportBundle {
   type: string;
   items: HostEntry[];
   hasIdentities?: boolean;
   hasSshKeys?: boolean;
-  encrypted?: boolean;
-  secrets?: unknown;
   encryptedSecrets?: string | null;
-}
-
-interface ImportMachinesResult {
-  hosts: HostEntry[];
-  resources: ResourcesStoreData;
 }
 
 function formatUnixDate(ts?: number | null): string {
@@ -668,6 +649,7 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
     includeIdentities: boolean;
     includeSshKeys: boolean;
     passphrase: string;
+    passphraseConfirm: string;
     bundle?: MachinesExportBundle;
     error?: string | null;
   } | null>(null);
@@ -684,9 +666,21 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
       includeIdentities: mode === "import" ? Boolean(bundle?.hasIdentities) : false,
       includeSshKeys: mode === "import" ? Boolean(bundle?.hasSshKeys) : false,
       passphrase: "",
+      passphraseConfirm: "",
       bundle,
       error: null,
     });
+
+  // Credentials always travel encrypted, so any include box needs a passphrase.
+  const transferNeedsPassphrase =
+    !!machineTransfer &&
+    (machineTransfer.includeIdentities || machineTransfer.includeSshKeys);
+  const transferPassphraseInvalid =
+    !!machineTransfer &&
+    transferNeedsPassphrase &&
+    (!machineTransfer.passphrase.trim() ||
+      (machineTransfer.mode === "export" &&
+        machineTransfer.passphrase !== machineTransfer.passphraseConfirm));
 
   const handlePickMachineFile = async (
     e: React.ChangeEvent<HTMLInputElement>,
@@ -721,32 +715,26 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
     setErrorBanner(null);
     try {
       if (mode === "export") {
-        const exported = await invoke<MachinesExportBundle>(
-          "export_machines_bundle",
-          {
-            hosts: picked,
-            includeIdentities,
-            includeSshKeys,
-            passphrase: passphrase.trim() ? passphrase.trim() : null,
-          },
-        );
-        downloadJson(
-          `ssh-box-machines-${new Date().toISOString().slice(0, 10)}.json`,
-          exported,
-        );
-        setMachineTransfer(null);
+        // false = save dialog cancelled: keep the modal open.
+        const saved = await invoke<boolean>("export_machines_bundle", {
+          hosts: picked,
+          includeIdentities,
+          includeSshKeys,
+          passphrase: passphrase.trim() ? passphrase.trim() : null,
+          fileName: `ssh-box-machines-${new Date().toISOString().slice(0, 10)}.json`,
+        });
+        if (saved) setMachineTransfer(null);
         return;
       }
       if (!bundle) return;
       const selectedIndices = selected.flatMap((v, idx) => (v ? [idx] : []));
-      const res = await invoke<ImportMachinesResult>("import_machines_bundle", {
+      await invoke("import_machines_bundle", {
         bundle,
         selectedIndices,
         includeIdentities,
         includeSshKeys,
         passphrase: passphrase.trim() ? passphrase.trim() : null,
       });
-      onUpdateResources(res.resources);
       onRefreshHosts();
       setMachineTransfer(null);
     } catch (err) {
@@ -3789,86 +3777,60 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                 )}
               </div>
               <div className="space-y-2 pt-1 border-t border-border/70">
-                <label
-                  className={`flex items-center gap-2.5 ${
+                {(
+                  [
+                    [
+                      "includeIdentities",
+                      "hasIdentities",
+                      "Include Identities & Passwords",
+                    ],
+                    [
+                      "includeSshKeys",
+                      "hasSshKeys",
+                      "Include SSH Keys (Private Keys & Passphrases)",
+                    ],
+                  ] as const
+                ).map(([field, flag, label]) => {
+                  const unavailable =
                     machineTransfer.mode === "import" &&
-                    !machineTransfer.bundle?.hasIdentities
-                      ? "opacity-50 cursor-not-allowed"
-                      : "cursor-pointer"
-                  }`}
-                >
-                  <input
-                    type="checkbox"
-                    disabled={
-                      machineTransfer.mode === "import" &&
-                      !machineTransfer.bundle?.hasIdentities
-                    }
-                    checked={machineTransfer.includeIdentities}
-                    onChange={(e) =>
-                      setMachineTransfer((prev) =>
-                        prev && {
-                          ...prev,
-                          includeIdentities: e.target.checked,
-                          error: null,
-                        },
-                      )
-                    }
-                  />
-                  <span>
-                    Include Identities & Passwords
-                    {machineTransfer.mode === "import" &&
-                      !machineTransfer.bundle?.hasIdentities && (
-                        <span className="text-muted-foreground ml-1">
-                          (not in file)
-                        </span>
-                      )}
-                  </span>
-                </label>
+                    !machineTransfer.bundle?.[flag];
+                  return (
+                    <label
+                      key={field}
+                      className={`flex items-center gap-2.5 ${
+                        unavailable
+                          ? "opacity-50 cursor-not-allowed"
+                          : "cursor-pointer"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        disabled={unavailable}
+                        checked={machineTransfer[field]}
+                        onChange={(e) =>
+                          setMachineTransfer((prev) =>
+                            prev && {
+                              ...prev,
+                              [field]: e.target.checked,
+                              error: null,
+                            },
+                          )
+                        }
+                      />
+                      <span>
+                        {label}
+                        {unavailable && (
+                          <span className="text-muted-foreground ml-1">
+                            (not in file)
+                          </span>
+                        )}
+                      </span>
+                    </label>
+                  );
+                })}
 
-                <label
-                  className={`flex items-center gap-2.5 ${
-                    machineTransfer.mode === "import" &&
-                    !machineTransfer.bundle?.hasSshKeys
-                      ? "opacity-50 cursor-not-allowed"
-                      : "cursor-pointer"
-                  }`}
-                >
-                  <input
-                    type="checkbox"
-                    disabled={
-                      machineTransfer.mode === "import" &&
-                      !machineTransfer.bundle?.hasSshKeys
-                    }
-                    checked={machineTransfer.includeSshKeys}
-                    onChange={(e) =>
-                      setMachineTransfer((prev) =>
-                        prev && {
-                          ...prev,
-                          includeSshKeys: e.target.checked,
-                          error: null,
-                        },
-                      )
-                    }
-                  />
-                  <span>
-                    Include SSH Keys (Private Keys & Passphrases)
-                    {machineTransfer.mode === "import" &&
-                      !machineTransfer.bundle?.hasSshKeys && (
-                        <span className="text-muted-foreground ml-1">
-                          (not in file)
-                        </span>
-                      )}
-                  </span>
-                </label>
-
-                {((machineTransfer.mode === "export" &&
-                  (machineTransfer.includeIdentities ||
-                    machineTransfer.includeSshKeys)) ||
-                  (machineTransfer.mode === "import" &&
-                    machineTransfer.bundle?.encrypted &&
-                    (machineTransfer.includeIdentities ||
-                      machineTransfer.includeSshKeys))) && (
-                  <div className="pt-1 space-y-1">
+                {transferNeedsPassphrase && (
+                  <div className="pt-1 space-y-1.5">
                     <input
                       type="password"
                       value={machineTransfer.passphrase}
@@ -3883,11 +3845,36 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                       }
                       placeholder={
                         machineTransfer.mode === "export"
-                          ? "Passphrase to encrypt credentials (optional)"
+                          ? "Passphrase to encrypt credentials"
                           : "Enter backup passphrase to decrypt"
                       }
                       className="ui-input w-full"
                     />
+                    {machineTransfer.mode === "export" && (
+                      <input
+                        type="password"
+                        value={machineTransfer.passphraseConfirm}
+                        onChange={(e) =>
+                          setMachineTransfer((prev) =>
+                            prev && {
+                              ...prev,
+                              passphraseConfirm: e.target.value,
+                              error: null,
+                            },
+                          )
+                        }
+                        placeholder="Confirm passphrase"
+                        className="ui-input w-full"
+                      />
+                    )}
+                    {machineTransfer.mode === "export" &&
+                      machineTransfer.passphraseConfirm &&
+                      machineTransfer.passphrase !==
+                        machineTransfer.passphraseConfirm && (
+                        <p className="text-rose-400 text-[11px]">
+                          Passphrases do not match
+                        </p>
+                      )}
                   </div>
                 )}
               </div>
@@ -3902,13 +3889,7 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                 type="button"
                 disabled={
                   !machineTransfer.selected.some(Boolean) ||
-                  Boolean(
-                    machineTransfer.mode === "import" &&
-                      machineTransfer.bundle?.encrypted &&
-                      (machineTransfer.includeIdentities ||
-                        machineTransfer.includeSshKeys) &&
-                      !machineTransfer.passphrase.trim(),
-                  )
+                  transferPassphraseInvalid
                 }
                 onClick={handleConfirmMachineTransfer}
                 className="w-full h-[38px] rounded-[10px] bg-primary text-primary-foreground font-semibold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"

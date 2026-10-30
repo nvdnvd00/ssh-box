@@ -27,7 +27,10 @@ uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "2"
 base64 = "0.22"
 sha2 = "0.10"
+aes-gcm = "0.10"
+pbkdf2 = "0.12"
 tauri-plugin-process = "2"
+tauri-plugin-dialog = "2"
 
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
 portable-pty = "0.8"

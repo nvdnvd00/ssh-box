@@ -12,9 +12,8 @@ pub mod vps_guard;
 use host_store::HostEntry;
 use local_pty::LocalPtyManager;
 use resources::{
-    ConnectionProxyProfile, IdentityItem, ImportMachinesResult, MachineGroup, MachineTag,
-    MachinesExportBundle, PortForwardingRule, ResourcesStoreData, SnippetExecutionRecord,
-    SnippetItem, SnippetPackage,
+    ConnectionProxyProfile, IdentityItem, MachineGroup, MachineTag, MachinesExportBundle,
+    PortForwardingRule, ResourcesStoreData, SnippetExecutionRecord, SnippetItem, SnippetPackage,
 };
 use serde::{Deserialize, Serialize};
 use sftp::{SftpListResponse, SftpTransferProgress, SftpTransferResult};
@@ -101,33 +100,51 @@ fn delete_host(host_id: String) -> Result<Vec<HostEntry>, String> {
     host_store::delete_custom_host(&host_id)
 }
 
+// Returns false when the user cancels the save dialog.
 #[tauri::command]
-fn export_machines_bundle(
+async fn export_machines_bundle(
+    app: tauri::AppHandle,
     hosts: Vec<HostEntry>,
     include_identities: bool,
     include_ssh_keys: bool,
     passphrase: Option<String>,
-) -> Result<MachinesExportBundle, String> {
-    resources::export_machines_bundle_at(
+    file_name: String,
+) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let bundle = resources::export_machines_bundle_at(
         &resources::default_resources_path(),
         hosts,
         include_identities,
         include_ssh_keys,
         passphrase,
-    )
+    )?;
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .set_file_name(file_name)
+        .add_filter("JSON", &["json"])
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+    let path = picked
+        .into_path()
+        .map_err(|e| format!("Cannot save to this location: {e}"))?;
+    let json = serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 #[tauri::command]
-fn import_machines_bundle(
-    state: State<'_, AppState>,
+async fn import_machines_bundle(
     bundle: MachinesExportBundle,
     selected_indices: Vec<usize>,
     include_identities: bool,
     include_ssh_keys: bool,
     passphrase: Option<String>,
-) -> Result<ImportMachinesResult, String> {
+) -> Result<(), String> {
     let (ssh_cfg, custom_cfg) = host_store::default_paths();
-    let mut res = resources::import_machines_bundle_at(
+    resources::import_machines_bundle_at(
         &ssh_cfg,
         &custom_cfg,
         &resources::default_resources_path(),
@@ -137,9 +154,7 @@ fn import_machines_bundle(
         include_identities,
         include_ssh_keys,
         passphrase,
-    )?;
-    res.resources = enrich_resources(res.resources, &state.ssh_pool);
-    Ok(res)
+    )
 }
 
 #[tauri::command]
@@ -1023,6 +1038,7 @@ async fn vps_set_user_sudo(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             use tauri::Manager;
             if let Ok(app_dir) = app.path().app_data_dir() {

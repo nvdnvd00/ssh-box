@@ -1857,7 +1857,10 @@ pub fn parse_access_keys_snapshot(raw: &str) -> AccessKeysSnapshot {
                     // Also accepts just the password field (older snapshots).
                     let pw = if f.len() > 1 { f[1] } else { f[0] }.trim();
                     let expire = f.get(7).and_then(|e| e.trim().parse::<i64>().ok());
-                    acc.locked = pw.starts_with('!') || matches!((expire, today), (Some(e), Some(t)) if e <= t);
+                    // "!<hash>" is a locked password; bare "!"/"!!" is useradd's "no password yet",
+                    // which still allows key login. Our lock also expires the account.
+                    let locked_hash = pw.strip_prefix('!').is_some_and(|h| h.starts_with('$'));
+                    acc.locked = locked_hash || matches!((expire, today), (Some(e), Some(t)) if e <= t);
                 } else if let Some(v) = trimmed.strip_prefix("LOCKED:") {
                     acc.locked = parse_yes_no(v, acc.locked);
                 } else if let Some(v) = trimmed.strip_prefix("HAS_SUDO:") {
@@ -2079,7 +2082,8 @@ pub fn build_authorize_key_script(username: &str, key_body: &str) -> Result<Stri
         username,
         key_body,
         KEY_MATCH_AWK,
-        "umask 077; mkdir -p \"$1/.ssh\"; f=\"$1/.ssh/authorized_keys\"; touch \"$f\"; if ! awk -v k=\"$2\" \"$3\" \"$f\"; then cat >> \"$f\"; fi",
+        "umask 077; mkdir -p \"$1/.ssh\"; f=\"$1/.ssh/authorized_keys\"; touch \"$f\"; if ! awk -v k=\"$2\" \"$3\" \"$f\"; then \
+if [ -s \"$f\" ] && [ -n \"$(tail -c 1 \"$f\")\" ]; then echo >> \"$f\"; fi; cat >> \"$f\"; fi",
         true,
     )
 }
@@ -3263,6 +3267,33 @@ SHADOW:*
         assert_eq!(std::fs::read_to_string(&ak).unwrap().matches("AAAAKEY").count(), 1);
     }
 
+    // A last line without "\n" would glue the new key onto the old one and break both.
+    #[cfg(unix)]
+    #[test]
+    fn authorize_appends_on_a_new_line_when_file_lacks_newline() {
+        let dir = shell::temp_dir();
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        let ak = home.join(".ssh/authorized_keys");
+        std::fs::write(&ak, "ssh-ed25519 AAAAOLD").unwrap();
+        let bin = dir.join("bin");
+        let log = dir.join("calls.log");
+        for (name, extra) in user_fakes(&home) {
+            shell::fake_bin(&bin, name, &format!("echo \"{name} $*\" >> \"$FAKE_LOG\"\n{extra}"));
+        }
+        let secret = dir.join("secret");
+        std::fs::write(&secret, "ssh-ed25519 AAAANEW alice@new\n").unwrap();
+        let script = build_authorize_key_script("alice", "AAAANEW").unwrap();
+        let out = shell::run_local(
+            &script,
+            b"",
+            &bin,
+            &[("FAKE_LOG", log.to_str().unwrap()), ("SSHBOX_SECRET_FILE", secret.to_str().unwrap())],
+            &dir,
+        );
+        assert_eq!(std::fs::read_to_string(&ak).unwrap(), "ssh-ed25519 AAAAOLD\nssh-ed25519 AAAANEW alice@new\n", "{out}");
+    }
+
     // The old revoke used grep -Fv on a substring and also removed keys that merely contained it.
     #[cfg(unix)]
     #[test]
@@ -3336,11 +3367,15 @@ SHADOW:*
         let raw = "TODAY:20000\n---ACCOUNT---\nPASSWD:deploy:x:1001:1001::/home/deploy:/bin/bash\n\
 SHADOW:deploy:*:19000:0:99999:7::1:\n---ACCOUNT---\nPASSWD:alice:x:1002:1002::/home/alice:/bin/bash\n\
 SHADOW:alice:*:19000:0:99999:7:::\n---ACCOUNT---\nPASSWD:bob:x:1003:1003::/home/bob:/bin/bash\n\
-SHADOW:bob:!$6$hash:19000:0:99999:7:::\n";
+SHADOW:bob:!$6$hash:19000:0:99999:7:::\n---ACCOUNT---\nPASSWD:carol:x:1004:1004::/home/carol:/bin/bash\n\
+SHADOW:carol:!:19000:0:99999:7:::\n---ACCOUNT---\nPASSWD:dave:x:1005:1005::/home/dave:/bin/bash\n\
+SHADOW:dave:!!:19000:0:99999:7:::\n";
         let snap = parse_access_keys_snapshot(raw);
         let locked = |u: &str| snap.accounts.iter().find(|a| a.username == u).unwrap().locked;
         assert!(locked("deploy"), "expired account");
         assert!(!locked("alice"), "'*' means no password, not locked");
-        assert!(locked("bob"), "'!' prefix");
+        assert!(locked("bob"), "'!' before a password hash");
+        // useradd leaves '!' (Debian/Ubuntu) or '!!' (RHEL): no password, but SSH keys still work.
+        assert!(!locked("carol") && !locked("dave"));
     }
 }

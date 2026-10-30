@@ -382,7 +382,7 @@ impl Drop for GroupKill {
 async fn pipe(mut cmd: tokio::process::Command, stdin: Vec<u8>) -> Result<String, String> {
     use std::process::Stdio;
     use tokio::io::AsyncWriteExt;
-    let mut child = cmd
+    cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -392,13 +392,13 @@ async fn pipe(mut cmd: tokio::process::Command, stdin: Vec<u8>) -> Result<String
     let mut child = cmd.spawn().map_err(|e| vps_err(ERR_COMMAND_FAILED, e))?;
     // On timeout the future is dropped: SIGTERM the whole group so apt/brew grandchildren die too
     // (sudo relays it to its child). ponytail: remote SSH timeouts rely on the channel closing.
-    let mut _guard = GroupKill(child.id());
+    let mut guard = GroupKill(child.id());
     let mut sin = child.stdin.take().ok_or_else(|| vps_err(ERR_COMMAND_FAILED, "no stdin"))?;
     // Ignore write errors: the child may exit before reading everything.
     let _ = sin.write_all(&stdin).await;
     drop(sin);
     let out = child.wait_with_output().await.map_err(|e| vps_err(ERR_COMMAND_FAILED, e))?;
-    _guard.0 = None; // finished: never signal a possibly reused pid
+    guard.0 = None; // finished: never signal a possibly reused pid
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     if out.status.success() {
         Ok(text)

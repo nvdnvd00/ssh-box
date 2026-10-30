@@ -1,5 +1,6 @@
 pub mod frame_batcher;
 pub mod host_store;
+pub mod installer;
 pub mod local_pty;
 pub mod resources;
 pub mod sftp;

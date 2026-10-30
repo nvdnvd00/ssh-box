@@ -1,0 +1,554 @@
+[
+ {
+  "id": "ufw",
+  "name": "UFW",
+  "category": "security",
+  "recommended": true,
+  "descriptionVi": "Tường lửa đơn giản",
+  "descriptionEn": "Simple firewall",
+  "bin": null,
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "ufw",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "ufw",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "fail2ban",
+  "name": "Fail2ban",
+  "category": "security",
+  "recommended": true,
+  "descriptionVi": "Chặn IP dò mật khẩu SSH",
+  "descriptionEn": "Bans IPs brute-forcing SSH",
+  "bin": null,
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "fail2ban",
+    "service": "fail2ban"
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "fail2ban",
+    "service": "fail2ban"
+   }
+  ]
+ },
+ {
+  "id": "unattended-upgrades",
+  "name": "Unattended Upgrades",
+  "category": "security",
+  "recommended": true,
+  "descriptionVi": "Tự cập nhật bản vá bảo mật",
+  "descriptionEn": "Automatic security updates",
+  "bin": null,
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "unattended-upgrades",
+    "service": "unattended-upgrades"
+   }
+  ]
+ },
+ {
+  "id": "lynis",
+  "name": "Lynis",
+  "category": "security",
+  "recommended": false,
+  "descriptionVi": "Quét kiểm tra bảo mật hệ thống",
+  "descriptionEn": "System security audit",
+  "bin": null,
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "lynis",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "lynis",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "lynis",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "rkhunter",
+  "name": "rkhunter",
+  "category": "security",
+  "recommended": false,
+  "descriptionVi": "Dò rootkit",
+  "descriptionEn": "Rootkit scanner",
+  "bin": null,
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "rkhunter",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "rkhunter",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "git",
+  "name": "Git",
+  "category": "apps",
+  "recommended": true,
+  "descriptionVi": "Quản lý mã nguồn",
+  "descriptionEn": "Version control",
+  "bin": null,
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "git",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "git",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "git",
+    "service": null
+   },
+   {
+    "os": "windows",
+    "manager": "winget",
+    "package": "Git.Git",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "node",
+  "name": "Node.js",
+  "category": "apps",
+  "recommended": false,
+  "descriptionVi": "Môi trường chạy JavaScript",
+  "descriptionEn": "JavaScript runtime",
+  "bin": "node",
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "nodejs",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "nodejs",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "node",
+    "service": null
+   },
+   {
+    "os": "windows",
+    "manager": "winget",
+    "package": "OpenJS.NodeJS.LTS",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "docker",
+  "name": "Docker",
+  "category": "apps",
+  "recommended": false,
+  "descriptionVi": "Chạy ứng dụng trong container",
+  "descriptionEn": "Container runtime",
+  "bin": null,
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "docker.io",
+    "service": "docker"
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "docker",
+    "service": "docker"
+   },
+   {
+    "os": "linux",
+    "manager": "snap",
+    "package": "docker",
+    "service": "docker"
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "docker",
+    "service": null
+   },
+   {
+    "os": "windows",
+    "manager": "winget",
+    "package": "Docker.DockerDesktop",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "python3",
+  "name": "Python 3",
+  "category": "apps",
+  "recommended": false,
+  "descriptionVi": "Ngôn ngữ Python",
+  "descriptionEn": "Python language",
+  "bin": "python3",
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "python3",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "python3",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "python3",
+    "service": null
+   },
+   {
+    "os": "windows",
+    "manager": "winget",
+    "package": "Python.Python.3.12",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "nginx",
+  "name": "Nginx",
+  "category": "apps",
+  "recommended": false,
+  "descriptionVi": "Máy chủ web",
+  "descriptionEn": "Web server",
+  "bin": null,
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "nginx",
+    "service": "nginx"
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "nginx",
+    "service": "nginx"
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "nginx",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "claude-code",
+  "name": "Claude Code",
+  "category": "ai",
+  "recommended": false,
+  "descriptionVi": "Trợ lý lập trình AI của Anthropic",
+  "descriptionEn": "Anthropic's AI coding assistant",
+  "bin": "claude",
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "npm",
+    "package": "@anthropic-ai/claude-code",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "npm",
+    "package": "@anthropic-ai/claude-code",
+    "service": null
+   },
+   {
+    "os": "windows",
+    "manager": "npm",
+    "package": "@anthropic-ai/claude-code",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "tailscale",
+  "name": "Tailscale",
+  "category": "network",
+  "recommended": false,
+  "descriptionVi": "VPN mạng riêng giữa các máy",
+  "descriptionEn": "Mesh VPN",
+  "bin": null,
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "tailscale",
+    "service": "tailscaled"
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "tailscale",
+    "service": "tailscaled"
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "tailscale",
+    "service": null
+   },
+   {
+    "os": "windows",
+    "manager": "winget",
+    "package": "Tailscale.Tailscale",
+    "service": "Tailscale"
+   }
+  ]
+ },
+ {
+  "id": "curl",
+  "name": "curl",
+  "category": "network",
+  "recommended": true,
+  "descriptionVi": "Tải dữ liệu qua dòng lệnh",
+  "descriptionEn": "Command-line transfers",
+  "bin": null,
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "curl",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "curl",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "curl",
+    "service": null
+   },
+   {
+    "os": "windows",
+    "manager": "winget",
+    "package": "cURL.cURL",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "wget",
+  "name": "wget",
+  "category": "network",
+  "recommended": false,
+  "descriptionVi": "Tải tệp qua dòng lệnh",
+  "descriptionEn": "Command-line downloader",
+  "bin": null,
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "wget",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "wget",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "wget",
+    "service": null
+   },
+   {
+    "os": "windows",
+    "manager": "winget",
+    "package": "JernejSimoncic.Wget",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "htop",
+  "name": "htop",
+  "category": "utils",
+  "recommended": true,
+  "descriptionVi": "Xem tiến trình và tài nguyên",
+  "descriptionEn": "Process viewer",
+  "bin": null,
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "htop",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "htop",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "htop",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "tmux",
+  "name": "tmux",
+  "category": "utils",
+  "recommended": false,
+  "descriptionVi": "Nhiều cửa sổ terminal trong một phiên",
+  "descriptionEn": "Terminal multiplexer",
+  "bin": null,
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "tmux",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "tmux",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "tmux",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "jq",
+  "name": "jq",
+  "category": "utils",
+  "recommended": false,
+  "descriptionVi": "Xử lý JSON trên dòng lệnh",
+  "descriptionEn": "JSON processor",
+  "bin": null,
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "jq",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "jq",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "jq",
+    "service": null
+   },
+   {
+    "os": "windows",
+    "manager": "winget",
+    "package": "jqlang.jq",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "ripgrep",
+  "name": "ripgrep",
+  "category": "utils",
+  "recommended": false,
+  "descriptionVi": "Tìm kiếm văn bản rất nhanh",
+  "descriptionEn": "Fast text search",
+  "bin": "rg",
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "ripgrep",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "ripgrep",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "ripgrep",
+    "service": null
+   },
+   {
+    "os": "windows",
+    "manager": "winget",
+    "package": "BurntSushi.ripgrep.MSVC",
+    "service": null
+   }
+  ]
+ }
+]

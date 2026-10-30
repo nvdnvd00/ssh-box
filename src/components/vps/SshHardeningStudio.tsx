@@ -79,7 +79,8 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
     !!draft &&
     Number.isInteger(draft.port) && draft.port >= 1 && draft.port <= 65535 &&
     NUMBER_FIELDS.every((k) => Number.isInteger(draft[k]) && draft[k] >= 0) &&
-    draft.maxAuthTries >= 1;
+    draft.maxAuthTries >= 1 &&
+    draft.maxSessions >= 1;
 
   const apply = async () => {
     if (!draft) return;

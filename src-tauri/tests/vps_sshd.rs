@@ -47,6 +47,10 @@ fn keygen(path: &Path) -> String {
 
 // `client`: reuse another test sshd's client key so one HostEntry can log in to both.
 fn start_sshd(name: &str, ports: &[u16], client: Option<&TestSshd>) -> TestSshd {
+    start_sshd_with(name, ports, client, "")
+}
+
+fn start_sshd_with(name: &str, ports: &[u16], client: Option<&TestSshd>, extra: &str) -> TestSshd {
     let dir = std::env::temp_dir().join(format!("sshbox-it-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -65,10 +69,11 @@ fn start_sshd(name: &str, ports: &[u16], client: Option<&TestSshd>) -> TestSshd 
     let mut cfg: String = ports.iter().map(|p| format!("Port {p}\n")).collect();
     cfg.push_str(&format!(
         "ListenAddress 127.0.0.1\nHostKey {}\nAuthorizedKeysFile {}\nPidFile {}\nStrictModes no\nUsePAM no\n\
-         PasswordAuthentication no\nKbdInteractiveAuthentication no\n",
+         PasswordAuthentication no\nKbdInteractiveAuthentication no\n{}",
         host_key.display(),
         dir.join("authorized_keys").display(),
         dir.join("sshd.pid").display(),
+        extra,
     ));
     std::fs::write(dir.join("sshd_config"), cfg).unwrap();
     let ok = Command::new("/usr/sbin/sshd")
@@ -232,6 +237,21 @@ fn old_session_is_not_proof() {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(pool.exec_on_host(&host, "echo alive").await.unwrap().trim(), "alive");
         let err = verify_new_connection(&pool, &host, 22906, &fp).await.unwrap_err();
+        assert!(err.starts_with("VERIFY_FAILED"), "{err}");
+    });
+}
+
+// MaxSessions 0 (or ForceCommand) lets authentication succeed but refuses every shell/command.
+#[test]
+#[ignore]
+fn verify_fails_when_sessions_are_refused() {
+    fake_home();
+    let a = start_sshd_with("verify-nosession", &[22907], None, "MaxSessions 0\n");
+    let host = host_for(&a, 22907);
+    let pool = SshPool::default();
+    block_on(async {
+        let fp = fingerprint_of(&pool, &host).await;
+        let err = verify_new_connection(&pool, &host, 22907, &fp).await.unwrap_err();
         assert!(err.starts_with("VERIFY_FAILED"), "{err}");
     });
 }

@@ -355,6 +355,7 @@ const VI_STRINGS: AppI18nStrings = {
   vpsErrUnsupported: "Máy chủ không hỗ trợ:",
   vpsLockoutReasons: {
     both_auth_off: "Không thể tắt cả đăng nhập bằng mật khẩu lẫn bằng SSH key.",
+    no_sessions: "MaxSessions 0 từ chối mọi phiên làm việc, kể cả của ứng dụng.",
     password_in_use:
       "Ứng dụng đang đăng nhập bằng mật khẩu. Hãy chuyển máy này sang đăng nhập bằng SSH key trước khi tắt mật khẩu.",
     pubkey_in_use: "Ứng dụng đang đăng nhập bằng SSH key, nên không thể tắt đăng nhập bằng key.",
@@ -601,6 +602,7 @@ const EN_STRINGS: AppI18nStrings = {
   vpsErrUnsupported: "Not supported on this server:",
   vpsLockoutReasons: {
     both_auth_off: "Password and SSH key login cannot both be turned off.",
+    no_sessions: "MaxSessions 0 refuses every session, including the app's.",
     password_in_use:
       "The app signs in with a password. Switch this host to SSH key login before turning passwords off.",
     pubkey_in_use: "The app signs in with an SSH key, so key login cannot be turned off.",

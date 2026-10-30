@@ -46,6 +46,9 @@ pub fn check_sshd(ctx: &ConnectionContext, next: &SshdSettings) -> Result<(), St
     if !next.password_authentication && !next.pubkey_authentication {
         return block("both_auth_off");
     }
+    if next.max_sessions == 0 {
+        return block("no_sessions");
+    }
     match ctx.auth {
         AuthUsed::Password if !next.password_authentication => {
             return block("password_in_use")
@@ -297,6 +300,13 @@ mod tests {
             assert!(blocked(check_sshd(&ctx("root", AuthUsed::Password), &next)), "{value}");
             assert_eq!(check_sshd(&ctx("root", key()), &next), Ok(()), "{value}");
         }
+    }
+
+    // MaxSessions 0 still lets logins through, so only the guard can stop it.
+    #[test]
+    fn zero_sessions_always_blocked() {
+        assert!(blocked(check_sshd(&deploy_key(), &SshdSettings { max_sessions: 0, ..sshd() })));
+        assert_eq!(check_sshd(&deploy_key(), &SshdSettings { max_sessions: 1, ..sshd() }), Ok(()));
     }
 
     #[test]

@@ -493,6 +493,37 @@ impl SshPool {
         Ok(fp)
     }
 
+    // Like test_connection, but also opens a session and runs `command`: login alone does not
+    // prove a shell works (MaxSessions 0 or ForceCommand authenticate, then refuse sessions).
+    pub async fn test_exec(&self, host: &HostEntry, command: &str) -> Result<String, String> {
+        let (handle, fp, _, _) = Self::connect_new(host, None).await?;
+        let result = async {
+            let mut channel = handle
+                .channel_open_session()
+                .await
+                .map_err(|e| format!("Failed to open channel ({e})"))?;
+            channel
+                .exec(true, command)
+                .await
+                .map_err(|e| format!("Failed to exec ({e})"))?;
+            let mut code = None;
+            while let Some(msg) = channel.wait().await {
+                if let ChannelMsg::ExitStatus { exit_status } = msg {
+                    code = Some(exit_status);
+                }
+            }
+            match code {
+                Some(0) => Ok(()),
+                other => Err(format!("`{command}` did not succeed (exit {other:?})")),
+            }
+        }
+        .await;
+        let _ = handle
+            .disconnect(Disconnect::ByApplication, "Connection test", "en")
+            .await;
+        result.map(|_| fp)
+    }
+
     async fn connect_new(
         host: &HostEntry,
         password_override: Option<String>,

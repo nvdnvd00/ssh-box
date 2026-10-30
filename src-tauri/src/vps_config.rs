@@ -1627,7 +1627,7 @@ pub async fn verify_new_connection(
     let before = crate::ssh_pool::list_known_hosts_at(&known_hosts);
     let mut target = host.clone();
     target.port = new_port;
-    let reason = match pool.test_connection(&target, None).await {
+    let reason = match pool.test_exec(&target, "true").await {
         Ok(fp) if fp == expected_fp => return Ok(()),
         Ok(fp) => format!("host key changed on port {new_port} ({fp})"),
         Err(e) => e,

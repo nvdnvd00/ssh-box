@@ -199,6 +199,32 @@ export const InstallerStudio: React.FC<{ vps: VpsCtx; os: HostOs }> = ({ vps, os
       {res.error && <Notice tone="danger">{res.error}</Notice>}
       {hostId === "local" && os === "windows" && <Notice tone="warn">{t.instWindowsPopupNote}</Notice>}
 
+      <section className="space-y-2">
+        <input
+          className="ui-input"
+          value={query}
+          placeholder={t.instSearchPlaceholder.replace("…", present.join(", "))}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        {query.trim().length >= 2 && missingMgrs.length > 0 && (
+          <p className="px-1 text-xs text-muted-foreground">{t.instSearchSkipped(missingMgrs.join(", "))}</p>
+        )}
+        {Object.entries(hitGroups).map(([m, list]) =>
+          group(
+            m,
+            list.map((h) => (
+              <label key={h.package} className="flex items-start gap-3 px-4 py-2">
+                <input type="checkbox" className="mt-1" disabled={busy} checked={sel.has(`hit:${m}:${h.package}`)} onChange={() => pickHit(h)} />
+                <span className="min-w-0">
+                  <span className="block font-mono text-sm text-foreground break-all">{h.package}</span>
+                  <span className="block text-xs text-muted-foreground">{h.description}</span>
+                </span>
+              </label>
+            )),
+          ),
+        )}
+      </section>
+
       <div className="flex flex-wrap gap-2">
         {tabs.map(([id, label, n]) => (
           <button
@@ -233,31 +259,6 @@ export const InstallerStudio: React.FC<{ vps: VpsCtx; os: HostOs }> = ({ vps, os
       )}
       {CATEGORIES.map((c) => group(c, scan.tools.filter((tl) => tl.category === c && inTab(tl)).map(toolRow)))}
 
-      <section className="space-y-2">
-        <input
-          className="ui-input"
-          value={query}
-          placeholder={t.instSearchPlaceholder.replace("…", present.join(", "))}
-          onChange={(e) => setQuery(e.target.value)}
-        />
-        {query.trim().length >= 2 && missingMgrs.length > 0 && (
-          <p className="px-1 text-xs text-muted-foreground">{t.instSearchSkipped(missingMgrs.join(", "))}</p>
-        )}
-        {Object.entries(hitGroups).map(([m, list]) =>
-          group(
-            m,
-            list.map((h) => (
-              <label key={h.package} className="flex items-start gap-3 px-4 py-2">
-                <input type="checkbox" className="mt-1" disabled={busy} checked={sel.has(`hit:${m}:${h.package}`)} onChange={() => pickHit(h)} />
-                <span className="min-w-0">
-                  <span className="block font-mono text-sm text-foreground break-all">{h.package}</span>
-                  <span className="block text-xs text-muted-foreground">{h.description}</span>
-                </span>
-              </label>
-            )),
-          ),
-        )}
-      </section>
 
       {batch.length > 0 && (
         <section className="rounded-2xl border border-border/80 bg-card/65 divide-y divide-border/60">

@@ -514,20 +514,23 @@ pub fn parse_windows_firewall(json: &str, server_port: u16) -> Result<FirewallSn
     });
     // A program-scoped rule (the stock OpenSSH one is limited to sshd.exe) applies only while exactly that file owns every
     // socket on its port: another sshd.exe (zip/MSI install, Cygwin) does not, and an unknown listener path never does.
+    // Lenient (blocks, for the guard): that file may own one of the sockets, an unknown path included (conservative).
     let is_any = |v: &str| v.trim().eq_ignore_ascii_case("any");
-    let program_owns = |r: &WinRule, protocol: &str| {
+    let program_owns = |r: &WinRule, protocol: &str, lenient: bool| {
         let prog = r.program.trim();
         if is_any(prog) {
             return true;
         }
         // Port-less (only blocks are read without a port): what matters is whether the program owns the SSH listener.
         let (port, protocol) = if is_any(&r.local_port) { (server_port.to_string(), "tcp") } else { (r.local_port.clone(), protocol) };
-        let mut on_port = w.sockets.iter().filter(|s| rule_port_matches(&port, protocol, s.port, &s.protocol)).peekable();
-        !prog.is_empty() && on_port.peek().is_some() && on_port.all(|s| !s.path.is_empty() && s.path.eq_ignore_ascii_case(prog))
+        let on_port: Vec<&WinSocket> = w.sockets.iter().filter(|s| rule_port_matches(&port, protocol, s.port, &s.protocol)).collect();
+        let owns = |s: &&WinSocket| !s.path.is_empty() && s.path.eq_ignore_ascii_case(prog);
+        !prog.is_empty()
+            && if lenient { on_port.iter().any(|s| s.path.is_empty() || owns(s)) } else { !on_port.is_empty() && on_port.iter().all(owns) }
     };
     // Every port rule is listed; only plain port rules of the SSH profile take part in the exposure, the rest leave the port "unknown".
-    // `counted` feeds the port display: the guard's conservative extras (blocks of any profile while the SSH profile is
-    // unknown) stay out of it, so a port never reads safer than it is.
+    // `counted` feeds the port display: the guard's conservative extras for blocks (any profile while the SSH profile is
+    // unknown, an unknown listener path) stay out of it, so a port never reads safer than it is.
     let (mut rules, mut unlisted_blocks, mut counted) = (Vec::new(), Vec::new(), Vec::new());
     for r in &w.rules {
         // ICMPv4/ICMPv6/other protocol numbers (only port-less blocks reach here) never touch a TCP/UDP port: skip them.
@@ -571,9 +574,9 @@ pub fn parse_windows_firewall(json: &str, server_port: u16) -> Result<FirewallSn
                     && (!sshd_service || rule_port_matches(&r.local_port, protocol, server_port, "tcp"))
                     && !(allow && allows_off)
                     && applies(&r.profile, !allow)
-                    && program_owns(r, protocol),
+                    && program_owns(r, protocol, !allow),
             };
-            if item.effective && (allow || applies(&r.profile, false)) {
+            if item.effective && (allow || (applies(&r.profile, false) && program_owns(r, protocol, false))) {
                 counted.push(if pinned { FirewallRuleItem { to_port: server_port.to_string(), ..item.clone() } } else { item.clone() });
             }
             if r.local_port.trim().eq_ignore_ascii_case("any") {
@@ -1345,6 +1348,21 @@ mod tests {
         assert_eq!(build_windows_set_state(&admin_ctx(), &snap, true), Err("LOCKOUT_BLOCKED: windows_block_covers_me".to_string()));
         assert!(snap.rules.iter().all(|r| !r.effective), "the Private-only allow still does not count");
         assert!(build_windows_set_state(&admin_ctx(), &fw_off(blk), true).is_ok(), "known Private SSH NIC: the Public block is elsewhere");
+    }
+
+    // A non-admin can't read sshd's path, but this is about the guard: a block on sshd.exe (port-less or on 22) whose listener path
+    // is unknown may well be the one holding SSH, so enabling must be refused; the display does not count it (never safer than it is).
+    #[test]
+    fn windows_program_block_counts_when_the_listener_path_is_unknown() {
+        let sshd = r"C:\WINDOWS\system32\OpenSSH\sshd.exe";
+        for port in ["Any", "22"] {
+            let blk = format!(r#",{{"displayName":"sshd block","service":"Any","group":"tmp","program":{},"profile":"Any","action":"Block","localPort":"{port}","protocol":"TCP","remoteAddress":"Any"}}"#, serde_json::to_string(sshd).unwrap());
+            let j = FW_OFF.replace("EXTRA", &blk).replace(r#""path":"C:\\Windows\\System32\\OpenSSH\\sshd.exe""#, r#""path":"""#);
+            let snap = parse_windows_firewall(&j, 22).unwrap();
+            assert_eq!(build_windows_set_state(&admin_ctx(), &snap, true), Err("LOCKOUT_BLOCKED: windows_block_covers_me".to_string()), "{port}");
+            let on = parse_windows_firewall(&j.replace(r#""enabled":false"#, r#""enabled":true"#), 22).unwrap();
+            assert_eq!(on.listening_sockets[0].exposure, "exposed", "{port}");
+        }
     }
 
     // A block tied to the sshd service only reaches sshd: on 8080 (owned by app.exe) it blocks nothing, and on a range holding the

@@ -152,13 +152,7 @@ export type TabResources =
   | "sftp"
   | "vpsConfig";
 
-export type VpsStudioTab =
-  | "ssh"
-  | "firewall"
-  | "fail2ban"
-  | "access"
-  | "kernel"
-  | "system";
+export type VpsStudioTab = "ssh" | "firewall" | "access";
 
 export interface VpsPrivilegeInfo {
   user: string;
@@ -240,45 +234,6 @@ export interface FirewallSnapshot {
   listeningSockets: ListeningSocketItem[];
 }
 
-export interface Fail2banJailItem {
-  name: string;
-  currentlyFailed: number;
-  totalFailed: number;
-  currentlyBanned: number;
-  totalBanned: number;
-  bannedIps: string[];
-  findtimeSecs: number;
-  bantimeSecs: number;
-  maxretry: number;
-}
-
-export interface SshAuthAuditEvent {
-  timestamp: string;
-  eventType: "accepted" | "failed" | "invalid_user" | string;
-  username: string;
-  ip: string;
-  method: "publickey" | "password" | "invalid_user" | "unknown" | string;
-  port: number;
-  rawLine: string;
-}
-
-export interface AttackerIpSummary {
-  ip: string;
-  failedCount: number;
-  lastTargetUser: string;
-  isCurrentlyBanned: boolean;
-}
-
-export interface Fail2banSnapshot {
-  installed: boolean;
-  running: boolean;
-  detectedClientIp: string;
-  jails: Fail2banJailItem[];
-  ignoreIps: string[];
-  authEvents: SshAuthAuditEvent[];
-  topAttackerIps: AttackerIpSummary[];
-}
-
 export interface RemoteAuthorizedKey {
   index: number;
   keyType: string;
@@ -303,92 +258,6 @@ export interface LinuxAccountItem {
 
 export interface AccessKeysSnapshot {
   accounts: LinuxAccountItem[];
-}
-
-export interface KernelSysctlSnapshot {
-  kernelRelease: string;
-  availableCongestionControls: string[];
-  bbrSupported: boolean;
-  bbrActive: boolean;
-  congestionControl: string;
-  defaultQdisc: string;
-  swappiness: number;
-  overcommitMemory: number;
-  vfsCachePressure: number;
-  fileMax: number;
-  somaxconn: number;
-  tcpMaxSynBacklog: number;
-  tcpTwReuse: boolean;
-  tcpFinTimeout: number;
-  tcpSyncookies: boolean;
-  icmpEchoIgnoreAll: boolean;
-  rpFilter: boolean;
-  acceptRedirects: boolean;
-  acceptSourceRoute: boolean;
-  ipForward: boolean;
-  persistedConfig: string;
-}
-
-export interface KernelSysctlUpdate {
-  congestionControl: string;
-  defaultQdisc: string;
-  swappiness: number;
-  overcommitMemory: number;
-  vfsCachePressure: number;
-  fileMax: number;
-  somaxconn: number;
-  tcpMaxSynBacklog: number;
-  tcpTwReuse: boolean;
-  tcpFinTimeout: number;
-  tcpSyncookies: boolean;
-  icmpEchoIgnoreAll: boolean;
-  rpFilter: boolean;
-  acceptRedirects: boolean;
-  acceptSourceRoute: boolean;
-  ipForward: boolean;
-}
-
-export interface SwapFileItem {
-  filename: string;
-  swapType: string;
-  sizeMb: number;
-  usedMb: number;
-  priority: number;
-}
-
-export interface SystemdServiceItem {
-  unit: string;
-  loadState: string;
-  activeState: "active" | "inactive" | "failed" | "activating" | string;
-  subState: "running" | "exited" | "dead" | "failed" | string;
-  description: string;
-  enabled: boolean;
-}
-
-export interface CronJobItem {
-  index: number;
-  schedule: string;
-  command: string;
-  comment: string;
-  paused: boolean;
-  rawLine: string;
-}
-
-export interface SystemOpsSnapshot {
-  hostname: string;
-  timezone: string;
-  ntpSynchronized: boolean;
-  dnsServers: string[];
-  unattendedUpgradesEnabled: boolean;
-  ramTotalMb: number;
-  ramUsedMb: number;
-  diskTotalMb: number;
-  diskFreeMb: number;
-  swapTotalMb: number;
-  swapUsedMb: number;
-  swaps: SwapFileItem[];
-  services: SystemdServiceItem[];
-  cronJobs: CronJobItem[];
 }
 
 export interface KnownHostEntry {

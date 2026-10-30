@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   CheckCircle2,
-  Cpu,
   Flame,
   KeyRound,
   Lock,
@@ -10,12 +9,10 @@ import {
   RefreshCw,
   Server,
   Shield,
-  ShieldAlert,
   ShieldCheck,
   Sliders,
   Terminal as TerminalIcon,
   Users,
-  Wrench,
   X,
 } from "lucide-react";
 import {
@@ -28,10 +25,7 @@ import { AppSettingsConfig } from "../themes";
 import { SelectField } from "./SelectField";
 import { SshHardeningStudio } from "./vps/SshHardeningStudio";
 import { FirewallStudio } from "./vps/FirewallStudio";
-import { Fail2banStudio } from "./vps/Fail2banStudio";
 import { AccessKeysStudio } from "./vps/AccessKeysStudio";
-import { KernelTuningStudio } from "./vps/KernelTuningStudio";
-import { SystemOpsStudio } from "./vps/SystemOpsStudio";
 
 interface VpsConfigWorkspaceProps {
   hosts: HostEntry[];
@@ -174,28 +168,10 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
       icon: <Flame className="w-4 h-4 text-orange-400" />,
     },
     {
-      id: "fail2ban",
-      label: isVi ? "Fail2ban & Nhật ký" : "Fail2ban & Audit",
-      subtitle: "Intrusion Radar",
-      icon: <ShieldAlert className="w-4 h-4 text-rose-400" />,
-    },
-    {
       id: "access",
       label: isVi ? "Users & Khóa SSH" : "Users & SSH Keys",
       subtitle: "Accounts & Vault Keys",
       icon: <Users className="w-4 h-4 text-cyan-400" />,
-    },
-    {
-      id: "kernel",
-      label: isVi ? "Kernel & TCP BBR" : "Kernel & TCP BBR",
-      subtitle: "Sysctl Network Tuning",
-      icon: <Cpu className="w-4 h-4 text-violet-400" />,
-    },
-    {
-      id: "system",
-      label: isVi ? "Swap, Hệ thống & Cron" : "System, Swap & Cron",
-      subtitle: "Swapfile, DNS, Timers",
-      icon: <Wrench className="w-4 h-4 text-amber-400" />,
     },
   ];
 
@@ -448,44 +424,11 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
           />
         )}
 
-        {activeStudio === "fail2ban" && (
-          <Fail2banStudio
-            key={`${selectedHost.id}-${refreshNonce}`}
-            host={selectedHost}
-            sudoPassword={currentSudoPassword}
-            privilegeInfo={currentPrivilege}
-            language={lang}
-            onRequireSudoUnlock={() => setSudoPopoverOpen(true)}
-          />
-        )}
-
         {activeStudio === "access" && (
           <AccessKeysStudio
             key={`${selectedHost.id}-${refreshNonce}`}
             host={selectedHost}
             sshKeys={resources.sshKeys}
-            sudoPassword={currentSudoPassword}
-            privilegeInfo={currentPrivilege}
-            language={lang}
-            onRequireSudoUnlock={() => setSudoPopoverOpen(true)}
-          />
-        )}
-
-        {activeStudio === "kernel" && (
-          <KernelTuningStudio
-            key={`${selectedHost.id}-${refreshNonce}`}
-            host={selectedHost}
-            sudoPassword={currentSudoPassword}
-            privilegeInfo={currentPrivilege}
-            language={lang}
-            onRequireSudoUnlock={() => setSudoPopoverOpen(true)}
-          />
-        )}
-
-        {activeStudio === "system" && (
-          <SystemOpsStudio
-            key={`${selectedHost.id}-${refreshNonce}`}
-            host={selectedHost}
             sudoPassword={currentSudoPassword}
             privilegeInfo={currentPrivilege}
             language={lang}

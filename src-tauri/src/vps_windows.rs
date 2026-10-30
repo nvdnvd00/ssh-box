@@ -270,7 +270,8 @@ $rows = foreach ($u in Get-LocalUser) {
     } catch { }
   }
   $keys = @()
-  try { $keys = @(Get-Content -LiteralPath $file -ErrorAction Stop) } catch { }
+  # Plain strings: PS 5.1 would serialize each line with its PSPath/PSDrive NoteProperties.
+  try { $keys = @(Get-Content -LiteralPath $file -ErrorAction Stop | ForEach-Object { [string]$_ }) } catch { }
   [ordered]@{ name = $u.Name; enabled = [bool]$u.Enabled; isAdmin = [bool]$isAdmin; keysFile = $file; keys = $keys }
 }
 ConvertTo-Json -InputObject @($rows) -Depth 4 -Compress
@@ -290,7 +291,23 @@ struct WinAccount {
     #[serde(default)]
     keys_file: String,
     #[serde(default)]
-    keys: Vec<String>,
+    keys: Vec<KeyLine>,
+}
+
+// A Get-Content line can arrive as {"value": "...", "PSPath": ...} instead of a string.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum KeyLine {
+    Text(String),
+    Object { value: String },
+}
+
+impl KeyLine {
+    fn text(&self) -> &str {
+        match self {
+            KeyLine::Text(s) | KeyLine::Object { value: s } => s,
+        }
+    }
 }
 
 pub fn parse_windows_accounts(json: &str) -> Result<AccessKeysSnapshot, String> {
@@ -316,7 +333,7 @@ pub fn parse_windows_accounts(json: &str) -> Result<AccessKeysSnapshot, String> 
             groups: if a.is_admin { vec!["Administrators".to_string()] } else { Vec::new() },
             has_sudo: a.is_admin,
             nopasswd_sudo: false,
-            authorized_keys: a.keys.iter().enumerate().filter_map(|(i, l)| parse_authorized_key_line(l, i as u32)).collect(),
+            authorized_keys: a.keys.iter().enumerate().filter_map(|(i, l)| parse_authorized_key_line(l.text(), i as u32)).collect(),
             keys_file: a.keys_file,
         })
         .collect();
@@ -731,6 +748,18 @@ mod tests {
         assert!(a.has_sudo && !a.locked && a.keys_file.ends_with("administrators_authorized_keys"));
         assert_eq!((a.authorized_keys.len(), a.groups.clone()), (1, vec!["Administrators".to_string()]));
         assert!(!b.has_sudo && b.locked && b.authorized_keys.is_empty() && b.keys_file.contains(r"sshbox-std\.ssh"));
+    }
+
+    // PS 5.1 serializes Get-Content lines as objects ({"value":..,"PSPath":..}); one key must not break the whole tab.
+    #[test]
+    fn windows_accounts_accept_key_lines_serialized_as_objects() {
+        let obj = ACC.replace(
+            r#"["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHkeyone me@pc"]"#,
+            r#"[{"value":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHkeyone me@pc","PSPath":"C:\\x","ReadCount":1}]"#,
+        );
+        let s = parse_windows_accounts(&format!("[{obj},{STD}]")).unwrap();
+        assert_eq!(s.accounts[0].authorized_keys[0].public_key_body, "AAAAC3NzaC1lZDI1NTE5AAAAIHkeyone");
+        assert!(windows_accounts_read_script().contains("ForEach-Object { [string]$_ }"));
     }
 
     // PS 5.1 drops the array brackets for a single account; the list must still load.

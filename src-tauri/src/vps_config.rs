@@ -783,14 +783,14 @@ pub async fn get_firewall_snapshot(
     Ok(snapshot_after(&raw, probe.firewall_engine))
 }
 
-struct UfwRuleArgs {
-    action: &'static str,
-    source: String,
-    port: String,
-    proto: &'static str,
+pub(crate) struct UfwRuleArgs {
+    pub action: &'static str,
+    pub source: String,
+    pub port: String,
+    pub proto: &'static str,
 }
 
-fn validate_rule_args(action: &str, source: &str, port: &str, proto: &str) -> Result<UfwRuleArgs, String> {
+pub(crate) fn validate_rule_args(action: &str, source: &str, port: &str, proto: &str) -> Result<UfwRuleArgs, String> {
     let action = match action.trim().to_ascii_lowercase().as_str() {
         "allow" => "allow",
         "limit" => "limit",
@@ -914,7 +914,7 @@ async fn run_firewall_write(
 
 fn writable_engine(engine: FirewallEngine) -> Result<(), String> {
     match engine {
-        FirewallEngine::Ufw | FirewallEngine::Firewalld => Ok(()),
+        FirewallEngine::Ufw | FirewallEngine::Firewalld | FirewallEngine::Windows => Ok(()),
         _ => Err(vps_err(ERR_UNSUPPORTED, "firewall_read_only")),
     }
 }
@@ -931,6 +931,10 @@ pub async fn add_firewall_rule(
     let probe = probe(host_id, pool, sudo_password.clone()).await?;
     writable_engine(probe.firewall_engine)?;
     crate::vps_guard::check_firewall_add(&probe.context, &action, &source, &port)?;
+    if probe.firewall_engine == FirewallEngine::Windows {
+        let script = crate::vps_windows::build_windows_add_rule_script(&action, &source, &port, &proto)?;
+        return crate::vps_windows::run_windows_firewall_write(host_id, pool, &script).await;
+    }
     let script = match probe.firewall_engine {
         FirewallEngine::Firewalld => build_firewalld_add_rule_script(&action, &source, &port, &proto)?,
         _ => build_ufw_add_rule_script(&action, &source, &port, &proto)?,
@@ -947,6 +951,19 @@ pub async fn delete_firewall_rule(
     let probe = probe(host_id, pool, sudo_password.clone()).await?;
     writable_engine(probe.firewall_engine)?;
     let current = get_firewall_snapshot(host_id, pool, sudo_password.clone()).await?;
+    if probe.firewall_engine == FirewallEngine::Windows {
+        // Trust only the fresh rows (never the client's flags): find the rule by name, then guard and delete it.
+        let fresh: Vec<&FirewallRuleItem> = current.rules.iter().filter(|r| r.raw_spec == rule.raw_spec).collect();
+        let Some(target) = fresh.first() else {
+            return Err(vps_err(ERR_COMMAND_FAILED, "rule not found"));
+        };
+        if fresh.iter().any(|r| r.comment != crate::vps_windows::WINDOWS_RULE_GROUP) {
+            return Err(vps_err(ERR_UNSUPPORTED, "windows_rule_not_managed"));
+        }
+        crate::vps_guard::check_firewall_delete_windows(&probe.context, &current.rules, target)?;
+        let script = crate::vps_windows::build_windows_delete_rule_script(target)?;
+        return crate::vps_windows::run_windows_firewall_write(host_id, pool, &script).await;
+    }
     crate::vps_guard::check_firewall_delete(&probe.context, &current.rules, &rule)?;
     let script = match probe.firewall_engine {
         FirewallEngine::Firewalld => build_firewalld_delete_rule_script(&rule),
@@ -965,6 +982,10 @@ pub async fn set_firewall_state(
     writable_engine(probe.firewall_engine)?;
     let current = get_firewall_snapshot(host_id, pool, sudo_password.clone()).await?;
     let ensure = crate::vps_guard::ssh_allow_needed(&probe.context, &current.rules).then_some(probe.context.server_port);
+    if probe.firewall_engine == FirewallEngine::Windows {
+        let script = crate::vps_windows::build_windows_firewall_state_script(enable, ensure);
+        return crate::vps_windows::run_windows_firewall_write(host_id, pool, &script).await;
+    }
     let script = build_set_firewall_state_script(probe.firewall_engine, enable, ensure)?;
     run_firewall_write(host_id, pool, sudo_password, probe.firewall_engine, &script).await
 }

@@ -84,7 +84,6 @@ pub fn compute_support(p: &VpsProbe) -> VpsSupport {
             access: tab(ReadOnly, Some("read_only_os")),
             password_coupled: true,
         },
-        // Task 9 opens the firewall tab for writes.
         OsFamily::Windows => VpsSupport {
             ssh: match (p.privilege == PrivilegeLevel::Admin, p.caps.sshd_running) {
                 (false, _) => tab(ReadOnly, Some("windows_not_admin")),
@@ -96,7 +95,7 @@ pub fn compute_support(p: &VpsProbe) -> VpsSupport {
             firewall: match (p.caps.has_net_security, p.privilege == PrivilegeLevel::Admin) {
                 (false, _) => tab(Hidden, None),
                 (_, false) => tab(ReadOnly, Some("windows_not_admin")),
-                _ => tab(ReadOnly, Some("windows_firewall_read_only")),
+                _ => tab(Full, None),
             },
             access: tab(ReadOnly, Some("read_only_os")),
             password_coupled: false,
@@ -220,15 +219,15 @@ mod tests {
         assert_eq!(check_hidden_rows(&rows, &SshdSettings::default(), &desired), Ok(()));
     }
 
-    // Windows firewall is read-only (Task 9 opens writes); without NetSecurity it is hidden, without admin the reason is named.
+    // Windows firewall is writable for admins with NetSecurity; without NetSecurity it is hidden, without admin the reason is named.
     #[test]
-    fn windows_firewall_is_read_only_when_net_security_present() {
+    fn windows_firewall_is_full_for_admin_with_net_security() {
         let mut p = linux(true, "ufw");
         p.os_family = OsFamily::Windows;
         p.privilege = PrivilegeLevel::Admin;
         assert_eq!(compute_support(&p).firewall.level, SupportLevel::Hidden);
         p.caps.has_net_security = true;
-        assert_eq!(compute_support(&p).firewall, tab(SupportLevel::ReadOnly, Some("windows_firewall_read_only")));
+        assert_eq!(compute_support(&p).firewall, tab(SupportLevel::Full, None));
         p.privilege = PrivilegeLevel::None;
         assert_eq!(compute_support(&p).firewall, tab(SupportLevel::ReadOnly, Some("windows_not_admin")));
     }

@@ -127,7 +127,7 @@ export const FirewallStudio: React.FC<VpsStudioProps> = ({ vps, probe }) => {
             label={describe(r.action, r.toPort === "Anywhere" ? "" : r.toPort.replace(/\/(tcp|udp)$/, ""), r.protocol, r.fromSource)}
             directive={r.rawSpec}
           >
-            {writable && (
+            {writable && (engine !== "windows" || r.comment === "ssh-box") && (
               <ConfirmButton
                 label={t.vpsFwDelete}
                 confirmLabel={t.vpsFwDeleteConfirm}

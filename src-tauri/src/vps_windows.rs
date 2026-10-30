@@ -366,6 +366,69 @@ pub fn parse_windows_firewall(json: &str) -> Result<FirewallSnapshot, String> {
     })
 }
 
+// Every rule ssh-box writes carries the group, so deletes can be limited to rules it created.
+fn new_rule_cmd(action: &str, source: &str, port: &str, name_proto: &str, proto: &str) -> String {
+    let src = if source == "any" { "Any".to_string() } else { ps_quote(source) };
+    let name = format!("{WINDOWS_RULE_GROUP}: {} {port}/{name_proto} from {source}", action.to_ascii_uppercase());
+    let ports = if port == "any" {
+        String::new()
+    } else {
+        let list: Vec<String> = port.split(',').map(|p| ps_quote(&p.replace(':', "-"))).collect();
+        format!(" -LocalPort @({})", list.join(","))
+    };
+    let proto_arg = if port == "any" && proto == "any" { "Any" } else { &proto.to_ascii_uppercase() };
+    let act = if action == "allow" { "Allow" } else { "Block" };
+    format!(
+        "New-NetFirewallRule -DisplayName {} -Group {} -Direction Inbound -Action {act} -RemoteAddress {src} -Protocol {proto_arg}{ports} | Out-Null\n",
+        ps_quote(&name),
+        ps_quote(WINDOWS_RULE_GROUP)
+    )
+}
+
+pub fn build_windows_add_rule_script(action: &str, source: &str, port: &str, proto: &str) -> Result<String, String> {
+    let a = crate::vps_config::validate_rule_args(action, source, port, proto)?;
+    let act = match a.action {
+        "allow" => "allow",
+        "deny" | "reject" => "deny",
+        _ => return Err(vps_err(ERR_UNSUPPORTED, "windows_action_unsupported")),
+    };
+    // Ports need a concrete protocol: "any" becomes one rule per protocol, sharing the DisplayName.
+    let protos: &[&str] = if a.proto == "any" && a.port != "any" { &["tcp", "udp"] } else { &[a.proto] };
+    Ok(protos.iter().map(|p| new_rule_cmd(act, &a.source, &a.port, a.proto, p)).collect())
+}
+
+// Deletes by group + DisplayName; "found nothing" must throw because a native non-zero exit does not stop PowerShell 5.1.
+pub fn build_windows_delete_rule_script(rule: &FirewallRuleItem) -> Result<String, String> {
+    if rule.comment != WINDOWS_RULE_GROUP {
+        return Err(vps_err(ERR_UNSUPPORTED, "windows_rule_not_managed"));
+    }
+    Ok(format!(
+        "$r = @(Get-NetFirewallRule -Group {} -DisplayName {} -ErrorAction SilentlyContinue)\nif ($r.Count -eq 0) {{ throw 'rule not found' }}\n$r | Remove-NetFirewallRule\n",
+        ps_quote(WINDOWS_RULE_GROUP),
+        ps_quote(&rule.raw_spec)
+    ))
+}
+
+// Enabling first creates the SSH allow, otherwise the profile switch can cut the current session.
+pub fn build_windows_firewall_state_script(enable: bool, ensure_port: Option<u16>) -> String {
+    let mut s = String::new();
+    if let (true, Some(p)) = (enable, ensure_port) {
+        s.push_str(&new_rule_cmd("allow", "any", &p.to_string(), "tcp", "tcp"));
+    }
+    s.push_str(&format!(
+        "Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled {}\n",
+        if enable { "True" } else { "False" }
+    ));
+    s
+}
+
+// Write, then the fresh snapshot in the same run (same marker as the Linux path).
+pub async fn run_windows_firewall_write(host_id: &str, pool: &SshPool, write: &str) -> Result<FirewallSnapshot, String> {
+    let script = format!("{write}Write-Output 'SSHBOX_SNAPSHOT_BEGIN'\n{}", windows_firewall_read_script());
+    let raw = run_windows_script(host_id, pool, &script, None).await?;
+    parse_windows_firewall(raw.rsplit("SSHBOX_SNAPSHOT_BEGIN").next().unwrap_or(&raw))
+}
+
 pub async fn get_windows_firewall(host_id: &str, pool: &SshPool, probe: &VpsProbe) -> Result<FirewallSnapshot, String> {
     check_windows_readable(probe)?;
     parse_windows_firewall(&run_windows_script(host_id, pool, &windows_firewall_read_script(), None).await?)
@@ -657,5 +720,58 @@ mod tests {
     fn windows_allow_any_with_one_blocked_source_is_exposed() {
         let rules = [wrule("ALLOW", "80", "Anywhere"), wrule("DENY", "80", "198.51.100.9")];
         assert_eq!(compute_socket_exposure_windows(&sock(80), true, &rules), "exposed");
+    }
+
+    fn win_rule(comment: &str) -> FirewallRuleItem {
+        FirewallRuleItem {
+            index: 1, to_port: "22".into(), protocol: "tcp".into(), action: "ALLOW".into(), from_source: "Anywhere".into(),
+            v6: false, comment: comment.into(), raw_spec: "ssh-box: ALLOW 22/tcp from any".into(), effective: true,
+        }
+    }
+
+    // Mọi giá trị người dùng đưa vào PowerShell phải được quote và rule phải nằm trong nhóm ssh-box (để xoá được sau này).
+    #[test]
+    fn windows_add_rule_quotes_and_groups() {
+        let s = build_windows_add_rule_script("deny", "10.0.0.1'; calc", "22", "tcp");
+        assert!(s.is_err(), "source with quote must be rejected by validation");
+        let s = build_windows_add_rule_script("deny", "10.0.0.0/8", "22", "tcp").unwrap();
+        assert!(s.contains("-Group 'ssh-box'") && s.contains("-Action Block") && s.contains("-RemoteAddress '10.0.0.0/8'"));
+        assert!(build_windows_add_rule_script("allow", "any", "22;calc", "tcp").is_err());
+    }
+
+    // Port mà proto = any phải mở cả TCP lẫn UDP, nếu không rule chỉ chặn/mở một nửa.
+    #[test]
+    fn windows_add_any_proto_creates_tcp_and_udp() {
+        let s = build_windows_add_rule_script("allow", "any", "53", "any").unwrap();
+        assert_eq!(s.matches("New-NetFirewallRule").count(), 2);
+        assert!(s.contains("-Protocol TCP") && s.contains("-Protocol UDP"));
+    }
+
+    // Chỉ xoá rule do ssh-box tạo; rule hệ thống như OpenSSH-Server-In-TCP không được đụng tới.
+    #[test]
+    fn windows_delete_refuses_unmanaged_rule() {
+        assert_eq!(build_windows_delete_rule_script(&win_rule("")), Err("UNSUPPORTED: windows_rule_not_managed".to_string()));
+        let s = build_windows_delete_rule_script(&win_rule("ssh-box")).unwrap();
+        assert!(s.contains("throw") && s.contains("-Group 'ssh-box'"));
+    }
+
+    // Bật firewall mà chưa có rule allow SSH sẽ tự cắt kết nối; rule phải có trước lệnh bật.
+    #[test]
+    fn windows_enable_adds_ssh_allow_before_enabling() {
+        let s = build_windows_firewall_state_script(true, Some(22));
+        assert!(s.find("New-NetFirewallRule").unwrap() < s.find("Set-NetFirewallProfile").unwrap());
+        assert!(s.contains("-Enabled True"));
+        let off = build_windows_firewall_state_script(false, Some(22));
+        assert!(!off.contains("New-NetFirewallRule") && off.contains("-Enabled False"));
+    }
+
+    // Chặn mọi nguồn trên cổng SSH đang dùng là tự khoá mình; phải bị bộ chặn từ chối trước khi tới PowerShell.
+    #[test]
+    fn windows_block_covering_me_is_blocked() {
+        let ctx = parse_windows_probe(&raw("1", "admin", CONN), key_auth()).unwrap().context;
+        assert_eq!(
+            crate::vps_guard::check_firewall_add(&ctx, "deny", "Anywhere", "22"),
+            Err("LOCKOUT_BLOCKED: closes_ssh_for_everyone".to_string())
+        );
     }
 }

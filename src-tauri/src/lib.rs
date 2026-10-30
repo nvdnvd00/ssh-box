@@ -26,7 +26,7 @@ use tauri::State;
 use telemetry::{DockerFullSnapshot, ServerMetrics};
 use tokio::sync::mpsc;
 use vps_config::{
-    AccessKeysSnapshot, FirewallSnapshot, SshdConfigSnapshot, SshdConfigUpdate, VpsProbe,
+    AccessKeysSnapshot, FirewallSnapshot, SshdView, VpsProbe,
 };
 
 pub struct AppState {
@@ -832,48 +832,12 @@ async fn vps_probe(
 }
 
 #[tauri::command]
-async fn vps_get_sshd_config(
+async fn vps_get_sshd_settings(
     state: State<'_, AppState>,
     host_id: String,
     sudo_password: Option<String>,
-) -> Result<SshdConfigSnapshot, String> {
-    vps_config::get_sshd_config(&host_id, &state.ssh_pool, sudo_password).await
-}
-
-#[tauri::command]
-async fn vps_apply_sshd_config(
-    state: State<'_, AppState>,
-    host_id: String,
-    update: SshdConfigUpdate,
-    sudo_password: Option<String>,
-    with_auto_rollback: bool,
-) -> Result<SshdConfigSnapshot, String> {
-    vps_config::apply_sshd_config(
-        &host_id,
-        &state.ssh_pool,
-        update,
-        sudo_password,
-        with_auto_rollback,
-    )
-    .await
-}
-
-#[tauri::command]
-async fn vps_confirm_sshd_config(
-    state: State<'_, AppState>,
-    host_id: String,
-    sudo_password: Option<String>,
-) -> Result<SshdConfigSnapshot, String> {
-    vps_config::confirm_sshd_config(&host_id, &state.ssh_pool, sudo_password).await
-}
-
-#[tauri::command]
-async fn vps_revert_sshd_config(
-    state: State<'_, AppState>,
-    host_id: String,
-    sudo_password: Option<String>,
-) -> Result<SshdConfigSnapshot, String> {
-    vps_config::revert_sshd_config(&host_id, &state.ssh_pool, sudo_password).await
+) -> Result<SshdView, String> {
+    vps_config::get_sshd_view(&host_id, &state.ssh_pool, sudo_password).await
 }
 
 #[tauri::command]
@@ -1100,10 +1064,7 @@ pub fn run() {
             export_ssh_key_to_host,
             save_session_log,
             vps_probe,
-            vps_get_sshd_config,
-            vps_apply_sshd_config,
-            vps_confirm_sshd_config,
-            vps_revert_sshd_config,
+            vps_get_sshd_settings,
             vps_get_firewall_snapshot,
             vps_add_firewall_rule,
             vps_delete_firewall_rule,

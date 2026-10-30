@@ -130,3 +130,34 @@ fn session_auth_reports_the_key_that_logged_in() {
         );
     });
 }
+
+// sshd itself decides precedence: Include before the main file's directives, first value wins.
+#[test]
+#[ignore]
+fn dropin_wins_over_cloud_init_and_main_file() {
+    use ssh_box_lib::vps_config::{parse_sshd_t, render_dropin, SshdSettings};
+    let dir = std::env::temp_dir().join(format!("sshbox-it-{}-dropin", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let d = dir.join("sshd_config.d");
+    std::fs::create_dir_all(&d).unwrap();
+    let host_key = dir.join("host_key");
+    keygen(&host_key);
+    let main = dir.join("sshd_config");
+    std::fs::write(
+        &main,
+        format!("Include {}/*.conf\nPasswordAuthentication no\nHostKey {}\n", d.display(), host_key.display()),
+    )
+    .unwrap();
+    std::fs::write(d.join("50-cloud-init.conf"), "PasswordAuthentication yes\n").unwrap();
+    let effective = || {
+        let out = Command::new("/usr/sbin/sshd").arg("-T").arg("-f").arg(&main).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        parse_sshd_t(&String::from_utf8_lossy(&out.stdout))
+    };
+    assert!(effective().password_authentication, "cloud-init drop-in should beat the main file");
+
+    let ours = SshdSettings { password_authentication: false, ..effective() };
+    std::fs::write(d.join("00-sshbox.conf"), render_dropin(&ours)).unwrap();
+    assert!(!effective().password_authentication, "00-sshbox.conf should beat 50-cloud-init.conf");
+    let _ = std::fs::remove_dir_all(&dir);
+}

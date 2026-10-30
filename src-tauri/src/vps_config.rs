@@ -1249,7 +1249,7 @@ echo "UID:$uid"
 if [ "$uid" = "0" ]; then s=root
 elif sudo -n true 2>/dev/null; then s=nopasswd
 elif [ -z "$pw" ]; then s=none
-elif printf '%s\n' "$pw" | sudo -S -p '' true >/dev/null 2>&1; then s=password_ok
+elif printf '%s\n' "$pw" | sudo -k -S -p '' true >/dev/null 2>&1; then s=password_ok
 else s=password_bad
 fi
 echo "SUDO:$s"
@@ -3305,6 +3305,25 @@ SSH_CONNECTION:203.0.113.7 51000 198.51.100.2 2222\nSYSTEMD:1\nSSH_SOCKET:active
     fn probe_without_ssh_connection_is_unsupported() {
         let raw = PROBE_UBUNTU.replace("SSH_CONNECTION:203.0.113.7 51000 198.51.100.2 2222", "SSH_CONNECTION:");
         assert!(parse_probe_output(&raw, key_auth()).unwrap_err().starts_with("UNSUPPORTED"));
+    }
+
+    // With cached sudo credentials plain `sudo -S` succeeds without reading the password, so a wrong one read as "unlocked".
+    #[cfg(unix)]
+    #[test]
+    fn probe_wrong_password_with_cached_sudo_credentials_is_password_bad() {
+        let dir = shell::temp_dir();
+        let bin = dir.join("bin");
+        shell::fake_bin(&bin, "id", "echo 1000");
+        // Cached credentials: only `-k` makes this sudo read and check the password line.
+        shell::fake_bin(&bin, "sudo", "case \"$1\" in -n) exit 1;; -k) IFS= read -r p; [ \"$p\" = right ];; *) exit 0;; esac");
+        let run = |pw: &str| {
+            let stdin = privileged_stdin(Some(pw), None).unwrap();
+            shell::run_local(PROBE_SCRIPT, &stdin, &bin, &[("SSH_CONNECTION", "203.0.113.7 51000 198.51.100.2 22")], &dir)
+        };
+        let out = run("wrong");
+        assert!(out.contains("SUDO:password_bad"), "{out}");
+        let out = run("right");
+        assert!(out.contains("SUDO:password_ok"), "{out}");
     }
 
     // The old probe nested the password in sh -c '…', so "a;touch INJECTED" ran a command.

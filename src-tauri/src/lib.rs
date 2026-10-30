@@ -9,6 +9,7 @@ pub mod vault;
 pub mod vps_config;
 pub mod vps_guard;
 pub mod vps_support;
+pub mod vps_windows;
 
 use host_store::HostEntry;
 use local_pty::LocalPtyManager;

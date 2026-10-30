@@ -1282,9 +1282,8 @@ pub async fn probe(
         .await
         .ok()
         .map(|o| String::from_utf8_lossy(&o).trim().to_string());
-    // Task 2 replaces this with the Windows probe.
     if unix_family(uname.as_deref()).is_none() {
-        return Err(vps_err(ERR_UNSUPPORTED, "unsupported_os"));
+        return crate::vps_windows::probe_windows(&host, pool).await;
     }
     let stdin = privileged_stdin(sudo_password.as_deref(), None)?;
     let out = pool.exec_bytes_on_host(&host, PROBE_SCRIPT, Some(&stdin)).await?;

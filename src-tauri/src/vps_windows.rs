@@ -52,7 +52,10 @@ pub async fn run_windows_script(
 
 pub const WINDOWS_PROBE_SCRIPT: &str = r#"Write-Output 'OS_FAMILY:windows'
 Write-Output ('OS_CAPTION:' + (Get-CimInstance Win32_OperatingSystem).Caption)
-Write-Output ('OS_DISPLAY_VERSION:' + (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').DisplayVersion)
+$cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+Write-Output ('OS_DISPLAY_VERSION:' + $cv.DisplayVersion)
+Write-Output ('OS_PRODUCT:' + $cv.ProductName)
+Write-Output ('OS_BUILD:' + $cv.CurrentBuildNumber)
 Write-Output ('USER:' + [Environment]::UserName)
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 Write-Output ('ADMIN:' + [int]$admin)
@@ -73,12 +76,16 @@ pub fn parse_windows_probe(raw: &str, auth: AuthUsed) -> Result<VpsProbe, String
         return Err(vps_err(ERR_UNSUPPORTED, "unsupported_os"));
     }
     let (client_ip, server_ip, server_port) = parse_ssh_connection(&field("SSH_CONNECTION:"))?;
-    let caption = field("OS_CAPTION:");
-    let os_version = format!(
-        "{} {}",
-        caption.strip_prefix("Microsoft Windows ").unwrap_or(&caption),
-        field("OS_DISPLAY_VERSION:")
-    );
+    let mut caption = field("OS_CAPTION:");
+    // A standard account reads no CIM Caption; ProductName says "Windows 10" on 11 too, so build 22000+ names 11.
+    if caption.is_empty() {
+        caption = field("OS_PRODUCT:");
+        if field("OS_BUILD:").parse::<u32>().is_ok_and(|b| b >= 22000) {
+            caption = caption.replacen("Windows 10", "Windows 11", 1);
+        }
+    }
+    let name = caption.strip_prefix("Microsoft ").unwrap_or(&caption);
+    let os_version = format!("{} {}", name.strip_prefix("Windows ").unwrap_or(name), field("OS_DISPLAY_VERSION:"));
     let net_security = field("NETSECURITY:") == "1";
     let mut probe = VpsProbe {
         privilege: if field("ADMIN:") == "1" { PrivilegeLevel::Admin } else { PrivilegeLevel::None },
@@ -660,6 +667,19 @@ mod tests {
         assert!(p.caps.sshd_running);
         assert_eq!(p.firewall_engine, FirewallEngine::Windows);
         assert_eq!(p.os_family, OsFamily::Windows);
+    }
+
+    // A standard account gets an empty CIM Caption, and the registry ProductName still says "Windows 10" on 11.
+    #[test]
+    fn windows_probe_names_the_os_without_cim_caption() {
+        let no_cim = |product: &str, build: &str| {
+            let r = raw("0", "bob", CONN).replace("OS_CAPTION:Microsoft Windows 11 Pro\n", &format!("OS_CAPTION:\nOS_PRODUCT:{product}\nOS_BUILD:{build}\n"));
+            parse_windows_probe(&r, key_auth()).unwrap().os_version
+        };
+        assert_eq!(no_cim("Windows 10 Pro", "26300"), "11 Pro 24H2");
+        assert_eq!(no_cim("Windows 10 Pro", "19045"), "10 Pro 24H2");
+        assert_eq!(no_cim("Windows Server 2025 Datacenter", "26100"), "Server 2025 Datacenter 24H2");
+        assert!(WINDOWS_PROBE_SCRIPT.contains("OS_PRODUCT:") && WINDOWS_PROBE_SCRIPT.contains("OS_BUILD:"));
     }
 
     // Người dùng không phải Administrator không được coi là có quyền ghi.

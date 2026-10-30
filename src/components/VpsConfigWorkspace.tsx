@@ -64,8 +64,9 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
   const hostKey = isLocal ? "local" : host.id;
   const sudoPassword = sudoPasswords[hostKey];
   const [localOs, setLocalOs] = useState<HostOs | null>(null);
+  const [localOsError, setLocalOsError] = useState<string | null>(null);
   useEffect(() => {
-    if (isLocal && !localOs) invoke<HostOs>("installer_local_os").then(setLocalOs).catch(() => {});
+    if (isLocal && !localOs) invoke<HostOs>("installer_local_os").then(setLocalOs).catch((e) => setLocalOsError(vpsErrorText(t, e)));
   }, [isLocal, localOs]);
 
   const runProbe = useCallback(
@@ -117,7 +118,10 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
   };
 
   const vps: VpsCtx = useMemo(
-    () => ({ hostId: hostKey, sudoPassword, requestSudo: () => setSudoOpen(true), t }),
+    () => ({ hostId: hostKey, sudoPassword, requestSudo: () => {
+        if (hostKey === "local") setSudoPasswords(({ local: _drop, ...rest }) => rest);
+        setSudoOpen(true);
+      }, t }),
     [hostKey, sudoPassword, t],
   );
 
@@ -210,6 +214,7 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
 
       <div className="flex-1 overflow-y-auto select-text">
         <div className="max-w-4xl mx-auto w-full p-4 sm:p-6 space-y-4">
+          {isLocal && localOsError && <Notice tone="danger">{localOsError}</Notice>}
           {isLocal && localOs && <InstallerStudio key="local" vps={vps} os={localOs} />}
           {!isLocal && probeError && <Notice tone="danger">{probeError}</Notice>}
           {!isLocal && probing && !probe && <p className="text-sm text-muted-foreground">{t.vpsShellProbing}</p>}
@@ -246,7 +251,7 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
             </div>
             <div className="px-5 py-4 space-y-2">
               <label className="ui-label" htmlFor="vps-sudo-password">
-                {host ? `${host.user}@${host.hostname}` : ""}
+                {isLocal ? t.vpsSudoLocalLabel : `${host?.user}@${host?.hostname}`}
               </label>
               <input
                 id="vps-sudo-password"

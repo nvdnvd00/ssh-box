@@ -101,7 +101,7 @@ export const InstallerStudio: React.FC<{ vps: VpsCtx; os: HostOs }> = ({ vps, os
         const output = await invoke<string>("installer_run", { hostId, os, action: items[i].action, sudoPassword: vps.sudoPassword ?? null });
         patch(i, { status: "done", output });
       } catch (e) {
-        if (parseVpsError(e).code === "SUDO_REQUIRED") {
+        if (["SUDO_REQUIRED", "SUDO_DENIED"].includes(parseVpsError(e).code ?? "")) {
           patch(i, { status: "waiting" });
           vps.requestSudo();
           stopped = true;

@@ -58,6 +58,7 @@ pub fn pick_method<'a>(tool: &'a CatalogTool, os: HostOs, present: &[String]) ->
 // ^[A-Za-z0-9@/._+:-]{1,128}$ — the only names allowed into a generated script.
 pub fn valid_name(s: &str) -> bool {
     (1..=128).contains(&s.len())
+        && !s.starts_with('-')
         && s.chars().all(|c| c.is_ascii_alphanumeric() || "@/._+:-".contains(c))
 }
 
@@ -239,7 +240,7 @@ pub enum InstallAction {
     Refresh,
 }
 
-const WINGET_FLAGS: &str = "--silent --accept-package-agreements --accept-source-agreements";
+const WINGET_FLAGS: &str = "--silent --disable-interactivity --accept-package-agreements --accept-source-agreements";
 
 fn checked<'a>(os: HostOs, manager: &str, name: &'a str) -> Result<&'a str, String> {
     if !managers_for(os).contains(&manager) {
@@ -265,12 +266,13 @@ pub fn action_script(os: HostOs, a: &InstallAction) -> Result<String, String> {
                 ("dnf", false) => format!("dnf remove -y {q}"),
                 ("snap", true) => format!("snap install {q}"),
                 ("snap", false) => format!("snap remove {q}"),
-                ("brew", true) => format!("brew install {q}"),
-                ("brew", false) => format!("brew uninstall {q}"),
+                ("brew", true) => format!("NONINTERACTIVE=1 brew install {q}"),
+                ("brew", false) => format!("NONINTERACTIVE=1 brew uninstall {q}"),
                 ("winget", true) => format!("winget install --id {pq} -e {WINGET_FLAGS}"),
-                ("winget", false) => format!("winget uninstall --id {pq} -e --silent"),
+                ("winget", false) => format!("winget uninstall --id {pq} -e --silent --disable-interactivity"),
                 ("npm", true) => format!("npm install -g {}", if os == HostOs::Windows { pq } else { q }),
-                (_, _) => format!("npm uninstall -g {}", if os == HostOs::Windows { pq } else { q }),
+                ("npm", _) => format!("npm uninstall -g {}", if os == HostOs::Windows { pq } else { q }),
+                _ => return Err(format!("unsupported manager {manager}")),
             })
         }
         EnableService { service } => {
@@ -392,7 +394,7 @@ mod tests {
         for ok in ["@anthropic-ai/claude-code", "Tailscale.Tailscale", "python3"] {
             assert!(valid_name(ok), "{ok}");
         }
-        for bad in ["a;b", "a b", "$(x)", ""] {
+        for bad in ["a;b", "a b", "$(x)", "", "--help", "-x"] {
             assert!(!valid_name(bad), "{bad}");
         }
         assert!(!valid_name(&"a".repeat(129)));
@@ -478,6 +480,8 @@ mod tests {
     #[test]
     fn winget_flags_present() {
         let s = action_script(HostOs::Windows, &act("install", "winget", "Tailscale.Tailscale")).unwrap();
+        let u = action_script(HostOs::Windows, &act("uninstall", "winget", "Tailscale.Tailscale")).unwrap();
+        assert!(s.contains("--disable-interactivity") && u.contains("--disable-interactivity"));
         assert!(s.contains("--accept-package-agreements") && s.contains("--accept-source-agreements") && s.contains("'Tailscale.Tailscale'"));
         assert_eq!(action_script(HostOs::Windows, &InstallAction::InstallManager { manager: "winget".into() }), Err("WINGET_MANUAL".into()));
     }

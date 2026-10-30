@@ -26,7 +26,7 @@ use tauri::State;
 use telemetry::{DockerFullSnapshot, ServerMetrics};
 use tokio::sync::mpsc;
 use vps_config::{
-    AccessKeysSnapshot, FirewallRuleItem, FirewallSnapshot, SshdApplyStarted, SshdSettings, SshdView, VpsProbe,
+    AccessKeysSnapshot, FirewallRuleItem, FirewallSnapshot, SshdApplyStarted, SshdSettings, SshdView, SudoMode, VpsProbe,
 };
 
 pub struct AppState {
@@ -925,17 +925,10 @@ async fn vps_authorize_ssh_key(
     state: State<'_, AppState>,
     host_id: String,
     username: String,
-    public_key: String,
+    key_line: String,
     sudo_password: Option<String>,
 ) -> Result<AccessKeysSnapshot, String> {
-    vps_config::authorize_ssh_key(
-        &host_id,
-        &state.ssh_pool,
-        username,
-        public_key,
-        sudo_password,
-    )
-    .await
+    vps_config::authorize_ssh_key(&host_id, &state.ssh_pool, sudo_password, username, key_line).await
 }
 
 #[tauri::command]
@@ -946,7 +939,7 @@ async fn vps_revoke_ssh_key(
     key_body: String,
     sudo_password: Option<String>,
 ) -> Result<AccessKeysSnapshot, String> {
-    vps_config::revoke_ssh_key(&host_id, &state.ssh_pool, username, key_body, sudo_password).await
+    vps_config::revoke_ssh_key(&host_id, &state.ssh_pool, sudo_password, username, key_body).await
 }
 
 #[tauri::command]
@@ -954,47 +947,34 @@ async fn vps_create_linux_user(
     state: State<'_, AppState>,
     host_id: String,
     username: String,
-    shell: String,
-    sudo_access: bool,
-    nopasswd_sudo: bool,
-    docker_access: bool,
-    initial_public_key: Option<String>,
+    sudo: SudoMode,
+    password: Option<String>,
     sudo_password: Option<String>,
 ) -> Result<AccessKeysSnapshot, String> {
-    vps_config::create_linux_user(
-        &host_id,
-        &state.ssh_pool,
-        username,
-        shell,
-        sudo_access,
-        nopasswd_sudo,
-        docker_access,
-        initial_public_key,
-        sudo_password,
-    )
-    .await
+    vps_config::create_linux_user(&host_id, &state.ssh_pool, sudo_password, username, sudo, password).await
 }
 
 #[tauri::command]
-async fn vps_update_linux_user_privilege(
+async fn vps_set_user_lock(
     state: State<'_, AppState>,
     host_id: String,
     username: String,
-    sudo_access: bool,
-    nopasswd_sudo: bool,
-    locked: bool,
+    lock: bool,
     sudo_password: Option<String>,
 ) -> Result<AccessKeysSnapshot, String> {
-    vps_config::update_linux_user_privilege(
-        &host_id,
-        &state.ssh_pool,
-        username,
-        sudo_access,
-        nopasswd_sudo,
-        locked,
-        sudo_password,
-    )
-    .await
+    vps_config::set_user_lock(&host_id, &state.ssh_pool, sudo_password, username, lock).await
+}
+
+#[tauri::command]
+async fn vps_set_user_sudo(
+    state: State<'_, AppState>,
+    host_id: String,
+    username: String,
+    sudo: SudoMode,
+    password: Option<String>,
+    sudo_password: Option<String>,
+) -> Result<AccessKeysSnapshot, String> {
+    vps_config::set_user_sudo(&host_id, &state.ssh_pool, sudo_password, username, sudo, password).await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1076,7 +1056,8 @@ pub fn run() {
             vps_authorize_ssh_key,
             vps_revoke_ssh_key,
             vps_create_linux_user,
-            vps_update_linux_user_privilege,
+            vps_set_user_lock,
+            vps_set_user_sudo,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

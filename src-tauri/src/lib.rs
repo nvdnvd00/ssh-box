@@ -25,7 +25,7 @@ use tauri::State;
 use telemetry::{DockerFullSnapshot, ServerMetrics};
 use tokio::sync::mpsc;
 use vps_config::{
-    AccessKeysSnapshot, FirewallSnapshot, SshdConfigSnapshot, SshdConfigUpdate, VpsPrivilegeInfo,
+    AccessKeysSnapshot, FirewallSnapshot, SshdConfigSnapshot, SshdConfigUpdate, VpsProbe,
 };
 
 pub struct AppState {
@@ -822,12 +822,12 @@ fn save_session_log(
 }
 
 #[tauri::command]
-async fn vps_probe_privilege(
+async fn vps_probe(
     state: State<'_, AppState>,
     host_id: String,
     sudo_password: Option<String>,
-) -> Result<VpsPrivilegeInfo, String> {
-    vps_config::probe_privilege(&host_id, &state.ssh_pool, sudo_password).await
+) -> Result<VpsProbe, String> {
+    vps_config::probe(&host_id, &state.ssh_pool, sudo_password).await
 }
 
 #[tauri::command]
@@ -1098,7 +1098,7 @@ pub fn run() {
             clear_known_hosts,
             export_ssh_key_to_host,
             save_session_log,
-            vps_probe_privilege,
+            vps_probe,
             vps_get_sshd_config,
             vps_apply_sshd_config,
             vps_confirm_sshd_config,

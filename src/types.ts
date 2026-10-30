@@ -164,6 +164,30 @@ export interface VpsPrivilegeInfo {
   detectedClientIp: string;
 }
 
+export type AuthUsed = { kind: "password" } | { kind: "key"; publicKeyBody: string };
+export type PrivilegeLevel = "root" | "sudoNoPassword" | "sudoPassword" | "none";
+export type FirewallEngine = "ufw" | "firewalld" | "iptables" | "none";
+
+export interface ConnectionContext {
+  loginUser: string;
+  auth: AuthUsed;
+  clientIp: string;
+  serverIp: string;
+  serverPort: number;
+}
+
+export interface VpsProbe {
+  privilege: PrivilegeLevel;
+  context: ConnectionContext;
+  osId: string;
+  osVersion: string;
+  opensshVersion: string;
+  hasSystemd: boolean;
+  sshSocketActive: boolean;
+  selinuxEnforcing: boolean;
+  firewallEngine: FirewallEngine;
+}
+
 export interface SshdConfigSnapshot {
   port: number;
   permitRootLogin: string;

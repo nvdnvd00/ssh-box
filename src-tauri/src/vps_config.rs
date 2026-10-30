@@ -1,16 +1,47 @@
-use crate::ssh_pool::SshPool;
+use crate::ssh_pool::{AuthUsed, SshPool};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct VpsPrivilegeInfo {
-    pub user: String,
-    pub uid: u32,
-    pub is_root: bool,
-    pub passwordless_sudo: bool,
-    pub sudo_unlocked: bool,
-    pub os_pretty_name: String,
-    pub detected_client_ip: String,
+pub enum PrivilegeLevel {
+    Root,
+    SudoNoPassword,
+    SudoPassword,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum FirewallEngine {
+    Ufw,
+    Firewalld,
+    Iptables,
+    None,
+}
+
+// What the app is using to reach this host right now (spec §4.1).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionContext {
+    pub login_user: String,
+    pub auth: AuthUsed,
+    pub client_ip: String,
+    pub server_ip: String,
+    pub server_port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VpsProbe {
+    pub privilege: PrivilegeLevel,
+    pub context: ConnectionContext,
+    pub os_id: String,
+    pub os_version: String,
+    pub openssh_version: String,
+    pub has_systemd: bool,
+    pub ssh_socket_active: bool,
+    pub selinux_enforcing: bool,
+    pub firewall_engine: FirewallEngine,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1077,89 +1108,99 @@ pub async fn run_privileged_script(
     classify_privileged_output(&String::from_utf8_lossy(&out))
 }
 
-pub fn parse_privilege_probe(raw: &str) -> VpsPrivilegeInfo {
-    let mut info = VpsPrivilegeInfo {
-        user: "root".to_string(),
-        uid: 0,
-        is_root: false,
-        passwordless_sudo: false,
-        sudo_unlocked: false,
-        os_pretty_name: "Linux".to_string(),
-        detected_client_ip: String::new(),
+// Runs WITHOUT sudo: sudo's env_reset would strip SSH_CONNECTION. Line 1 of stdin is the sudo password.
+pub const PROBE_SCRIPT: &str = r#"LC_ALL=C
+PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin"
+IFS= read -r pw || pw=
+echo "UNAME:$(uname -s 2>/dev/null)"
+echo "USER:$(id -un 2>/dev/null)"
+uid=$(id -u 2>/dev/null)
+echo "UID:$uid"
+if [ "$uid" = "0" ]; then s=root
+elif sudo -n true 2>/dev/null; then s=nopasswd
+elif [ -z "$pw" ]; then s=none
+elif printf '%s\n' "$pw" | sudo -S -p '' true >/dev/null 2>&1; then s=password_ok
+else s=password_bad
+fi
+echo "SUDO:$s"
+echo "OS_ID:$( (. /etc/os-release && echo "$ID") 2>/dev/null)"
+echo "OS_VERSION:$( (. /etc/os-release && echo "$VERSION_ID") 2>/dev/null)"
+echo "OPENSSH:$(ssh -V 2>&1 | head -n 1)"
+echo "SSH_CONNECTION:${SSH_CONNECTION:-}"
+if command -v systemctl >/dev/null 2>&1; then echo "SYSTEMD:1"; else echo "SYSTEMD:0"; fi
+echo "SSH_SOCKET:$(systemctl is-active ssh.socket 2>/dev/null)"
+echo "SELINUX:$(getenforce 2>/dev/null)"
+if systemctl is-active --quiet firewalld 2>/dev/null; then fw=firewalld
+elif command -v ufw >/dev/null 2>&1; then fw=ufw
+elif command -v iptables >/dev/null 2>&1; then fw=iptables
+else fw=none
+fi
+echo "FW:$fw"
+"#;
+
+pub fn parse_probe_output(raw: &str, auth: AuthUsed) -> Result<VpsProbe, String> {
+    let field = |key: &str| {
+        raw.lines()
+            .find_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_string()))
+            .unwrap_or_default()
     };
-
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if let Some(v) = trimmed.strip_prefix("USER:") {
-            info.user = v.trim().to_string();
-        } else if let Some(v) = trimmed.strip_prefix("UID:") {
-            info.uid = v.trim().parse::<u32>().unwrap_or(1000);
-        } else if let Some(v) = trimmed.strip_prefix("NOPASSWD:") {
-            info.passwordless_sudo = v.trim() == "1";
-        } else if let Some(v) = trimmed.strip_prefix("SUDO_OK:") {
-            info.sudo_unlocked = v.trim() == "1";
-        } else if let Some(v) = trimmed.strip_prefix("OS:") {
-            let os = v.trim().trim_matches('"');
-            if !os.is_empty() {
-                info.os_pretty_name = os.to_string();
-            }
-        } else if let Some(v) = trimmed.strip_prefix("CLIENT_IP:") {
-            info.detected_client_ip = v.trim().to_string();
-        }
+    if field("UNAME:") != "Linux" {
+        return Err(vps_err(ERR_UNSUPPORTED, "Linux servers only"));
     }
-
-    info.is_root = info.uid == 0;
-    if info.is_root || info.passwordless_sudo {
-        info.sudo_unlocked = true;
-    }
-    info
+    let privilege = match field("SUDO:").as_str() {
+        "root" => PrivilegeLevel::Root,
+        "nopasswd" => PrivilegeLevel::SudoNoPassword,
+        "password_ok" => PrivilegeLevel::SudoPassword,
+        "password_bad" => return Err(vps_err(ERR_SUDO_DENIED, "incorrect sudo password")),
+        _ => PrivilegeLevel::None,
+    };
+    // $SSH_CONNECTION = "client_ip client_port server_ip server_port"
+    let conn = field("SSH_CONNECTION:");
+    let parts: Vec<&str> = conn.split_whitespace().collect();
+    let [client_ip, _, server_ip, port] = parts.as_slice() else {
+        return Err(vps_err(ERR_UNSUPPORTED, "SSH_CONNECTION is not available"));
+    };
+    let server_port = port
+        .parse::<u16>()
+        .map_err(|_| vps_err(ERR_UNSUPPORTED, format!("bad SSH_CONNECTION port {port}")))?;
+    let firewall_engine = match field("FW:").as_str() {
+        "ufw" => FirewallEngine::Ufw,
+        "firewalld" => FirewallEngine::Firewalld,
+        "iptables" => FirewallEngine::Iptables,
+        _ => FirewallEngine::None,
+    };
+    Ok(VpsProbe {
+        privilege,
+        context: ConnectionContext {
+            login_user: field("USER:"),
+            auth,
+            client_ip: client_ip.to_string(),
+            server_ip: server_ip.to_string(),
+            server_port,
+        },
+        os_id: field("OS_ID:"),
+        os_version: field("OS_VERSION:"),
+        openssh_version: field("OPENSSH:"),
+        has_systemd: field("SYSTEMD:") == "1",
+        ssh_socket_active: field("SSH_SOCKET:") == "active",
+        selinux_enforcing: field("SELINUX:").eq_ignore_ascii_case("enforcing"),
+        firewall_engine,
+    })
 }
 
-pub async fn probe_privilege(
+pub async fn probe(
     host_id: &str,
     pool: &SshPool,
     sudo_password: Option<String>,
-) -> Result<VpsPrivilegeInfo, String> {
-    let resolved_pw = sudo_password.filter(|p| !p.is_empty());
-    let pw_quoted = shell_single_quote(resolved_pw.as_deref().unwrap_or(""));
-    let cmd = format!(
-        r#"LC_ALL=C sh -c '
-uid=$(id -u 2>/dev/null || echo 1000)
-usr=$(id -un 2>/dev/null || whoami 2>/dev/null || echo user)
-echo "USER:$usr"
-echo "UID:$uid"
-if [ "$uid" = "0" ]; then
-  echo "NOPASSWD:1"
-  echo "SUDO_OK:1"
-elif sudo -n true 2>/dev/null; then
-  echo "NOPASSWD:1"
-  echo "SUDO_OK:1"
-else
-  echo "NOPASSWD:0"
-  if [ -n {pw_quoted} ] && printf "%s\n" {pw_quoted} | sudo -S -p "" true 2>/dev/null; then
-    echo "SUDO_OK:1"
-  else
-    echo "SUDO_OK:0"
-  fi
-fi
-os_name=""
-if [ -f /etc/os-release ]; then
-  os_name=$(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME")
-fi
-if [ -z "$os_name" ]; then
-  os_name=$(uname -sr 2>/dev/null || echo "Linux")
-fi
-echo "OS:$os_name"
-cip=$(echo "${{SSH_CLIENT%% *}}")
-if [ -z "$cip" ]; then
-  cip=$(echo "${{SSH_CONNECTION%% *}}")
-fi
-echo "CLIENT_IP:$cip"
-'"#
-    );
-
-    let raw = crate::telemetry::run_host_or_local_cmd(host_id, pool, &cmd).await?;
-    Ok(parse_privilege_probe(&raw))
+) -> Result<VpsProbe, String> {
+    let host = find_remote_host(host_id)?;
+    let stdin = privileged_stdin(sudo_password.as_deref(), None)?;
+    let out = pool.exec_bytes_on_host(&host, PROBE_SCRIPT, Some(&stdin)).await?;
+    let auth = pool
+        .session_auth(host_id)
+        .await
+        .ok_or_else(|| vps_err(ERR_COMMAND_FAILED, "no SSH session for this host"))?;
+    parse_probe_output(&String::from_utf8_lossy(&out), auth)
 }
 
 fn parse_yes_no(val: &str, default: bool) -> bool {
@@ -2582,24 +2623,102 @@ Match User git
         assert_eq!(reparsed.security_score, 100);
     }
 
+    const PROBE_UBUNTU: &str = "UNAME:Linux\nUSER:deploy\nUID:1000\nSUDO:password_ok\nOS_ID:ubuntu\nOS_VERSION:24.04\n\
+OPENSSH:OpenSSH_9.6p1 Ubuntu-3ubuntu13, OpenSSL 3.0.13 30 Jan 2024\n\
+SSH_CONNECTION:203.0.113.7 51000 198.51.100.2 2222\nSYSTEMD:1\nSSH_SOCKET:active\nSELINUX:\nFW:ufw\n";
+
+    fn key_auth() -> AuthUsed {
+        AuthUsed::Key { public_key_body: "AAAAC3NzaC1lZDI1NTE5".to_string() }
+    }
+
+    // The lockout guard compares against these exact values; a wrong field locks the user out.
     #[test]
-    fn parses_privilege_probe_output() {
-        let probe = r#"
-USER:ubuntu
-UID:1000
-NOPASSWD:0
-SUDO_OK:1
-OS:Ubuntu 24.04.1 LTS
-CLIENT_IP:203.0.113.42
-"#;
-        let info = parse_privilege_probe(probe);
-        assert_eq!(info.user, "ubuntu");
-        assert_eq!(info.uid, 1000);
-        assert!(!info.is_root);
-        assert!(!info.passwordless_sudo);
-        assert!(info.sudo_unlocked);
-        assert_eq!(info.os_pretty_name, "Ubuntu 24.04.1 LTS");
-        assert_eq!(info.detected_client_ip, "203.0.113.42");
+    fn probe_parses_ubuntu_socket_sudo_password() {
+        let p = parse_probe_output(PROBE_UBUNTU, key_auth()).unwrap();
+        assert_eq!(p.privilege, PrivilegeLevel::SudoPassword);
+        assert_eq!(
+            p.context,
+            ConnectionContext {
+                login_user: "deploy".to_string(),
+                auth: key_auth(),
+                client_ip: "203.0.113.7".to_string(),
+                server_ip: "198.51.100.2".to_string(),
+                server_port: 2222,
+            }
+        );
+        assert_eq!((p.os_id.as_str(), p.os_version.as_str()), ("ubuntu", "24.04"));
+        assert!(p.openssh_version.starts_with("OpenSSH_9.6"));
+        assert!(p.has_systemd && p.ssh_socket_active && !p.selinux_enforcing);
+        assert_eq!(p.firewall_engine, FirewallEngine::Ufw);
+    }
+
+    #[test]
+    fn probe_maps_privilege_selinux_and_engine() {
+        let with = |from: &str, to: &str| PROBE_UBUNTU.replace(from, to);
+        let p = parse_probe_output(&with("SUDO:password_ok", "SUDO:root"), key_auth()).unwrap();
+        assert_eq!(p.privilege, PrivilegeLevel::Root);
+        let p = parse_probe_output(&with("SUDO:password_ok", "SUDO:nopasswd"), key_auth()).unwrap();
+        assert_eq!(p.privilege, PrivilegeLevel::SudoNoPassword);
+        let p = parse_probe_output(&with("SUDO:password_ok", "SUDO:none"), key_auth()).unwrap();
+        assert_eq!(p.privilege, PrivilegeLevel::None);
+        let raw = with("SELINUX:\nFW:ufw", "SELINUX:Enforcing\nFW:firewalld").replace("SSH_SOCKET:active", "SSH_SOCKET:inactive");
+        let p = parse_probe_output(&raw, key_auth()).unwrap();
+        assert!(p.selinux_enforcing && !p.ssh_socket_active);
+        assert_eq!(p.firewall_engine, FirewallEngine::Firewalld);
+    }
+
+    #[test]
+    fn probe_parses_ipv6_ssh_connection() {
+        let raw = PROBE_UBUNTU.replace("203.0.113.7 51000 198.51.100.2 2222", "2001:db8::7 51000 2001:db8::2 22");
+        let p = parse_probe_output(&raw, key_auth()).unwrap();
+        assert_eq!(p.context.client_ip, "2001:db8::7");
+        assert_eq!(p.context.server_ip, "2001:db8::2");
+        assert_eq!(p.context.server_port, 22);
+    }
+
+    #[test]
+    fn probe_rejects_non_linux() {
+        let raw = PROBE_UBUNTU.replace("UNAME:Linux", "UNAME:Darwin");
+        assert!(parse_probe_output(&raw, key_auth()).unwrap_err().starts_with("UNSUPPORTED"));
+    }
+
+    #[test]
+    fn probe_wrong_sudo_password_is_sudo_denied() {
+        let raw = PROBE_UBUNTU.replace("SUDO:password_ok", "SUDO:password_bad");
+        assert!(parse_probe_output(&raw, key_auth()).unwrap_err().starts_with("SUDO_DENIED"));
+    }
+
+    // Without SSH_CONNECTION the guard cannot know the client IP or port, so nothing may be edited.
+    #[test]
+    fn probe_without_ssh_connection_is_unsupported() {
+        let raw = PROBE_UBUNTU.replace("SSH_CONNECTION:203.0.113.7 51000 198.51.100.2 2222", "SSH_CONNECTION:");
+        assert!(parse_probe_output(&raw, key_auth()).unwrap_err().starts_with("UNSUPPORTED"));
+    }
+
+    // The old probe nested the password in sh -c '…', so "a;touch INJECTED" ran a command.
+    #[cfg(unix)]
+    #[test]
+    fn probe_script_passes_password_via_stdin_only() {
+        for pw in ["a;touch INJECTED'\"", "$(touch INJECTED)"] {
+            let dir = shell::temp_dir();
+            let bin = shell::fake_sudo_env(&dir);
+            let log = dir.join("sudo.log");
+            let out = shell::run_local(
+                PROBE_SCRIPT,
+                &privileged_stdin(Some(pw), None).unwrap(),
+                &bin,
+                &[
+                    ("FAKE_SUDO_LOG", log.to_str().unwrap()),
+                    ("FAKE_SUDO_OK", pw),
+                    ("SSH_CONNECTION", "203.0.113.7 51000 198.51.100.2 22"),
+                ],
+                &dir,
+            );
+            assert!(out.contains("SUDO:password_ok"), "{out}");
+            assert!(out.contains("SSH_CONNECTION:203.0.113.7 51000 198.51.100.2 22"), "{out}");
+            assert_eq!(std::fs::read_to_string(&log).unwrap(), pw);
+            assert!(!dir.join("INJECTED").exists(), "password {pw:?} ran a command");
+        }
     }
 
     #[test]

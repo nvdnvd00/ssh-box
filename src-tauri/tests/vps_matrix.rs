@@ -7,7 +7,8 @@
 //! MX_DISTRO=macos runs the macOS scenarios M1,M2,M4,M5,M6 (VM user needs passwordless sudo).
 //! MX_DISTRO=windows runs W1-W12: MX_USER is an Administrator (key in administrators_authorized_keys),
 //! `sshbox-std` a standard account accepting the same key; W8-W11 (sshd writes) run only when
-//! WINDOWS_SSH_WRITE_VERIFIED is true; W7 reboots the VM (Restart-Computer).
+//! WINDOWS_SSH_WRITE_VERIFIED is true; W7 reboots the VM (Restart-Computer) unless MX_NO_REBOOT is set.
+//! W13 adds a temporary port-less block for 192.168.65.0/24 (raw admin PowerShell, not the app) while the firewall is off.
 //! Run (MX_DISTRO = ubuntu | debian | rocky; MX_ONLY=S1,S5 runs a subset):
 //!   MX_VM=u24 MX_IP=<lima0 address> MX_USER=$USER MX_KEY=$HOME/.lima/_config/user MX_DISTRO=ubuntu \
 //!   env -u SSH_AUTH_SOCK cargo test --manifest-path src-tauri/Cargo.toml --test vps_matrix -- --ignored --nocapture
@@ -525,6 +526,9 @@ async fn w7_firewall_toggle_reboot(pool: &SshPool, h: &HostEntry) -> Result<Stri
     ensure(on.enabled, "not enabled after enable".into())?;
     ssh_works(h, "enable").await?;
     let auto: Vec<String> = on.rules.iter().filter(|r| r.comment == "ssh-box" && !r.v6).map(|r| r.raw_spec.clone()).collect();
+    if std::env::var("MX_NO_REBOOT").is_ok() {
+        return Ok(format!("off/on with SSH after each; enable auto-added {auto:?}; reboot skipped (MX_NO_REBOOT)"));
+    }
     // A rule the app adds must survive the reboot as well.
     let snap = add_firewall_rule(&h.id, pool, None, "allow".into(), "10.0.0.0/8".into(), "8081".into(), "tcp".into()).await?;
     let managed = |s: &FirewallSnapshot| s.rules.iter().filter(|r| r.comment == "ssh-box").map(|r| r.raw_spec.clone()).collect::<std::collections::BTreeSet<_>>();
@@ -544,6 +548,40 @@ async fn w7_firewall_toggle_reboot(pool: &SshPool, h: &HostEntry) -> Result<Stri
     let probe_rule = snap.rules.iter().find(|r| r.to_port == "8081").cloned().ok_or("8081 rule missing")?;
     delete_firewall_rule(&h.id, &fresh, None, probe_rule).await?;
     Ok(format!("off/on with SSH after each; enable auto-added {auto:?}; PowerShell answering {up}s after Restart-Computer; on after reboot, ssh-box rules kept {after:?}"))
+}
+
+// C1: a saved block for every port from the client's subnet beats the auto-allow, so enabling must be refused.
+// The firewall stays off while the block exists; a SYSTEM task removes it after 120s in case enabling wrongly succeeds.
+async fn w13_enable_refused_by_port_less_block(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    const TMP: &str = "sshbox-c1-temp";
+    let off = set_firewall_state(&h.id, pool, None, false).await?;
+    ensure(!off.enabled, "still enabled after disable".into())?;
+    let added = ps(pool, h, &format!(
+        "New-NetFirewallRule -DisplayName '{TMP}' -Group '{TMP}' -Direction Inbound -Action Block -RemoteAddress 192.168.65.0/24 -Protocol Any | Out-Null
+$a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument \"-NoProfile -Command Remove-NetFirewallRule -Group '{TMP}'\"
+Register-ScheduledTask -TaskName '{TMP}' -Action $a -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(120)) -User SYSTEM -RunLevel Highest -Force | Out-Null
+'ADDED'")).await;
+    let checked = async {
+        ensure(added.ends_with("ADDED"), format!("temp rule: {added}"))?;
+        let snap = get_firewall_snapshot(&h.id, pool, None).await?;
+        ensure(!snap.rules.iter().any(|r| r.raw_spec == TMP), "temp block listed in the UI rules".into())?;
+        let hidden: Vec<_> = snap.unlisted_blocks.iter().filter(|r| r.raw_spec == TMP).map(|r| format!("{} from {} effective {}", r.to_port, r.from_source, r.effective)).collect();
+        ensure(!hidden.is_empty() && snap.unlisted_blocks.iter().any(|r| r.raw_spec == TMP && r.effective), format!("temp block not seen: {hidden:?}"))?;
+        let on = set_firewall_state(&h.id, pool, None, true).await;
+        ensure(on == Err("LOCKOUT_BLOCKED: windows_block_covers_me".into()), format!("enable with the block: {:?}", on.map(|s| s.enabled)))?;
+        ssh_works(h, "refused enable").await?;
+        ensure(!get_firewall_snapshot(&h.id, pool, None).await?.enabled, "firewall on after the refused enable".into())?;
+        Ok::<_, String>(hidden)
+    }
+    .await;
+    let cleanup = ps(pool, h, &format!("Remove-NetFirewallRule -Group '{TMP}' -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName '{TMP}' -Confirm:$false -ErrorAction SilentlyContinue; 'LEFT:' + @(Get-NetFirewallRule -Group '{TMP}' -ErrorAction SilentlyContinue).Count + ':' + @(Get-ScheduledTask -TaskName '{TMP}' -ErrorAction SilentlyContinue).Count")).await;
+    let hidden = checked?;
+    ensure(cleanup.ends_with("LEFT:0:0"), format!("cleanup: {cleanup}"))?;
+    let on = set_firewall_state(&h.id, pool, None, true).await?;
+    ensure(on.enabled, "not enabled after removing the block".into())?;
+    ssh_works(h, "enable after cleanup").await?;
+    let auto: Vec<String> = on.rules.iter().filter(|r| r.comment == "ssh-box").map(|r| r.raw_spec.clone()).collect();
+    Ok(format!("block seen unlisted {hidden:?}; enable -> windows_block_covers_me, SSH kept, firewall stayed off; rule removed; enable ok, SSH ok, auto-added {auto:?}"))
 }
 
 async fn win_apply_finish(pool: &SshPool, h: &HostEntry, desired: SshdSettings) -> Result<SshdView, String> {
@@ -693,6 +731,7 @@ fn run_windows(only: &str) {
         run!("W7 firewall off/on + reboot", w7_firewall_toggle_reboot(&pool, &h));
         // W7 reboots the VM: start over with a fresh session.
         let pool = win_ready_pool(&h).await.expect("reconnect");
+        run!("W13 enable refused by port-less block", w13_enable_refused_by_port_less_block(&pool, &h));
         if WINDOWS_SSH_WRITE_VERIFIED {
             run!("W8 MaxAuthTries change kept", w8_max_auth_tries(&pool, &h));
             run!("W9 password off/on (coupled)", w9_password_off_on(&pool, &h));

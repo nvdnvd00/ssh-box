@@ -105,6 +105,30 @@ export interface AppI18nStrings {
   updateBtn: string;
   updateInstalling: string;
   updateConfirm: string;
+
+  // Server Config (VPS) — shared
+  vpsCommonApply: string;
+  vpsCommonDiscard: string;
+  vpsCommonPreviewApply: string;
+  vpsCommonPreviewTitle: string;
+  vpsCommonPendingChanges: string;
+  vpsCommonRollbackNow: string;
+  vpsCommonConfirm: string;
+  vpsCommonCancel: string;
+  vpsCommonReload: string;
+  vpsCommonFix: string;
+  vpsCommonPass: string;
+  vpsCommonFail: string;
+  vpsCommonLoading: string;
+  vpsCommonReadOnly: string;
+  vpsErrSudoRequired: string;
+  vpsErrSudoDenied: string;
+  vpsErrLockoutBlocked: string;
+  vpsErrCommandFailed: string;
+  vpsErrVerifyFailed: string;
+  vpsErrUnsupported: string;
+  vpsLockoutReasons: Record<string, string>;
+  vpsUnsupportedReasons: Record<string, string>;
 }
 
 const VI_STRINGS: AppI18nStrings = {
@@ -121,7 +145,7 @@ const VI_STRINGS: AppI18nStrings = {
   navSnippets: "Đoạn lệnh (Snippets)",
   navDocker: "Quản lý Docker",
   navSftp: "Truyền tệp SFTP",
-  navVpsConfig: "Cấu hình & Bảo mật VPS",
+  navVpsConfig: "Cấu hình VPS",
   navTerminal: "Terminal",
   navSettings: "Cài đặt",
   quickConnectBtn: "Tìm & Kết nối nhanh",
@@ -213,6 +237,48 @@ const VI_STRINGS: AppI18nStrings = {
   updateInstalling: "Đang cập nhật...",
   updateConfirm:
     "Tải bản mới và khởi động lại app? Các phiên SSH đang mở sẽ bị ngắt.",
+  vpsCommonApply: "Áp dụng",
+  vpsCommonDiscard: "Bỏ",
+  vpsCommonPreviewApply: "Xem trước & áp dụng",
+  vpsCommonPreviewTitle: "Xem trước thay đổi",
+  vpsCommonPendingChanges: "{n} thay đổi chưa áp dụng",
+  vpsCommonRollbackNow: "Hoàn tác ngay",
+  vpsCommonConfirm: "Xác nhận",
+  vpsCommonCancel: "Huỷ",
+  vpsCommonReload: "Tải lại",
+  vpsCommonFix: "Sửa",
+  vpsCommonPass: "Đạt",
+  vpsCommonFail: "Chưa đạt",
+  vpsCommonLoading: "Đang tải…",
+  vpsCommonReadOnly: "Chỉ xem",
+  vpsErrSudoRequired: "Cần mật khẩu sudo để làm việc này.",
+  vpsErrSudoDenied: "Mật khẩu sudo không đúng.",
+  vpsErrLockoutBlocked: "Thao tác bị chặn để bạn không tự khoá mình khỏi máy:",
+  vpsErrCommandFailed: "Lệnh trên máy chủ bị lỗi:",
+  vpsErrVerifyFailed: "Không mở được kết nối mới nên thay đổi đã được hoàn tác:",
+  vpsErrUnsupported: "Máy chủ không hỗ trợ:",
+  vpsLockoutReasons: {
+    both_auth_off: "Không thể tắt cả đăng nhập bằng mật khẩu lẫn bằng SSH key.",
+    password_in_use:
+      "Ứng dụng đang đăng nhập bằng mật khẩu. Hãy chuyển máy này sang đăng nhập bằng SSH key trước khi tắt mật khẩu.",
+    pubkey_in_use: "Ứng dụng đang đăng nhập bằng SSH key, nên không thể tắt đăng nhập bằng key.",
+    root_in_use: "Ứng dụng đang đăng nhập bằng root. Hãy dùng một user khác có sudo trước khi chặn root.",
+    root_password_in_use: "Ứng dụng đang đăng nhập root bằng mật khẩu. Hãy chuyển sang SSH key trước.",
+    allow_users_excludes_me: "Danh sách AllowUsers mới không có user mà ứng dụng đang dùng.",
+    deny_users_matches_me: "Danh sách DenyUsers mới chặn chính user mà ứng dụng đang dùng.",
+    only_ssh_rule: "Đây là rule duy nhất cho phép ứng dụng vào cổng SSH.",
+    closes_ssh_for_everyone: "Rule này đóng cổng SSH với mọi nơi, kể cả ứng dụng.",
+    source_includes_me: "Nguồn của rule này có IP mà ứng dụng đang kết nối từ đó.",
+    login_user: "Đây là user mà ứng dụng đang đăng nhập.",
+    last_sudo_user: "Đây là user cuối cùng có quyền sudo.",
+    key_in_use: "Đây là SSH key mà ứng dụng đang dùng để đăng nhập.",
+  },
+  vpsUnsupportedReasons: {
+    linux_only: "Chỉ hỗ trợ máy chủ Linux",
+    no_ssh_connection: "Không đọc được thông tin kết nối SSH ($SSH_CONNECTION) trên máy chủ.",
+    no_systemd: "Máy chủ không dùng systemd nên chỉ xem được, không sửa được.",
+    firewall_read_only: "Firewall này chỉ xem được. Cài ufw để sửa rule.",
+  },
 };
 
 const EN_STRINGS: AppI18nStrings = {
@@ -229,7 +295,7 @@ const EN_STRINGS: AppI18nStrings = {
   navSnippets: "Snippets",
   navDocker: "Docker",
   navSftp: "SFTP Browser",
-  navVpsConfig: "VPS Hardening & Config",
+  navVpsConfig: "Server Config",
   navTerminal: "Terminal",
   navSettings: "Settings",
   quickConnectBtn: "Quick Connect & Actions",
@@ -321,6 +387,48 @@ const EN_STRINGS: AppI18nStrings = {
   updateInstalling: "Updating...",
   updateConfirm:
     "Download the new version and restart the app? Open SSH sessions will be closed.",
+  vpsCommonApply: "Apply",
+  vpsCommonDiscard: "Discard",
+  vpsCommonPreviewApply: "Preview & apply",
+  vpsCommonPreviewTitle: "Review changes",
+  vpsCommonPendingChanges: "{n} unapplied changes",
+  vpsCommonRollbackNow: "Roll back now",
+  vpsCommonConfirm: "Confirm",
+  vpsCommonCancel: "Cancel",
+  vpsCommonReload: "Reload",
+  vpsCommonFix: "Fix",
+  vpsCommonPass: "OK",
+  vpsCommonFail: "Needs attention",
+  vpsCommonLoading: "Loading…",
+  vpsCommonReadOnly: "Read only",
+  vpsErrSudoRequired: "A sudo password is needed for this.",
+  vpsErrSudoDenied: "The sudo password is incorrect.",
+  vpsErrLockoutBlocked: "Blocked so you don't lock yourself out:",
+  vpsErrCommandFailed: "The command failed on the server:",
+  vpsErrVerifyFailed: "A new connection could not be opened, so the change was rolled back:",
+  vpsErrUnsupported: "Not supported on this server:",
+  vpsLockoutReasons: {
+    both_auth_off: "Password and SSH key login cannot both be turned off.",
+    password_in_use:
+      "The app signs in with a password. Switch this host to SSH key login before turning passwords off.",
+    pubkey_in_use: "The app signs in with an SSH key, so key login cannot be turned off.",
+    root_in_use: "The app signs in as root. Use another user with sudo before blocking root.",
+    root_password_in_use: "The app signs in as root with a password. Switch to an SSH key first.",
+    allow_users_excludes_me: "The new AllowUsers list leaves out the user the app signs in as.",
+    deny_users_matches_me: "The new DenyUsers list blocks the user the app signs in as.",
+    only_ssh_rule: "This is the only rule that lets the app reach the SSH port.",
+    closes_ssh_for_everyone: "This rule closes the SSH port for everyone, including the app.",
+    source_includes_me: "This rule's source includes the IP the app connects from.",
+    login_user: "This is the user the app signs in as.",
+    last_sudo_user: "This is the last user with sudo.",
+    key_in_use: "This is the SSH key the app signs in with.",
+  },
+  vpsUnsupportedReasons: {
+    linux_only: "Linux servers only",
+    no_ssh_connection: "Could not read the SSH connection details ($SSH_CONNECTION) on the server.",
+    no_systemd: "This server does not use systemd, so settings are read only.",
+    firewall_read_only: "This firewall is read only. Install ufw to edit rules.",
+  },
 };
 
 export function getI18n(lang?: AppLanguage): AppI18nStrings {

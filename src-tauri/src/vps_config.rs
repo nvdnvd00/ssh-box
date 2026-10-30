@@ -1101,7 +1101,7 @@ pub fn classify_privileged_output(raw: &str) -> Result<String, String> {
 
 pub(crate) fn find_remote_host(host_id: &str) -> Result<crate::host_store::HostEntry, String> {
     if host_id == "local" || host_id.trim().is_empty() {
-        return Err(vps_err(ERR_UNSUPPORTED, "Linux servers only"));
+        return Err(vps_err(ERR_UNSUPPORTED, "linux_only"));
     }
     crate::host_store::load_all_hosts()
         .into_iter()
@@ -1162,7 +1162,7 @@ pub fn parse_probe_output(raw: &str, auth: AuthUsed) -> Result<VpsProbe, String>
             .unwrap_or_default()
     };
     if field("UNAME:") != "Linux" {
-        return Err(vps_err(ERR_UNSUPPORTED, "Linux servers only"));
+        return Err(vps_err(ERR_UNSUPPORTED, "linux_only"));
     }
     let privilege = match field("SUDO:").as_str() {
         "root" => PrivilegeLevel::Root,
@@ -1175,11 +1175,11 @@ pub fn parse_probe_output(raw: &str, auth: AuthUsed) -> Result<VpsProbe, String>
     let conn = field("SSH_CONNECTION:");
     let parts: Vec<&str> = conn.split_whitespace().collect();
     let [client_ip, _, server_ip, port] = parts.as_slice() else {
-        return Err(vps_err(ERR_UNSUPPORTED, "SSH_CONNECTION is not available"));
+        return Err(vps_err(ERR_UNSUPPORTED, "no_ssh_connection"));
     };
     let server_port = port
         .parse::<u16>()
-        .map_err(|_| vps_err(ERR_UNSUPPORTED, format!("bad SSH_CONNECTION port {port}")))?;
+        .map_err(|_| vps_err(ERR_UNSUPPORTED, "no_ssh_connection"))?;
     let firewall_engine = match field("FW:").as_str() {
         "ufw" => FirewallEngine::Ufw,
         "firewalld" => FirewallEngine::Firewalld,

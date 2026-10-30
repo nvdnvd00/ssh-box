@@ -1,5 +1,5 @@
 //! Lockout guard (spec §4.3): pure checks run in the backend before every write.
-//! A blocked change returns `LOCKOUT_BLOCKED: <reason>`; the UI only displays it.
+//! A blocked change returns `LOCKOUT_BLOCKED: <reason_id>`; the UI translates the id (vpsLockoutReasons).
 
 use crate::ssh_pool::AuthUsed;
 use crate::vps_config::{
@@ -44,31 +44,31 @@ fn user_pattern_matches(pattern: &str, ctx: &ConnectionContext) -> bool {
 
 pub fn check_sshd(ctx: &ConnectionContext, next: &SshdSettings) -> Result<(), String> {
     if !next.password_authentication && !next.pubkey_authentication {
-        return block("password and key login cannot both be disabled");
+        return block("both_auth_off");
     }
     match ctx.auth {
         AuthUsed::Password if !next.password_authentication => {
-            return block("the app signs in with a password; switch this host to an SSH key first")
+            return block("password_in_use")
         }
         AuthUsed::Key { .. } if !next.pubkey_authentication => {
-            return block("the app signs in with an SSH key")
+            return block("pubkey_in_use")
         }
         _ => {}
     }
     if ctx.login_user == "root" {
         match next.permit_root_login.as_str() {
-            "no" | "forced-commands-only" => return block("the app signs in as root"),
+            "no" | "forced-commands-only" => return block("root_in_use"),
             "prohibit-password" | "without-password" if ctx.auth == AuthUsed::Password => {
-                return block("the app signs in as root with a password")
+                return block("root_password_in_use")
             }
             _ => {}
         }
     }
     if !next.allow_users.is_empty() && !next.allow_users.iter().any(|p| user_pattern_matches(p, ctx)) {
-        return block("AllowUsers would exclude the user the app signs in as");
+        return block("allow_users_excludes_me");
     }
     if next.deny_users.iter().any(|p| user_pattern_matches(p, ctx)) {
-        return block("DenyUsers would match the user the app signs in as");
+        return block("deny_users_matches_me");
     }
     Ok(())
 }
@@ -94,7 +94,7 @@ pub fn check_firewall_delete(
     target: &FirewallRuleItem,
 ) -> Result<(), String> {
     if allows_my_ssh(ctx, target) && !rules.iter().any(|r| r != target && allows_my_ssh(ctx, r)) {
-        return block("this is the only rule that lets the app reach SSH");
+        return block("only_ssh_rule");
     }
     Ok(())
 }
@@ -112,9 +112,9 @@ pub fn check_firewall_add(
         return Ok(());
     }
     if is_anywhere_source(source) {
-        return block("this would close the SSH port for everyone");
+        return block("closes_ssh_for_everyone");
     }
-    block("the source includes the IP the app connects from")
+    block("source_includes_me")
 }
 
 pub enum UserChange {
@@ -129,7 +129,7 @@ pub fn check_user_change(
     change: UserChange,
 ) -> Result<(), String> {
     if user == ctx.login_user {
-        return block("this is the user the app signs in as");
+        return block("login_user");
     }
     if let UserChange::RemoveSudo = change {
         let others = accounts
@@ -137,7 +137,7 @@ pub fn check_user_change(
             .filter(|a| a.has_sudo && a.username != "root" && a.username != user)
             .count();
         if others == 0 {
-            return block("this is the last user with sudo");
+            return block("last_sudo_user");
         }
     }
     Ok(())
@@ -146,7 +146,7 @@ pub fn check_user_change(
 pub fn check_key_revoke(ctx: &ConnectionContext, user: &str, key_body: &str) -> Result<(), String> {
     if let AuthUsed::Key { public_key_body } = &ctx.auth {
         if user == ctx.login_user && public_key_body == key_body {
-            return block("this is the key the app signs in with");
+            return block("key_in_use");
         }
     }
     Ok(())
@@ -388,6 +388,18 @@ mod tests {
         assert_eq!(check_key_revoke(&deploy_key(), "deploy", "AAAAOTHER"), Ok(()));
         assert_eq!(check_key_revoke(&deploy_key(), "alice", "AAAAMYKEY"), Ok(()));
         assert_eq!(check_key_revoke(&deploy_pw(), "deploy", "AAAAMYKEY"), Ok(()));
+    }
+
+    // The UI looks these ids up in vpsLockoutReasons; an English sentence here shows untranslated.
+    #[test]
+    fn lockout_reasons_are_ids_the_ui_translates() {
+        let reason = |r: Result<(), String>| r.unwrap_err().trim_start_matches("LOCKOUT_BLOCKED: ").to_string();
+        let off = SshdSettings { password_authentication: false, ..sshd() };
+        assert_eq!(reason(check_sshd(&deploy_pw(), &off)), "password_in_use");
+        let root_no = SshdSettings { permit_root_login: "no".to_string(), ..sshd() };
+        assert_eq!(reason(check_sshd(&ctx("root", key()), &root_no)), "root_in_use");
+        assert_eq!(reason(check_firewall_add(&deploy_key(), "deny", "any", "2222")), "closes_ssh_for_everyone");
+        assert_eq!(reason(check_key_revoke(&deploy_key(), "deploy", "AAAAMYKEY")), "key_in_use");
     }
 
     #[test]

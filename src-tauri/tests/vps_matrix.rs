@@ -9,8 +9,9 @@
 //! `sshbox-std` a standard account accepting the same key; W8-W11 (sshd writes) run only when
 //! WINDOWS_SSH_WRITE_VERIFIED is true; W7 reboots the VM (Restart-Computer) unless MX_NO_REBOOT is set.
 //! W13 adds a temporary port-less block for 192.168.65.0/24 (raw admin PowerShell, not the app) while the firewall is off.
-//! W14-W16 do the same with an ICMPv4 block, a 192.168.65.1-192.168.65.10 block and AllowInboundRules False on Private;
-//! a SYSTEM task undoes each after 120s in case an enable that should be refused goes through.
+//! W14-W16 do the same with an ICMPv4 block, a 192.168.65.1-192.168.65.10 block and AllowInboundRules False on all three
+//! profiles (restored to their original values); a SYSTEM task, registered before each change, undoes it after 120s in case
+//! an enable that should be refused goes through.
 //! Run (MX_DISTRO = ubuntu | debian | rocky; MX_ONLY=S1,S5 runs a subset):
 //!   MX_VM=u24 MX_IP=<lima0 address> MX_USER=$USER MX_KEY=$HOME/.lima/_config/user MX_DISTRO=ubuntu \
 //!   env -u SSH_AUTH_SOCK cargo test --manifest-path src-tauri/Cargo.toml --test vps_matrix -- --ignored --nocapture
@@ -586,13 +587,18 @@ Register-ScheduledTask -TaskName '{TMP}' -Action $a -Trigger (New-ScheduledTaskT
     Ok(format!("block seen unlisted {hidden:?}; enable -> windows_block_covers_me, SSH kept, firewall stayed off; rule removed; enable ok, SSH ok, auto-added {auto:?}"))
 }
 
-// A temporary firewall change (raw admin PowerShell) plus a SYSTEM task that undoes it after 120s, should SSH be cut.
+// A temporary firewall change (raw admin PowerShell). The SYSTEM task that undoes it after 120s, should SSH be cut, is
+// registered before the change, so even a half-applied change has an undo; a failed setup is undone at once.
 async fn win_temp(pool: &SshPool, h: &HostEntry, tag: &str, setup: &str, undo: &str) -> Result<(), String> {
-    let added = ps(pool, h, &format!("{setup}
-$a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument \"-NoProfile -Command {undo}\"
+    let added = ps(pool, h, &format!("$a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument \"-NoProfile -Command {undo}\"
 Register-ScheduledTask -TaskName '{tag}' -Action $a -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(120)) -User SYSTEM -RunLevel Highest -Force | Out-Null
+{setup}
 'ADDED'")).await;
-    ensure(added.ends_with("ADDED"), format!("{tag} setup: {added}"))
+    if added.ends_with("ADDED") {
+        return Ok(());
+    }
+    let cleaned = win_temp_undo(pool, h, tag, undo).await;
+    Err(format!("{tag} setup: {added}; undo: {cleaned:?}"))
 }
 
 async fn win_temp_undo(pool: &SshPool, h: &HostEntry, tag: &str, undo: &str) -> Result<(), String> {
@@ -649,10 +655,23 @@ async fn w15_range_block_refuses(pool: &SshPool, h: &HostEntry) -> Result<String
     win_enable_refused(pool, h, TMP, &setup, &format!("Remove-NetFirewallRule -Group '{TMP}' -ErrorAction SilentlyContinue"), "windows_block_covers_me").await
 }
 
+// The undo restores each profile's own AllowInboundRules (persistent store, where the setup writes), not a forced default.
 async fn w16_inbound_allows_off_refuses(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
     const TMP: &str = "sshbox-w16-temp";
-    let undo = "Set-NetFirewallProfile -Profile Private -AllowInboundRules NotConfigured";
-    win_enable_refused(pool, h, TMP, "Set-NetFirewallProfile -Profile Private -AllowInboundRules False", undo, "windows_inbound_allows_off").await
+    let before = ps(pool, h, "(Get-NetFirewallProfile | ForEach-Object { [string]$_.Name + '=' + [string]$_.AllowInboundRules }) -join ';'").await;
+    let mut undo = Vec::new();
+    for pair in before.split(';') {
+        match pair.split_once('=') {
+            Some((name @ ("Domain" | "Private" | "Public"), value @ ("True" | "False" | "NotConfigured"))) => {
+                undo.push(format!("Set-NetFirewallProfile -Profile {name} -AllowInboundRules {value}"))
+            }
+            _ => return Err(format!("AllowInboundRules before: {before}")),
+        }
+    }
+    ensure(undo.len() == 3, format!("AllowInboundRules before: {before}"))?;
+    let setup = "Set-NetFirewallProfile -Profile Domain,Private,Public -AllowInboundRules False";
+    let done = win_enable_refused(pool, h, TMP, setup, &undo.join("; "), "windows_inbound_allows_off").await?;
+    Ok(format!("AllowInboundRules before {before}, restored; {done}"))
 }
 
 async fn win_apply_finish(pool: &SshPool, h: &HostEntry, desired: SshdSettings) -> Result<SshdView, String> {

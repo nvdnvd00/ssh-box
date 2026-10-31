@@ -322,11 +322,14 @@ export const TelemetryDrawer: React.FC<TelemetryDrawerProps> = ({
                 usr {metrics ? metrics.cpuUserPercent.toFixed(0) : 0}% • sys{" "}
                 {metrics ? metrics.cpuSystemPercent.toFixed(0) : 0}%
               </span>
-              <span>
-                load {metrics ? metrics.loadOne.toFixed(2) : "0.00"} /{" "}
-                {metrics ? metrics.loadFive.toFixed(2) : "0.00"} /{" "}
-                {metrics ? metrics.loadFifteen.toFixed(2) : "0.00"}
-              </span>
+              {/* Windows has no load average; its telemetry leaves the load fields at 0. */}
+              {!metrics?.osName.startsWith("Windows") && (
+                <span>
+                  load {metrics ? metrics.loadOne.toFixed(2) : "0.00"} /{" "}
+                  {metrics ? metrics.loadFive.toFixed(2) : "0.00"} /{" "}
+                  {metrics ? metrics.loadFifteen.toFixed(2) : "0.00"}
+                </span>
+              )}
             </div>
 
             <Sparkline

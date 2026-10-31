@@ -8,8 +8,8 @@
 //! MX_DISTRO=windows runs W1-W12: MX_USER is an Administrator (key in administrators_authorized_keys),
 //! `sshbox-std` a standard account accepting the same key; W8-W11 (sshd writes) run only when
 //! WINDOWS_SSH_WRITE_VERIFIED is true; W7 reboots the VM (Restart-Computer) unless MX_NO_REBOOT is set.
-//! W13 adds a temporary port-less block for 192.168.65.0/24 (raw admin PowerShell, not the app) while the firewall is off.
-//! W14-W16 do the same with an ICMPv4 block, a 192.168.65.1-192.168.65.10 block and AllowInboundRules False on all three
+//! W13 adds a temporary port-less block for MX_IP's /24 (raw admin PowerShell, not the app) while the firewall is off.
+//! W14-W16 do the same with an ICMPv4 block, a .1-.10 block in that /24 and AllowInboundRules False on all three
 //! profiles (restored to their original values); a SYSTEM task, registered before each change, undoes it after 120s in case
 //! an enable that should be refused goes through.
 //! Run (MX_DISTRO = ubuntu | debian | rocky; MX_ONLY=S1,S5 runs a subset):
@@ -25,6 +25,12 @@ use std::time::{Duration, Instant};
 
 fn env(k: &str) -> String {
     std::env::var(k).unwrap_or_else(|_| panic!("{k} not set"))
+}
+
+// The client's /24 as the VM sees it: MX_IP without its last octet (the host is .1 on the same bridge).
+fn client_net() -> String {
+    let ip = env("MX_IP");
+    ip.rsplit_once('.').map(|(net, _)| net.to_string()).unwrap_or(ip)
 }
 
 fn host(id: &str, user: &str, key: Option<String>, port: u16) -> HostEntry {
@@ -559,8 +565,9 @@ async fn w13_enable_refused_by_port_less_block(pool: &SshPool, h: &HostEntry) ->
     const TMP: &str = "sshbox-c1-temp";
     let off = set_firewall_state(&h.id, pool, None, false).await?;
     ensure(!off.enabled, "still enabled after disable".into())?;
+    let net = client_net();
     let added = ps(pool, h, &format!(
-        "New-NetFirewallRule -DisplayName '{TMP}' -Group '{TMP}' -Direction Inbound -Action Block -RemoteAddress 192.168.65.0/24 -Protocol Any | Out-Null
+        "New-NetFirewallRule -DisplayName '{TMP}' -Group '{TMP}' -Direction Inbound -Action Block -RemoteAddress {net}.0/24 -Protocol Any | Out-Null
 $a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument \"-NoProfile -Command Remove-NetFirewallRule -Group '{TMP}'\"
 Register-ScheduledTask -TaskName '{TMP}' -Action $a -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(120)) -User SYSTEM -RunLevel Highest -Force | Out-Null
 'ADDED'")).await;
@@ -651,7 +658,8 @@ async fn win_enable_refused(pool: &SshPool, h: &HostEntry, tag: &str, setup: &st
 
 async fn w15_range_block_refuses(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
     const TMP: &str = "sshbox-w15-temp";
-    let setup = format!("New-NetFirewallRule -DisplayName '{TMP}' -Group '{TMP}' -Direction Inbound -Action Block -RemoteAddress 192.168.65.1-192.168.65.10 -Protocol Any | Out-Null");
+    let net = client_net();
+    let setup = format!("New-NetFirewallRule -DisplayName '{TMP}' -Group '{TMP}' -Direction Inbound -Action Block -RemoteAddress {net}.1-{net}.10 -Protocol Any | Out-Null");
     win_enable_refused(pool, h, TMP, &setup, &format!("Remove-NetFirewallRule -Group '{TMP}' -ErrorAction SilentlyContinue"), "windows_block_covers_me").await
 }
 

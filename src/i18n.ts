@@ -223,6 +223,7 @@ export interface AppI18nStrings {
   instTabInstalled: string;
   instTabAttention: string;
   instCat: Record<string, string>;
+  instMgrDesc: Record<string, string>;
   instRecommended: string;
   instInstall: string;
   instBrewAdminNote: string;
@@ -425,6 +426,14 @@ const VI_STRINGS: AppI18nStrings = {
   instTabInstalled: "Đã cài",
   instTabAttention: "Cần chú ý",
   instCat: { managers: "Trình quản lý gói", security: "Bảo mật", apps: "Chạy ứng dụng", ai: "AI", network: "Mạng", utils: "Tiện ích" },
+  instMgrDesc: {
+    apt: "Trình cài phần mềm có sẵn trên Ubuntu và Debian.",
+    dnf: "Trình cài phần mềm có sẵn trên Fedora, RHEL, Rocky.",
+    snap: "Kho ứng dụng của Canonical, một gói chạy được trên nhiều bản Linux.",
+    npm: "Cài thư viện và công cụ JavaScript; đi kèm Node.js.",
+    brew: "Homebrew: trình cài công cụ dòng lệnh phổ biến nhất trên macOS.",
+    winget: "Trình cài ứng dụng chính thức của Windows.",
+  },
   instRecommended: "nên cài",
   instInstall: "Cài",
   instBrewAdminNote: "Cài Homebrew cần quyền quản trị; nếu lỗi, hãy chạy lệnh cài chính thức trong Terminal",
@@ -709,6 +718,14 @@ const EN_STRINGS: AppI18nStrings = {
   instTabInstalled: "Installed",
   instTabAttention: "Needs attention",
   instCat: { managers: "Package managers", security: "Security", apps: "Run apps", ai: "AI", network: "Network", utils: "Utilities" },
+  instMgrDesc: {
+    apt: "Built-in package installer on Ubuntu and Debian.",
+    dnf: "Built-in package installer on Fedora, RHEL and Rocky.",
+    snap: "Canonical's app store; one package runs on many Linux distros.",
+    npm: "Installs JavaScript libraries and tools; ships with Node.js.",
+    brew: "Homebrew: the most popular command-line package installer on macOS.",
+    winget: "The official Windows app installer.",
+  },
   instRecommended: "recommended",
   instInstall: "Install",
   instBrewAdminNote: "Installing Homebrew needs admin rights; if it fails, run the official install command in Terminal",

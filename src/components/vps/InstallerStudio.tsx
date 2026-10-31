@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Package } from "lucide-react";
 import { getI18n } from "../../i18n";
 import { HostOs, InstallAction, InstallerScan, SearchHit, ToolView } from "../../types";
 import { StatusBadge } from "./shared/StatusBadge";
@@ -7,6 +8,7 @@ import { ConfirmButton } from "./shared/ConfirmButton";
 import { Notice } from "./shared/Notice";
 import { parseVpsError, vpsErrorText } from "./shared/errors";
 import { useVpsResource, VpsCtx } from "./shared/useVpsResource";
+import { LOGOS } from "./installerLogos";
 
 const CATEGORIES = ["security", "apps", "ai", "network", "utils"];
 type Tab = "missing" | "installed" | "attention";
@@ -16,6 +18,19 @@ interface BatchItem { label: string; action: InstallAction; status: RunStatus; o
 const BTN = "shrink-0 px-3 py-1.5 rounded-xl text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-accent/70 border border-border/60 transition-all cursor-pointer disabled:cursor-not-allowed disabled:opacity-50";
 const PRIMARY = "px-3 py-1.5 rounded-xl text-xs font-semibold bg-primary text-primary-foreground hover:opacity-90 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50";
 const STATUS_TONE = { waiting: "neutral", running: "warn", done: "ok", failed: "danger" } as const;
+
+// Brand tile with a black or white glyph, whichever reads better on the brand colour.
+const Logo: React.FC<{ id: string }> = ({ id }) => {
+  const logo = LOGOS[id];
+  if (!logo) return <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground"><Package className="size-4" /></span>;
+  const n = parseInt(logo.hex, 16);
+  const light = 0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255) > 160;
+  return (
+    <span className="grid size-8 shrink-0 place-items-center rounded-lg" style={{ background: `#${logo.hex}` }}>
+      <svg viewBox="0 0 24 24" className="size-4" fill={light ? "#000" : "#fff"} aria-hidden="true"><path d={logo.path} /></svg>
+    </span>
+  );
+};
 
 const needsAttention = (tool: ToolView) =>
   tool.status.kind !== "notInstalled" && !!tool.serviceState && !(tool.serviceState.enabled && tool.serviceState.active);
@@ -143,6 +158,7 @@ export const InstallerStudio: React.FC<{ vps: VpsCtx; os: HostOs }> = ({ vps, os
               onChange={() => toggle(`tool:${tl.id}`)}
             />
           )}
+          <Logo id={tl.id} />
           <span className="min-w-0 space-y-0.5">
             <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-foreground">
               {tl.name}
@@ -215,6 +231,7 @@ export const InstallerStudio: React.FC<{ vps: VpsCtx; os: HostOs }> = ({ vps, os
             list.map((h) => (
               <label key={h.package} className="flex items-start gap-3 px-4 py-2">
                 <input type="checkbox" className="mt-1" disabled={busy} checked={sel.has(`hit:${m}:${h.package}`)} onChange={() => pickHit(h)} />
+                <Logo id="" />
                 <span className="min-w-0">
                   <span className="block font-mono text-sm text-foreground break-all">{h.package}</span>
                   <span className="block text-xs text-muted-foreground">{h.description}</span>
@@ -242,9 +259,13 @@ export const InstallerStudio: React.FC<{ vps: VpsCtx; os: HostOs }> = ({ vps, os
         "managers",
         mgrRows.map((m) => (
           <div key={m.id} className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
-            <label className="flex items-center gap-3 text-sm font-medium text-foreground">
+            <label className="min-w-0 flex items-center gap-3">
               {!m.present && <input type="checkbox" disabled={busy} checked={sel.has(`mgr:${m.id}`)} onChange={() => toggle(`mgr:${m.id}`)} />}
-              {m.id}
+              <Logo id={m.id} />
+              <span className="min-w-0">
+                <span className="block text-sm font-medium text-foreground">{m.id}</span>
+                {t.instMgrDesc[m.id] && <span className="block text-xs text-muted-foreground">{t.instMgrDesc[m.id]}</span>}
+              </span>
             </label>
             {m.present ? (
               <StatusBadge tone="ok">{t.instTabInstalled}</StatusBadge>

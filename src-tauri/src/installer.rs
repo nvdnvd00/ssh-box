@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use crate::vps_config::shell_single_quote as shq;
 use crate::ssh_pool::SshPool;
 use crate::vps_config::{
-    classify_privileged_output, find_remote_host, run_privileged_script, vps_err, ERR_COMMAND_FAILED, ERR_SUDO_DENIED, ERR_SUDO_REQUIRED, ERR_UNSUPPORTED,
+    classify_privileged_output, find_remote_host, run_privileged_script_unbounded, vps_err, ERR_COMMAND_FAILED, ERR_SUDO_DENIED, ERR_SUDO_REQUIRED, ERR_UNSUPPORTED,
 };
 use crate::vps_windows::{ps_quote, run_windows_script};
 #[cfg(target_os = "windows")]
@@ -526,7 +526,7 @@ pub async fn run(
         } else if os == HostOs::Windows {
             run_windows_script(host_id, pool, script, None).await
         } else if root {
-            run_privileged_script(host_id, pool, sudo_password, script, None).await
+            run_privileged_script_unbounded(host_id, pool, sudo_password, script, None).await
         } else {
             let host = find_remote_host(host_id)?;
             let out = pool.exec_bytes_on_host(&host, r#"sh -s 2>&1 || echo "SSHBOX_EXIT_CODE:$?""#, Some(script.as_bytes())).await?;

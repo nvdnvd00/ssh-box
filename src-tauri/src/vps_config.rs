@@ -1250,9 +1250,20 @@ pub async fn run_privileged_script(
     script: &str,
     secret: Option<&str>,
 ) -> Result<String, String> {
+    bounded(run_privileged_script_unbounded(host_id, pool, sudo_password, script, secret), VPS_EXEC_TIMEOUT).await
+}
+
+// For callers that set their own, longer limit (the installer gives package installs 600 s).
+pub async fn run_privileged_script_unbounded(
+    host_id: &str,
+    pool: &SshPool,
+    sudo_password: Option<String>,
+    script: &str,
+    secret: Option<&str>,
+) -> Result<String, String> {
     let host = find_remote_host(host_id)?;
     let stdin = privileged_stdin(sudo_password.as_deref(), secret)?;
-    let out = bounded(pool.exec_bytes_on_host(&host, &build_privileged_command(script), Some(&stdin)), VPS_EXEC_TIMEOUT).await?;
+    let out = pool.exec_bytes_on_host(&host, &build_privileged_command(script), Some(&stdin)).await?;
     classify_privileged_output(&String::from_utf8_lossy(&out))
 }
 

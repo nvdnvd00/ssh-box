@@ -1854,7 +1854,7 @@ async fn run_sshd_script(
 }
 
 // Runs in sh, cmd.exe and PowerShell alike (a Windows login shell has no `true`).
-const VERIFY_COMMAND: &str = "exit 0";
+pub(crate) const VERIFY_COMMAND: &str = "exit 0";
 
 // Opens a brand-new SSH connection on `new_port`; the live session proves nothing (spec §4.1).
 pub async fn verify_new_connection(

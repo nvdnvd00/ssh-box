@@ -4,7 +4,7 @@ use crate::vps_config::{
     classify_privileged_output, find_remote_host, parse_authorized_key_line, parse_ssh_connection, parse_sshd_view, rule_port_matches,
     compute_socket_exposure_windows, is_anywhere_source, is_public_bind_address, vps_err, AccessKeysSnapshot,
     ConnectionContext, FirewallEngine, FirewallRuleItem, FirewallSnapshot, LinuxAccountItem, ListeningSocketItem,
-    PrivilegeLevel, SshdView, VpsProbe, WriteTarget, ERR_COMMAND_FAILED, ERR_UNSUPPORTED, SSHD_PART,
+    PrivilegeLevel, SshdView, VpsProbe, WriteTarget, ERR_COMMAND_FAILED, ERR_UNSUPPORTED, SSHD_PART, VERIFY_COMMAND,
 };
 use crate::vps_support::{compute_support, OsCaps, OsFamily, VpsSupport};
 use base64::Engine;
@@ -720,16 +720,26 @@ pub async fn get_windows_firewall(host_id: &str, pool: &SshPool, probe: &VpsProb
 }
 
 // The exec fails when the host has no powershell.exe (e.g. cmd.exe: "not recognized"): not a Windows we can manage.
-// A timeout is not that: it keeps its own message.
-fn exec_failure(detail: &str) -> String {
+// A timeout or a host that runs no command at all (dropped session) is not that: it keeps its own message.
+fn exec_failure(detail: &str, host_runs_commands: bool) -> String {
     if detail.starts_with(ERR_COMMAND_FAILED) {
         return detail.to_string();
+    }
+    if !host_runs_commands {
+        return vps_err(ERR_COMMAND_FAILED, detail);
     }
     vps_err(ERR_UNSUPPORTED, "unsupported_os")
 }
 
 pub async fn probe_windows(host: &HostEntry, pool: &SshPool) -> Result<VpsProbe, String> {
-    let out = exec_windows(pool, host, WINDOWS_PROBE_SCRIPT, None).await.map_err(|e| exec_failure(&e))?;
+    let out = match exec_windows(pool, host, WINDOWS_PROBE_SCRIPT, None).await {
+        Ok(out) => out,
+        Err(e) => {
+            let check = pool.exec_bytes_on_host(host, VERIFY_COMMAND, None);
+            let runs = bounded(check, std::time::Duration::from_secs(15)).await.is_ok();
+            return Err(exec_failure(&e, runs));
+        }
+    };
     let auth = pool
         .session_auth(&host.id)
         .await
@@ -869,13 +879,20 @@ mod tests {
         let e = bounded(std::future::pending::<Result<Vec<u8>, String>>(), std::time::Duration::from_millis(20)).await.unwrap_err();
         // The user must know a half-applied sshd change is not left behind: the armed task reverts it.
         assert_eq!(e, "COMMAND_FAILED: the Windows host did not answer within 0s; if a change was being applied it is rolled back automatically within 60s");
-        assert_eq!(exec_failure(&e), e);
+        assert_eq!(exec_failure(&e, true), e);
     }
 
-    // An exec failure (no powershell.exe) becomes unsupported_os; connection errors were already reported by get_or_connect.
+    // No powershell.exe on a host that still runs commands: not a Windows we can manage.
     #[test]
     fn exec_failure_maps_to_unsupported_os() {
-        assert!(exec_failure("exit 1: 'powershell.exe' is not recognized").starts_with("UNSUPPORTED: unsupported_os"));
+        assert!(exec_failure("'powershell.exe' is not recognized", true).starts_with("UNSUPPORTED: unsupported_os"));
+    }
+
+    // Seen in W7 right after a reboot: a dropped session is not "unsupported OS"; the user must see the real error and retry.
+    #[test]
+    fn exec_failure_keeps_a_connection_error() {
+        let e = exec_failure("Failed to open SSH channel: channel closed", false);
+        assert_eq!(e, "COMMAND_FAILED: Failed to open SSH channel: channel closed");
     }
 
     const SSHD_RAW: &str = "port 22\r\npermitrootlogin no\r\n---SSHBOX-PART---\r\nPort 22\r\nMatch Group administrators\r\n       AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys\r\n---SSHBOX-PART---\r\n---SSHBOX-PART---\r\ninactive\r\n";

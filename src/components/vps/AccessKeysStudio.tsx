@@ -186,7 +186,9 @@ export const AccessKeysStudio: React.FC<VpsStudioProps & { sshKeys: SshKeyItem[]
                 </SettingRow>
               </>
             )}
-            {a.authorizedKeys.length === 0 && <p className="px-4 py-3 text-sm text-muted-foreground">{t.vpsUsersNoKeys}</p>}
+            {a.authorizedKeys.length === 0 && (
+              <p className="px-4 py-3 text-sm text-muted-foreground">{a.keysFileUnknown ? t.vpsUsersKeysFileUnknown : t.vpsUsersNoKeys}</p>
+            )}
             {a.authorizedKeys.map((k) => (
               <SettingRow key={k.rawLine} label={k.comment || k.shortPreview} directive={`${k.keyType} ${k.shortPreview}`}>
                 <div className="flex items-center gap-2">

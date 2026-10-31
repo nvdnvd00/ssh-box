@@ -4,14 +4,15 @@
 //! VM (macOS, Lima; restarted by `limactl` in the reboot scenario):
 //!   limactl start --name=u24 --vm-type=vz --network=vzNAT --plain template://ubuntu-24.04
 //!   (also template://debian-13 and template://rocky-9; ufw / firewalld + semanage may need installing)
-//! MX_DISTRO=macos runs the macOS scenarios M1,M2,M4,M5,M6 (VM user needs passwordless sudo).
+//! MX_DISTRO=macos runs the macOS scenarios M1-M6 (VM user needs passwordless sudo; M3 adds and removes `mxpw`).
 //! MX_DISTRO=windows runs W1-W12: MX_USER is an Administrator (key in administrators_authorized_keys),
 //! `sshbox-std` a standard account accepting the same key; W8-W11 (sshd writes) run only when
 //! WINDOWS_SSH_WRITE_VERIFIED is true; W7 reboots the VM (Restart-Computer) unless MX_NO_REBOOT is set.
 //! W13 adds a temporary port-less block for MX_IP's /24 (raw admin PowerShell, not the app) while the firewall is off.
 //! W14-W16 do the same with an ICMPv4 block, a .1-.10 block in that /24 and AllowInboundRules False on all three
-//! profiles (restored to their original values); a SYSTEM task, registered before each change, undoes it after 120s in case
-//! an enable that should be refused goes through.
+//! profiles (restored to their original values), W18 with AllowLocalFirewallRules False in the local GPO; a SYSTEM task,
+//! registered before each change, undoes it after 120s in case an enable that should be refused goes through.
+//! W17 adds and removes a throwaway admin `mxpw` with a password.
 //! Run (MX_DISTRO = ubuntu | debian | rocky; MX_ONLY=S1,S5 runs a subset):
 //!   MX_VM=u24 MX_IP=<lima0 address> MX_USER=$USER MX_KEY=$HOME/.lima/_config/user MX_DISTRO=ubuntu \
 //!   env -u SSH_AUTH_SOCK cargo test --manifest-path src-tauri/Cargo.toml --test vps_matrix -- --ignored --nocapture
@@ -59,6 +60,18 @@ async fn effective(pool: &SshPool, h: &HostEntry, key: &str) -> String {
 
 fn ensure(cond: bool, msg: String) -> Result<(), String> {
     if cond { Ok(()) } else { Err(msg) }
+}
+
+// The app opens each new SSH port and never closes the old one, and SELinux labels stay. Undo what S1/S2 added, or
+// every later run starts with extra SSH allows (S6 then finds no single SSH rule) and the VMs drift.
+async fn undo_port_moves(pool: &SshPool, h: &HostEntry, before: &str) {
+    let keep: Vec<&str> = before.split_whitespace().collect();
+    let mut sh = String::new();
+    for p in ["22/tcp", "2299/tcp", "2300/tcp"].into_iter().filter(|p| !keep.contains(p)) {
+        sh += &format!("ufw delete allow {p} >/dev/null 2>&1; firewall-cmd --permanent --remove-port={p} >/dev/null 2>&1; ");
+    }
+    sh += "firewall-cmd --reload >/dev/null 2>&1; semanage port -d -t ssh_port_t -p tcp 2299 2>/dev/null; semanage port -d -t ssh_port_t -p tcp 2300 2>/dev/null; true";
+    root(pool, h, &sh).await;
 }
 
 async fn s1_port_change(pool: &SshPool, h: &mut HostEntry, distro: &str) -> Result<String, String> {
@@ -292,6 +305,48 @@ async fn m2_password_off_on(pool: &SshPool, h: &HostEntry) -> Result<String, Str
     Ok(format!("off: sshd -T {} / methods '{m_off}'; on: methods '{m_on}'", t.split_whitespace().collect::<Vec<_>>().join(" ")))
 }
 
+// A password session: turning password login off must be refused, and a change must still apply and roll back through
+// sudo with a password. The VM admin has NOPASSWD sudo, so a throwaway admin (S3's test password) is made and removed.
+async fn m3_password_session(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let main = pool;
+    root(pool, h, "sysadminctl -addUser mxpw -fullName mxpw -password Mx-Test-123 -admin 2>&1; \
+dscl . -read /Groups/com.apple.access_ssh >/dev/null 2>&1 && dseditgroup -o edit -a mxpw -t user com.apple.access_ssh").await;
+    let pw = host("mx-pw", "mxpw", None, 22);
+    upsert_custom_host(pw.clone())?;
+    // Its own pool, dropped (sessions closed) before the account is deleted.
+    let pw_pool = SshPool::default();
+    let r = async {
+        let pool = &pw_pool;
+        pool.get_or_connect(&pw, Some("Mx-Test-123".into())).await?;
+        ensure(pool.session_auth(&pw.id).await == Some(AuthUsed::Password), "session not password".into())?;
+        let sudo = Some("Mx-Test-123".to_string());
+        let p = probe(&pw.id, pool, sudo.clone()).await?;
+        ensure(p.privilege == PrivilegeLevel::SudoPassword, format!("privilege {:?}", p.privilege))?;
+        let view = get_sshd_view(&pw.id, pool, sudo.clone()).await?;
+        let off = SshdSettings { password_authentication: false, kbd_interactive_authentication: false, ..view.settings.clone() };
+        let refused = apply_sshd_settings(&pw.id, pool, sudo.clone(), off).await;
+        ensure(matches!(&refused, Err(e) if e == "LOCKOUT_BLOCKED: password_in_use"), format!("password off: {refused:?}"))?;
+        let orig = view.settings.max_auth_tries;
+        let want = if orig > 3 { orig - 1 } else { orig + 1 };
+        apply_sshd_settings(&pw.id, pool, sudo.clone(), SshdSettings { max_auth_tries: want, ..view.settings }).await?;
+        let live = effective(main, h, "maxauthtries").await;
+        ensure(live == format!("maxauthtries {want}"), format!("after apply: {live}"))?;
+        revert_sshd_settings(&pw.id, pool, sudo).await?;
+        let back = effective(main, h, "maxauthtries").await;
+        ensure(back == format!("maxauthtries {orig}"), format!("after roll back now: {back}"))?;
+        let left = mac_leftovers(main, h).await;
+        ensure(left.trim().is_empty(), format!("rollback leftovers: {left}"))?;
+        Ok::<_, String>(format!("password off refused; maxauthtries {orig}->{want} applied and rolled back with password sudo"))
+    }
+    .await;
+    drop(pw_pool);
+    // Deleting the user leaves its name in the SSH access group.
+    let gone = root(pool, h, "dscl . -delete /Groups/com.apple.access_ssh GroupMembership mxpw 2>/dev/null; sysadminctl -deleteUser mxpw 2>&1; \
+id mxpw 2>&1; dscl . -read /Groups/com.apple.access_ssh GroupMembership 2>&1").await;
+    ensure(gone.contains("no such user") && !gone.contains("GroupMembership: mxpw"), format!("mxpw not removed: {gone}"))?;
+    r
+}
+
 async fn m4_apply_then_disconnect(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
     let view = get_sshd_view(&h.id, pool, None).await?;
     let off = SshdSettings { password_authentication: false, kbd_interactive_authentication: false, ..view.settings };
@@ -359,6 +414,7 @@ fn run_macos(only: &str) {
         }
         run!("M1 probe", m1_probe(&pool, &h));
         run!("M2 password off/on (coupled)", m2_password_off_on(&pool, &h));
+        run!("M3 password session", m3_password_session(&pool, &h));
         run!("M4 apply then disconnect -> rollback", m4_apply_then_disconnect(&pool, &h));
         run!("M5 port change blocked", m5_port_hidden(&pool, &h));
         run!("M6 users & keys read-only", m6_users_keys(&pool, &h));
@@ -486,6 +542,11 @@ async fn w4_users_keys(pool: &SshPool, h: &HostEntry) -> Result<String, String> 
     ensure(me.authorized_keys.iter().any(|k| k.public_key_body == body), "vm key not listed".into())?;
     let std_acc = find("sshbox-std")?;
     ensure(!std_acc.has_sudo && !std_acc.locked, format!("sshbox-std sudo {} locked {}", std_acc.has_sudo, std_acc.locked))?;
+    // Read from the Match User block (sshd -T hangs for any other user), and a disabled admin from Match Group administrators.
+    let std_keyed = std_acc.authorized_keys.iter().any(|k| k.public_key_body == body);
+    ensure(std_acc.keys_file == r"C:\ProgramData\ssh\sshbox-std_keys" && std_keyed, format!("sshbox-std file {} key {std_keyed}", std_acc.keys_file))?;
+    let admin = find("Administrator")?;
+    ensure(admin.keys_file == r"C:\ProgramData\ssh\administrators_authorized_keys", format!("disabled Administrator file {}", admin.keys_file))?;
     for b in ["Administrator", "Guest"] {
         ensure(find(b)?.locked, format!("{b} not shown disabled"))?;
     }
@@ -666,18 +727,18 @@ async fn w15_range_block_refuses(pool: &SshPool, h: &HostEntry) -> Result<String
 // The undo restores each profile's own AllowInboundRules (persistent store, where the setup writes), not a forced default.
 async fn w16_inbound_allows_off_refuses(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
     const TMP: &str = "sshbox-w16-temp";
-    let before = ps(pool, h, "(Get-NetFirewallProfile | ForEach-Object { [string]$_.Name + '=' + [string]$_.AllowInboundRules }) -join ';'").await;
+    let before = ps(pool, h, "(Get-NetFirewallProfile -PolicyStore PersistentStore | ForEach-Object { [string]$_.Name + '=' + [string]$_.AllowInboundRules }) -join ';'").await;
     let mut undo = Vec::new();
     for pair in before.split(';') {
         match pair.split_once('=') {
             Some((name @ ("Domain" | "Private" | "Public"), value @ ("True" | "False" | "NotConfigured"))) => {
-                undo.push(format!("Set-NetFirewallProfile -Profile {name} -AllowInboundRules {value}"))
+                undo.push(format!("Set-NetFirewallProfile -PolicyStore PersistentStore -Profile {name} -AllowInboundRules {value}"))
             }
             _ => return Err(format!("AllowInboundRules before: {before}")),
         }
     }
     ensure(undo.len() == 3, format!("AllowInboundRules before: {before}"))?;
-    let setup = "Set-NetFirewallProfile -Profile Domain,Private,Public -AllowInboundRules False";
+    let setup = "Set-NetFirewallProfile -PolicyStore PersistentStore -Profile Domain,Private,Public -AllowInboundRules False";
     let done = win_enable_refused(pool, h, TMP, setup, &undo.join("; "), "windows_inbound_allows_off").await?;
     Ok(format!("AllowInboundRules before {before}, restored; {done}"))
 }
@@ -792,12 +853,60 @@ async fn w12_powershell_default_shell(pool: &SshPool, h: &HostEntry) -> Result<S
     let r = async {
         let shell = fresh.exec_on_host(h, "$PSVersionTable.PSVersion.Major").await?;
         ensure(shell.trim().parse::<u32>().is_ok(), format!("default shell is not PowerShell: '{}'", shell.trim()))?;
-        Ok::<_, String>(format!("PS {} as DefaultShell | {} | {}", shell.trim(), w1_probe(&fresh, h).await?, w3_sshd_view(&fresh, h).await?))
+        let read = format!("PS {} as DefaultShell | {} | {}", shell.trim(), w1_probe(&fresh, h).await?, w3_sshd_view(&fresh, h).await?);
+        if !WINDOWS_SSH_WRITE_VERIFIED {
+            return Ok(read);
+        }
+        Ok::<_, String>(format!("{read} | write: {}", w8_max_auth_tries(&fresh, h).await?))
     }
     .await;
     let unset = ps(pool, h, r"Remove-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell; 'UNSET'").await;
     ensure(unset.ends_with("UNSET"), format!("DefaultShell not removed: {unset}"))?;
     r
+}
+
+// Group Policy ignoring local rules (the local GPO, applied by gpupdate) must refuse enable: the stock OpenSSH allow and the
+// auto-allow are both local. The VM's local GPO leaves the setting NotConfigured; the undo puts that back.
+async fn w18_local_rules_off_refuses(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    const TMP: &str = "sshbox-w18-temp";
+    let before = ps(pool, h, "(Get-NetFirewallProfile -PolicyStore localhost | ForEach-Object { [string]$_.AllowLocalFirewallRules }) -join ','").await;
+    ensure(before == "NotConfigured,NotConfigured,NotConfigured", format!("local GPO AllowLocalFirewallRules before: {before}"))?;
+    let set = |v: &str| format!("Set-NetFirewallProfile -PolicyStore localhost -Profile Domain,Private,Public -AllowLocalFirewallRules {v}; gpupdate /target:computer /force | Out-Null");
+    win_enable_refused(pool, h, TMP, &set("False"), &set("NotConfigured"), "windows_local_rules_off").await
+}
+
+// A password session on Windows: turning password login off must be refused. Throwaway admin with S3's test password.
+async fn w17_password_session(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let main = pool;
+    // Win32-OpenSSH keeps a password user's profile hive loaded until the next reboot: drop an earlier run's leftover first.
+    ps(pool, h, "Get-CimInstance Win32_UserProfile | Where-Object { $_.LocalPath -like '*\\mxpw*' -and -not $_.Loaded } | Remove-CimInstance").await;
+    let made = ps(pool, h, "New-LocalUser -Name mxpw -Password (ConvertTo-SecureString 'Mx-Test-123' -AsPlainText -Force) -PasswordNeverExpires | Out-Null; Add-LocalGroupMember -SID S-1-5-32-544 -Member mxpw; 'MADE'").await;
+    ensure(made.ends_with("MADE"), format!("mxpw not created: {made}"))?;
+    let pw = host("mx-pw", "mxpw", None, 22);
+    upsert_custom_host(pw.clone())?;
+    let pw_pool = SshPool::default();
+    let r = async {
+        let pool = &pw_pool;
+        pool.get_or_connect(&pw, Some("Mx-Test-123".into())).await?;
+        ensure(pool.session_auth(&pw.id).await == Some(AuthUsed::Password), "session not password".into())?;
+        let p = probe(&pw.id, pool, None).await?;
+        ensure(p.privilege == PrivilegeLevel::Admin, format!("privilege {:?}", p.privilege))?;
+        let view = get_sshd_view(&pw.id, pool, None).await?;
+        let off = SshdSettings { password_authentication: false, kbd_interactive_authentication: false, ..view.settings };
+        let refused = apply_sshd_settings(&pw.id, pool, None, off).await;
+        ensure(matches!(&refused, Err(e) if e == "LOCKOUT_BLOCKED: password_in_use"), format!("password off: {refused:?}"))?;
+        let pa = win_effective(main, h, "passwordauthentication").await;
+        ensure(pa == "passwordauthentication yes", format!("sshd -T after refusal: {pa}"))?;
+        Ok::<_, String>("password off refused: password_in_use; sshd unchanged".to_string())
+    }
+    .await;
+    drop(pw_pool);
+    let gone = ps(pool, h, "Remove-LocalUser -Name mxpw
+try { Get-CimInstance Win32_UserProfile | Where-Object { $_.LocalPath -like '*\\mxpw*' } | Remove-CimInstance -ErrorAction Stop } catch { }
+'USER:' + [bool](Get-LocalUser -Name mxpw -ErrorAction SilentlyContinue) + ' PROFILE:' + @(Get-CimInstance Win32_UserProfile | Where-Object { $_.LocalPath -like '*\\mxpw*' }).Count").await;
+    let ok = r?;
+    ensure(gone.starts_with("USER:False"), format!("mxpw not removed: {gone}"))?;
+    Ok(if gone.ends_with("PROFILE:0") { ok } else { format!("{ok}; profile C:\\Users\\mxpw left until the next reboot (hive still loaded)") })
 }
 
 fn run_windows(only: &str) {
@@ -833,6 +942,7 @@ fn run_windows(only: &str) {
         run!("W14 ICMP block does not refuse enable", w14_icmp_block_does_not_refuse(&pool, &h));
         run!("W15 range block refuses enable", w15_range_block_refuses(&pool, &h));
         run!("W16 AllowInboundRules False refuses enable", w16_inbound_allows_off_refuses(&pool, &h));
+        run!("W18 Group Policy ignores local rules refuses enable", w18_local_rules_off_refuses(&pool, &h));
         if WINDOWS_SSH_WRITE_VERIFIED {
             run!("W8 MaxAuthTries change kept", w8_max_auth_tries(&pool, &h));
             run!("W9 password off/on (coupled)", w9_password_off_on(&pool, &h));
@@ -842,6 +952,7 @@ fn run_windows(only: &str) {
             println!("SKIP W8-W11: WINDOWS_SSH_WRITE_VERIFIED is false");
         }
         run!("W12 PowerShell DefaultShell", w12_powershell_default_shell(&pool, &h));
+        run!("W17 password session", w17_password_session(&pool, &h));
         assert_eq!(failed, 0);
     });
 }
@@ -884,8 +995,10 @@ systemctl reload ssh 2>/dev/null || systemctl reload sshd").await;
                 }
             };
         }
+        let ports_before = root(&pool, &h, "ufw status 2>/dev/null; firewall-cmd --permanent --list-ports 2>/dev/null").await;
         run!("S1 port change", s1_port_change(&pool, &mut h, &distro));
         run!("S2 blocked port -> rollback", s2_blocked_port(&pool, &h));
+        undo_port_moves(&pool, &h, &ports_before).await;
         run!("S3 password off while app uses password", s3_password_blocked(&pool, &h));
         run!("S4 cloud-init password on -> off", s4_cloud_init_password(&pool, &h));
         run!("S5 firewall on + reboot", s5_firewall_reboot(&pool, &h));

@@ -4,7 +4,8 @@ use crate::vps_config::{
     classify_privileged_output, find_remote_host, parse_authorized_key_line, parse_ssh_connection, parse_sshd_view, rule_port_matches,
     compute_socket_exposure_windows, is_anywhere_source, is_public_bind_address, vps_err, AccessKeysSnapshot,
     ConnectionContext, FirewallEngine, FirewallRuleItem, FirewallSnapshot, LinuxAccountItem, ListeningSocketItem,
-    PrivilegeLevel, SshdView, VpsProbe, WriteTarget, ERR_COMMAND_FAILED, ERR_UNSUPPORTED, SSHD_PART,
+    PrivilegeLevel, SshdView, VpsProbe, WriteTarget, ERR_COMMAND_FAILED, ERR_UNSUPPORTED, SSHD_PART, VERIFY_COMMAND, split_sshd_directive,
+    bounded, VPS_EXEC_TIMEOUT,
 };
 use crate::vps_support::{compute_support, OsCaps, OsFamily, VpsSupport};
 use base64::Engine;
@@ -37,22 +38,10 @@ pub fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-// The longest script (sshd apply with its 15s sshd -t bound, restarts and rollback) needs well under this.
-const WINDOWS_EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-
-// Seen once on the VM matrix: the bootstrap sat on stdin for 10+ minutes before running anything. Never wait forever.
-async fn bounded<T>(run: impl std::future::Future<Output = Result<T, String>>, limit: std::time::Duration) -> Result<T, String> {
-    tokio::time::timeout(limit, run).await.unwrap_or_else(|_| {
-        Err(vps_err(
-            ERR_COMMAND_FAILED,
-            format!("the Windows host did not answer within {}s; if a change was being applied it is rolled back automatically within 60s", limit.as_secs()),
-        ))
-    })
-}
-
+// Seen once on the VM matrix: the bootstrap sat on stdin for 10+ minutes before running anything.
 async fn exec_windows(pool: &SshPool, host: &HostEntry, script: &str, secret: Option<&str>) -> Result<Vec<u8>, String> {
     let stdin = powershell_stdin(script, secret);
-    bounded(pool.exec_bytes_on_host(host, &build_powershell_command(), Some(&stdin)), WINDOWS_EXEC_TIMEOUT).await
+    bounded(pool.exec_bytes_on_host(host, &build_powershell_command(), Some(&stdin)), VPS_EXEC_TIMEOUT).await
 }
 
 pub async fn run_windows_script(
@@ -288,33 +277,105 @@ pub async fn get_windows_sshd_view(host_id: &str, pool: &SshPool, probe: &VpsPro
     parse_windows_sshd_view(&run_windows_script(host_id, pool, &windows_sshd_view_script(&spec), None).await?)
 }
 
-const WINDOWS_ACCOUNTS_BODY: &str = r#"$admins = @(Get-LocalGroupMember -SID S-1-5-32-544 -ErrorAction SilentlyContinue | ForEach-Object { $_.Name.Split('\')[-1] })
-$rows = foreach ($u in Get-LocalUser) {
-  $isAdmin = $admins -contains $u.Name
-  $file = "C:\Users\$($u.Name)\.ssh\authorized_keys"
-  # Only enabled admins need it (disabled built-ins make sshd hang); a failure keeps the default file for that row.
-  if ($isAdmin -and $u.Enabled) {
-    try {
-      $r = sshbox_sshd ('-T -C "user=' + $u.Name + ',host=localhost,addr=127.0.0.1"')
-      if ($r.Code -eq 0 -and (@($r.Out -split "`r?`n") -match '^authorizedkeysfile .*administrators_authorized_keys')) { $file = 'C:\ProgramData\ssh\administrators_authorized_keys' }
-    } catch { }
-  }
+// PS 5.1 Get-LocalGroupMember throws on an orphaned SID or an AzureAD member, which listed no admin at all; ADSI still
+// names every member it can. The group is found by SID: its name is localized.
+const WINDOWS_ACCOUNTS_BODY: &str = r#"$admins = @(try { Get-LocalGroupMember -SID S-1-5-32-544 -ErrorAction Stop | ForEach-Object { $_.Name.Split('\')[-1] } } catch {
+  $g = ([Security.Principal.SecurityIdentifier]'S-1-5-32-544').Translate([Security.Principal.NTAccount]).Value.Split('\')[-1]
+  ([ADSI]"WinNT://./$g,group").psbase.Invoke('Members') | ForEach-Object { $_.GetType().InvokeMember('Name', 'GetProperty', $null, $_, $null) }
+})
+$users = @(Get-LocalUser | ForEach-Object { [ordered]@{ name = [string]$_.Name; enabled = [bool]$_.Enabled; isAdmin = [bool]($admins -contains $_.Name) } })
+# No file means sshd's defaults (''); an unreadable one leaves every keys file unknown ($null).
+$cfg = "$env:ProgramData\ssh\sshd_config"
+$config = if (Test-Path -LiteralPath $cfg) { try { [IO.File]::ReadAllText($cfg) } catch { $null } } else { '' }
+ConvertTo-Json -InputObject ([ordered]@{ users = $users; config = $config }) -Depth 4 -Compress
+"#;
+
+// Which file sshd reads `user`'s keys from: the first Match block that surely applies and sets AuthorizedKeysFile, else the
+// global value. sshd -T cannot answer for another user on Windows (it hangs), so the main sshd_config is read here.
+// None when a block that may apply cannot be evaluated (patterns, negation, Address, Host, other groups): a guess showed
+// "no keys" for a user who logs in with keys.
+pub fn windows_keys_file(config: &str, user: &str, is_admin: bool) -> Option<String> {
+    let mut global = None;
+    let mut block: Option<Option<bool>> = None;
+    for line in config.lines() {
+        let Some((key, val)) = split_sshd_directive(line) else { continue };
+        if key.eq_ignore_ascii_case("match") {
+            block = Some(match_applies(val, user, is_admin));
+        } else if key.eq_ignore_ascii_case("authorizedkeysfile") {
+            match block {
+                None => global = global.or(Some(val)),
+                Some(Some(true)) => return Some(resolve_keys_path(val, user)),
+                Some(None) => return None,
+                Some(Some(false)) => {}
+            }
+        }
+    }
+    Some(resolve_keys_path(global.unwrap_or(".ssh/authorized_keys"), user))
+}
+
+// Some(applies) when sure; None when a criterion cannot be evaluated here (only Administrators membership is known).
+fn match_applies(criteria: &str, user: &str, is_admin: bool) -> Option<bool> {
+    let words: Vec<&str> = criteria.split_whitespace().collect();
+    if let [all] = words[..] {
+        if all.eq_ignore_ascii_case("all") {
+            return Some(true);
+        }
+    }
+    let mut sure = true;
+    for pair in words.chunks(2) {
+        let [kind, list] = pair else { return None };
+        let names: Vec<&str> = list.split(',').collect();
+        let plain = names.iter().all(|n| !n.contains(['*', '?', '!']));
+        let admins = names.iter().any(|n| n.eq_ignore_ascii_case("administrators"));
+        let hit = match kind.to_ascii_lowercase().as_str() {
+            "user" if plain => Some(names.iter().any(|n| n.eq_ignore_ascii_case(user))),
+            "group" if plain && admins && is_admin => Some(true),
+            "group" if plain && names.len() == 1 && admins => Some(false),
+            _ => None,
+        };
+        match hit {
+            Some(false) => return Some(false),
+            None => sure = false,
+            Some(true) => {}
+        }
+    }
+    sure.then_some(true)
+}
+
+// Win32-OpenSSH tokens; relative paths are under the home, assumed C:\Users\<name> like the rest of this module.
+// ponytail: only the first listed file is shown (sshd tries each in turn); a quoted path with spaces is cut at the space.
+fn resolve_keys_path(value: &str, user: &str) -> String {
+    let home = format!(r"C:\Users\{user}");
+    let first = value.split_whitespace().next().unwrap_or_default().trim_matches('"');
+    let p = first
+        .replace("__PROGRAMDATA__", r"C:\ProgramData")
+        .replace("%%", "\u{0}")
+        .replace("%h", &home)
+        .replace("%u", user)
+        .replace('\u{0}', "%")
+        .replace('/', "\\");
+    if p.starts_with('\\') || p.get(1..2) == Some(":") { p } else { format!(r"{home}\{p}") }
+}
+
+pub fn windows_accounts_read_script() -> String {
+    WINDOWS_ACCOUNTS_BODY.to_string()
+}
+
+// Reads the keys of each user whose file is known; the list (JSON [{name, file}]) arrives in $SSHBOX_SECRET.
+const WINDOWS_KEYS_READ_SCRIPT: &str = r#"$rows = foreach ($f in (ConvertFrom-Json $SSHBOX_SECRET)) {
   $keys = @()
   # Plain strings: PS 5.1 would serialize each line with its PSPath/PSDrive NoteProperties.
-  try { $keys = @(Get-Content -LiteralPath $file -ErrorAction Stop | ForEach-Object { [string]$_ }) } catch { }
-  [ordered]@{ name = $u.Name; enabled = [bool]$u.Enabled; isAdmin = [bool]$isAdmin; keysFile = $file; keys = $keys }
+  try { $keys = @(Get-Content -LiteralPath $f.file -ErrorAction Stop | ForEach-Object { [string]$_ }) } catch { }
+  [ordered]@{ name = [string]$f.name; keys = $keys }
 }
 ConvertTo-Json -InputObject @($rows) -Depth 4 -Compress
 "#;
-
-pub fn windows_accounts_read_script() -> String {
-    format!("{SSHD_HELPER}{WINDOWS_ACCOUNTS_BODY}")
-}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WinAccount {
     name: String,
+    #[serde(default)]
     enabled: bool,
     #[serde(default)]
     is_admin: bool,
@@ -340,17 +401,31 @@ impl KeyLine {
     }
 }
 
-pub fn parse_windows_accounts(json: &str) -> Result<AccessKeysSnapshot, String> {
+#[derive(Deserialize)]
+struct WinUsers {
+    users: Vec<WinAccount>,
+    config: Option<String>,
+}
+
+fn parse_win_rows(json: &str) -> Result<Vec<WinAccount>, String> {
     let json = json.trim();
     // PS 5.1 can still unwrap a one-element array into a bare object.
-    let rows: Vec<WinAccount> = if json.is_empty() {
+    if json.is_empty() {
         Ok(Vec::new())
     } else if json.starts_with('[') {
         serde_json::from_str(json)
     } else {
         serde_json::from_str(json).map(|a| vec![a])
     }
-    .map_err(|e| vps_err(ERR_COMMAND_FAILED, format!("cannot read the account list: {e}")))?;
+    .map_err(|e| vps_err(ERR_COMMAND_FAILED, format!("cannot read the account list: {e}")))
+}
+
+// Rows with keysFile and keys filled in; an empty keysFile means sshd's choice could not be determined.
+pub fn parse_windows_accounts(json: &str) -> Result<AccessKeysSnapshot, String> {
+    Ok(windows_accounts_snapshot(parse_win_rows(json)?))
+}
+
+fn windows_accounts_snapshot(rows: Vec<WinAccount>) -> AccessKeysSnapshot {
     let accounts = rows
         .into_iter()
         .map(|a| LinuxAccountItem {
@@ -364,14 +439,32 @@ pub fn parse_windows_accounts(json: &str) -> Result<AccessKeysSnapshot, String> 
             has_sudo: a.is_admin,
             nopasswd_sudo: false,
             authorized_keys: a.keys.iter().enumerate().filter_map(|(i, l)| parse_authorized_key_line(l.text(), i as u32)).collect(),
+            keys_file_unknown: a.keys_file.is_empty(),
             keys_file: a.keys_file,
         })
         .collect();
-    Ok(AccessKeysSnapshot { accounts })
+    AccessKeysSnapshot { accounts }
 }
 
+// Two runs: users and sshd_config first, then the keys of each file the config names for that user.
 pub async fn get_windows_accounts(host_id: &str, pool: &SshPool) -> Result<AccessKeysSnapshot, String> {
-    parse_windows_accounts(&run_windows_script(host_id, pool, &windows_accounts_read_script(), None).await?)
+    let raw = run_windows_script(host_id, pool, &windows_accounts_read_script(), None).await?;
+    let mut read: WinUsers = serde_json::from_str(raw.trim())
+        .map_err(|e| vps_err(ERR_COMMAND_FAILED, format!("cannot read the account list: {e}")))?;
+    for u in &mut read.users {
+        u.keys_file = read.config.as_deref().and_then(|c| windows_keys_file(c, &u.name, u.is_admin)).unwrap_or_default();
+    }
+    let wanted: Vec<serde_json::Value> = read.users.iter().filter(|u| !u.keys_file.is_empty())
+        .map(|u| serde_json::json!({ "name": u.name, "file": u.keys_file })).collect();
+    if !wanted.is_empty() {
+        let raw = run_windows_script(host_id, pool, WINDOWS_KEYS_READ_SCRIPT, Some(&serde_json::Value::from(wanted).to_string())).await?;
+        for k in parse_win_rows(&raw)? {
+            if let Some(u) = read.users.iter_mut().find(|u| u.name == k.name) {
+                u.keys = k.keys;
+            }
+        }
+    }
+    Ok(windows_accounts_snapshot(read.users))
 }
 
 pub const WINDOWS_RULE_GROUP: &str = "ssh-box";
@@ -381,7 +474,7 @@ pub const WINDOWS_RULE_GROUP: &str = "ssh-box";
 // $ErrorActionPreference is Stop (bootstrap), so a failing cmdlet fails the read instead of showing a false "safe" state.
 // Only the process-name lookup is lenient: a process can exit between listing the socket and naming it.
 // The SSH interface's profile lookup is lenient too: unknown ('') only narrows which rules count.
-const WINDOWS_FIREWALL_READ_SCRIPT: &str = r#"$profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore | ForEach-Object { [ordered]@{ name = [string]$_.Name; enabled = ([string]$_.Enabled -eq 'True'); defaultInbound = [string]$_.DefaultInboundAction; allowInbound = [string]$_.AllowInboundRules } })
+const WINDOWS_FIREWALL_READ_SCRIPT: &str = r#"$profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore | ForEach-Object { [ordered]@{ name = [string]$_.Name; enabled = ([string]$_.Enabled -eq 'True'); defaultInbound = [string]$_.DefaultInboundAction; allowInbound = [string]$_.AllowInboundRules; allowLocal = [string]$_.AllowLocalFirewallRules } })
 $active = @(Get-NetConnectionProfile | ForEach-Object { [string]$_.NetworkCategory -replace 'Authenticated','' } | Select-Object -Unique)
 $sshProfile = ''
 if ($sshIp) { try { $ifx = @(Get-NetIPAddress -IPAddress $sshIp -ErrorAction Stop)[0].InterfaceIndex; $sshProfile = ([string]@(Get-NetConnectionProfile -InterfaceIndex $ifx -ErrorAction Stop)[0].NetworkCategory) -replace 'Authenticated','' } catch { $sshProfile = '' } }
@@ -397,7 +490,7 @@ $rules = @(Get-NetFirewallRule -PolicyStore ActiveStore -Direction Inbound -Enab
     # No application filter read: '' (treated as scoped). Otherwise 'Any' or the program path with %SystemRoot% etc. expanded.
     $app = $apps[$_.InstanceID]; $prog = if ($app) { [Environment]::ExpandEnvironmentVariables([string]$app.Program) } else { '' }
     $scoped = ((@($a.LocalAddress) -join ',') -ne 'Any') -or ([string]$ifs[$_.InstanceID].InterfaceType -ne 'Any')
-    [ordered]@{ displayName = [string]$_.DisplayName; group = [string]$_.Group; profile = [string]$_.Profile; program = $prog; service = [string]$svcs[$_.InstanceID].Service; scoped = [bool]$scoped; action = [string]$_.Action; localPort = (@($p.LocalPort) -join ','); protocol = [string]$p.Protocol; remoteAddress = (@($a.RemoteAddress) -join ',') }
+    [ordered]@{ displayName = [string]$_.DisplayName; policy = ([string]$_.PolicyStoreSourceType -eq 'GroupPolicy'); group = [string]$_.Group; profile = [string]$_.Profile; program = $prog; service = [string]$svcs[$_.InstanceID].Service; scoped = [bool]$scoped; action = [string]$_.Action; localPort = (@($p.LocalPort) -join ','); protocol = [string]$p.Protocol; remoteAddress = (@($a.RemoteAddress) -join ',') }
   }
 })
 $names = @{}; $paths = @{}; Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $names[[int]$_.Id] = $_.ProcessName; $paths[[int]$_.Id] = [string]$_.Path }
@@ -424,12 +517,18 @@ struct WinProfile {
     // AllowInboundRules: "False" blocks every inbound connection, allowed apps included; "NotConfigured" (default) and "True" do not.
     #[serde(default)]
     allow_inbound: String,
+    // AllowLocalFirewallRules: "False" (set by Group Policy) ignores every local rule, which ActiveStore still lists.
+    #[serde(default)]
+    allow_local: String,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WinRule {
     display_name: String,
+    // Comes from Group Policy; anything else (local, or unknown) is ignored when local rules are off.
+    #[serde(default)]
+    policy: bool,
     #[serde(default)]
     group: String,
     #[serde(default)]
@@ -512,6 +611,10 @@ pub fn parse_windows_firewall(json: &str, server_port: u16) -> Result<FirewallSn
     let allows_off = w.profiles.iter().any(|p| {
         p.allow_inbound.trim().eq_ignore_ascii_case("false") && (ssh_profile.is_empty() || p.name.eq_ignore_ascii_case(ssh_profile))
     });
+    // Local rules ignored on the SSH NIC's profile (any profile when unknown): only Group Policy allows let this session in.
+    let local_off = w.profiles.iter().any(|p| {
+        p.allow_local.trim().eq_ignore_ascii_case("false") && (ssh_profile.is_empty() || p.name.eq_ignore_ascii_case(ssh_profile))
+    });
     // A program-scoped rule (the stock OpenSSH one is limited to sshd.exe) applies only while exactly that file owns every
     // socket on its port: another sshd.exe (zip/MSI install, Cygwin) does not, and an unknown listener path never does.
     // Lenient (blocks, for the guard): that file may own one of the sockets, an unknown path included (conservative).
@@ -573,6 +676,7 @@ pub fn parse_windows_firewall(json: &str, server_port: u16) -> Result<FirewallSn
                     && !service_scoped
                     && (!sshd_service || rule_port_matches(&r.local_port, protocol, server_port, "tcp"))
                     && !(allow && allows_off)
+                    && !(allow && local_off && !r.policy)
                     && applies(&r.profile, !allow)
                     && program_owns(r, protocol, !allow),
             };
@@ -613,6 +717,7 @@ pub fn parse_windows_firewall(json: &str, server_port: u16) -> Result<FirewallSn
         listening_sockets,
         unlisted_blocks,
         inbound_allows_off: allows_off,
+        local_rules_off: local_off,
     })
 }
 
@@ -677,7 +782,7 @@ fn guard_rules(snap: &FirewallSnapshot) -> Vec<FirewallRuleItem> {
 // Enabling makes every saved block live, and a block beats the auto-allow: refuse while one covers this session.
 pub fn build_windows_set_state(ctx: &ConnectionContext, snap: &FirewallSnapshot, enable: bool) -> Result<String, String> {
     if enable {
-        crate::vps_guard::check_firewall_enable_windows(ctx, &guard_rules(snap), snap.inbound_allows_off)?;
+        crate::vps_guard::check_firewall_enable_windows(ctx, &guard_rules(snap), snap.inbound_allows_off, snap.local_rules_off)?;
     }
     Ok(build_windows_firewall_state_script(enable, windows_ensure_port(ctx, &snap.rules)))
 }
@@ -720,16 +825,27 @@ pub async fn get_windows_firewall(host_id: &str, pool: &SshPool, probe: &VpsProb
 }
 
 // The exec fails when the host has no powershell.exe (e.g. cmd.exe: "not recognized"): not a Windows we can manage.
-// A timeout is not that: it keeps its own message.
-fn exec_failure(detail: &str) -> String {
+// A timeout or a host that runs no command at all (dropped session) is not that: it keeps its own message.
+fn exec_failure(detail: &str, host_runs_commands: bool) -> String {
     if detail.starts_with(ERR_COMMAND_FAILED) {
         return detail.to_string();
+    }
+    if !host_runs_commands {
+        return vps_err(ERR_COMMAND_FAILED, detail);
     }
     vps_err(ERR_UNSUPPORTED, "unsupported_os")
 }
 
 pub async fn probe_windows(host: &HostEntry, pool: &SshPool) -> Result<VpsProbe, String> {
-    let out = exec_windows(pool, host, WINDOWS_PROBE_SCRIPT, None).await.map_err(|e| exec_failure(&e))?;
+    let out = match exec_windows(pool, host, WINDOWS_PROBE_SCRIPT, None).await {
+        Ok(out) => out,
+        Err(e) => {
+            // A timeout keeps its message anyway: no need to wait for the check.
+            let check = pool.exec_bytes_on_host(host, VERIFY_COMMAND, None);
+            let runs = e.starts_with(ERR_COMMAND_FAILED) || bounded(check, std::time::Duration::from_secs(15)).await.is_ok();
+            return Err(exec_failure(&e, runs));
+        }
+    };
     let auth = pool
         .session_auth(&host.id)
         .await
@@ -867,15 +983,22 @@ mod tests {
     #[tokio::test]
     async fn windows_exec_gives_up_on_a_silent_host() {
         let e = bounded(std::future::pending::<Result<Vec<u8>, String>>(), std::time::Duration::from_millis(20)).await.unwrap_err();
-        // The user must know a half-applied sshd change is not left behind: the armed task reverts it.
-        assert_eq!(e, "COMMAND_FAILED: the Windows host did not answer within 0s; if a change was being applied it is rolled back automatically within 60s");
-        assert_eq!(exec_failure(&e), e);
+        // A reason id, so the UI can say in the user's language that a half-applied sshd change reverts itself.
+        assert_eq!(e, "COMMAND_FAILED: no_answer");
+        assert_eq!(exec_failure(&e, true), e);
     }
 
-    // An exec failure (no powershell.exe) becomes unsupported_os; connection errors were already reported by get_or_connect.
+    // No powershell.exe on a host that still runs commands: not a Windows we can manage.
     #[test]
     fn exec_failure_maps_to_unsupported_os() {
-        assert!(exec_failure("exit 1: 'powershell.exe' is not recognized").starts_with("UNSUPPORTED: unsupported_os"));
+        assert!(exec_failure("'powershell.exe' is not recognized", true).starts_with("UNSUPPORTED: unsupported_os"));
+    }
+
+    // Seen in W7 right after a reboot: a dropped session is not "unsupported OS"; the user must see the real error and retry.
+    #[test]
+    fn exec_failure_keeps_a_connection_error() {
+        let e = exec_failure("Failed to open SSH channel: channel closed", false);
+        assert_eq!(e, "COMMAND_FAILED: Failed to open SSH channel: channel closed");
     }
 
     const SSHD_RAW: &str = "port 22\r\npermitrootlogin no\r\n---SSHBOX-PART---\r\nPort 22\r\nMatch Group administrators\r\n       AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys\r\n---SSHBOX-PART---\r\n---SSHBOX-PART---\r\ninactive\r\n";
@@ -920,12 +1043,11 @@ mod tests {
         assert!(s.contains(WINDOWS_SSHD_CONFIG) && s.contains("sshbox-rollback"));
     }
 
-    // The accounts script must keep one-element arrays as arrays and survive an unreadable keys file.
+    // The scripts must keep one-element arrays as arrays and survive an unreadable keys file.
     #[test]
     fn windows_accounts_script_is_array_safe_and_per_file_guarded() {
-        let s = windows_accounts_read_script();
-        assert!(s.contains("ConvertTo-Json -InputObject @($rows) -Depth 4"));
-        assert!(s.contains("catch { }") && s.contains("administrators_authorized_keys"));
+        assert!(windows_accounts_read_script().contains("$users = @(Get-LocalUser"));
+        assert!(WINDOWS_KEYS_READ_SCRIPT.contains("ConvertTo-Json -InputObject @($rows) -Depth 4") && WINDOWS_KEYS_READ_SCRIPT.contains("catch { }"));
     }
 
     const ACC: &str = r#"{"name":"sshbox","enabled":true,"isAdmin":true,"keysFile":"C:\\ProgramData\\ssh\\administrators_authorized_keys","keys":["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHkeyone me@pc"]}"#;
@@ -950,7 +1072,7 @@ mod tests {
         );
         let s = parse_windows_accounts(&format!("[{obj},{STD}]")).unwrap();
         assert_eq!(s.accounts[0].authorized_keys[0].public_key_body, "AAAAC3NzaC1lZDI1NTE5AAAAIHkeyone");
-        assert!(windows_accounts_read_script().contains("ForEach-Object { [string]$_ }"));
+        assert!(WINDOWS_KEYS_READ_SCRIPT.contains("ForEach-Object { [string]$_ }"));
     }
 
     // PS 5.1 drops the array brackets for a single account; the list must still load.
@@ -1289,6 +1411,31 @@ mod tests {
     // "Block all incoming connections, including allowed apps" (AllowInboundRules False) on the SSH NIC's profile, or on any profile
     // when that is unknown: no allow, not even the auto-allow, lets SSH in, so enabling is refused and allows do not count.
     // NotConfigured is the default (allows apply), and the setting on another known profile changes nothing.
+    // Group Policy with AllowLocalFirewallRules False ignores every local rule, yet ActiveStore still lists them (seen on
+    // the VM): a local allow is no way in, and the auto-allow is a local rule too, so enabling must be refused.
+    #[test]
+    fn windows_enable_refused_when_group_policy_ignores_local_rules() {
+        let with = |allow_local: &str, ssh: &str, extra: &str| {
+            let j = FW_OFF
+                .replace(r#""defaultInbound":"Block"}]"#, &format!(r#""defaultInbound":"Block","allowLocal":"{allow_local}"}}]"#))
+                .replace(r#""sshProfile":"Private""#, &format!(r#""sshProfile":"{ssh}""#))
+                .replace("EXTRA", extra);
+            parse_windows_firewall(&j, 22).unwrap()
+        };
+        let refused = Err("LOCKOUT_BLOCKED: windows_local_rules_off".to_string());
+        let snap = with("False", "Private", "");
+        assert!(snap.rules.iter().all(|r| !r.effective), "the stock OpenSSH rule is local");
+        assert_eq!(build_windows_set_state(&admin_ctx(), &snap, true), refused);
+        assert_eq!(build_windows_set_state(&admin_ctx(), &with("False", "", ""), true), refused, "unknown SSH profile: any profile counts");
+        let gpo_allow = r#",{"displayName":"GPO SSH","service":"Any","group":"","program":"Any","profile":"Any","action":"Allow","localPort":"22","protocol":"TCP","remoteAddress":"Any","policy":true}"#;
+        assert!(build_windows_set_state(&admin_ctx(), &with("False", "Private", gpo_allow), true).is_ok(), "a Group Policy allow still lets us in");
+        assert!(build_windows_set_state(&admin_ctx(), &with("False", "Public", ""), true).is_ok());
+        assert!(build_windows_set_state(&admin_ctx(), &with("True", "Private", ""), true).is_ok());
+        assert!(build_windows_set_state(&admin_ctx(), &with("NotConfigured", "Private", ""), true).is_ok());
+        let script = windows_firewall_read_script("10.0.0.9");
+        assert!(script.contains("allowLocal = [string]$_.AllowLocalFirewallRules") && script.contains("$_.PolicyStoreSourceType -eq 'GroupPolicy'"));
+    }
+
     #[test]
     fn windows_enable_refused_when_inbound_allows_are_off() {
         let profiles = |private: &str| format!(r#""profiles":[{{"name":"Private","enabled":false,"defaultInbound":"Block","allowInbound":"{private}"}},{{"name":"Public","enabled":false,"defaultInbound":"Block","allowInbound":"NotConfigured"}}]"#);
@@ -1441,11 +1588,7 @@ mod tests {
     // A hung sshd.exe must never hang the app: no Windows script may call sshd.exe except through the bounded helper.
     #[test]
     fn windows_scripts_only_call_sshd_through_the_timeout_helper() {
-        let scripts = [
-            windows_sshd_view_script("user=a"),
-            windows_accounts_read_script(),
-            build_sshd_apply_script_windows(Some(2222), 2222),
-        ];
+        let scripts = [windows_sshd_view_script("user=a"), build_sshd_apply_script_windows(Some(2222), 2222)];
         for s in &scripts {
             assert!(s.contains("WaitForExit(15000)") && s.contains(".Kill()"));
             assert!(!s.contains("& $sshd") && !s.contains("& \"$env:WINDIR"), "{s}");
@@ -1500,14 +1643,59 @@ mod tests {
         assert!(s.contains("throw"));
     }
 
-    // One disabled built-in admin (sshd hangs on it) or a failing sshd -T must degrade a row, never fail the whole tab.
+    // The stock Windows config plus the VM's Match User block: sshd -T cannot answer for another user (it hangs), so the
+    // app reads the Match blocks itself.
+    const WIN_CFG: &str = "AuthorizedKeysFile\t.ssh/authorized_keys\r\n#Match User anoncvs\r\nMatch Group administrators\r\n       AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys\r\nMatch User sshbox-std\r\n  AuthorizedKeysFile __PROGRAMDATA__/ssh/sshbox-std_keys\r\n";
+
     #[test]
-    fn windows_accounts_skip_sshd_for_disabled_and_non_admin_and_never_throw() {
+    fn windows_keys_file_follows_match_blocks_like_sshd() {
+        let admin = r"C:\ProgramData\ssh\administrators_authorized_keys";
+        assert_eq!(windows_keys_file(WIN_CFG, "SSH Box Test", true).as_deref(), Some(admin));
+        assert_eq!(windows_keys_file(WIN_CFG, "Administrator", true).as_deref(), Some(admin), "a disabled admin matches the group too");
+        assert_eq!(windows_keys_file(WIN_CFG, "SSHBOX-STD", false).as_deref(), Some(r"C:\ProgramData\ssh\sshbox-std_keys"), "Windows names are case-insensitive");
+        assert_eq!(windows_keys_file(WIN_CFG, "bob", false).as_deref(), Some(r"C:\Users\bob\.ssh\authorized_keys"));
+        assert_eq!(windows_keys_file("", "bob", false).as_deref(), Some(r"C:\Users\bob\.ssh\authorized_keys"), "sshd's default");
+        assert_eq!(windows_keys_file("AuthorizedKeysFile %h/keys/%u_%%\n", "bob", false).as_deref(), Some(r"C:\Users\bob\keys\bob_%"));
+    }
+
+    // Guessing here showed "no keys" for a user who logs in with keys. A block that may apply but cannot be evaluated
+    // makes the file unknown; one that surely does not apply, or sets nothing, changes nothing.
+    #[test]
+    fn windows_keys_file_is_unknown_when_a_block_cannot_be_evaluated() {
+        let cfg = |m: &str| format!("Match {m}\n AuthorizedKeysFile C:/k/%u\n");
+        for m in ["Address 10.0.0.0/8", "User dev*", "User !bob,*", "Group developers", "User bob Address 10.0.0.1"] {
+            assert_eq!(windows_keys_file(&cfg(m), "bob", false), None, "{m}");
+        }
+        assert_eq!(windows_keys_file(&cfg("User alice Address 10.0.0.1"), "bob", false).as_deref(), Some(r"C:\Users\bob\.ssh\authorized_keys"));
+        assert_eq!(windows_keys_file(&cfg("All"), "bob", false).as_deref(), Some(r"C:\k\bob"));
+        assert_eq!(windows_keys_file("Match Address 10.0.0.0/8\n PasswordAuthentication no\n", "bob", false).as_deref(), Some(r"C:\Users\bob\.ssh\authorized_keys"));
+        // sshd applies the first matching block that sets it; a later unclear block does not matter.
+        let first = "Match User bob\n AuthorizedKeysFile C:/a\nMatch User dev*\n AuthorizedKeysFile C:/b\n";
+        assert_eq!(windows_keys_file(first, "bob", false).as_deref(), Some(r"C:\a"));
+    }
+
+    // PS 5.1 Get-LocalGroupMember throws on one orphaned SID or AzureAD member; SilentlyContinue then listed no admin at all.
+    #[test]
+    fn windows_accounts_list_admins_even_when_get_localgroupmember_throws() {
         let s = windows_accounts_read_script();
-        assert!(s.contains("if ($isAdmin -and $u.Enabled)"));
-        let body = &s[s.find("$isAdmin -and $u.Enabled").unwrap()..s.find("$keys = @()").unwrap()];
-        assert!(body.contains("try {") && body.contains("catch { }") && !body.contains("throw"));
-        assert_eq!(s.matches("sshbox_sshd (").count(), 1);
+        assert!(!s.contains("Get-LocalGroupMember -SID S-1-5-32-544 -ErrorAction SilentlyContinue"));
+        // The fallback finds the group by its SID: the name is localized ("Administratoren", "Administrateurs").
+        assert!(s.contains("WinNT://") && s.contains("'S-1-5-32-544').Translate("));
+    }
+
+    // sshd -T hangs for any user but the one logged in (seen on the VM for disabled built-ins and for sshbox-std), so the
+    // accounts read never runs it: the keys file comes from sshd_config (windows_keys_file).
+    #[test]
+    fn windows_accounts_never_run_sshd() {
+        assert!(!windows_accounts_read_script().contains("sshd.exe") && !windows_accounts_read_script().contains("sshbox_sshd"));
+        assert!(windows_accounts_read_script().contains("ReadAllText($cfg)"));
+    }
+
+    // An empty keysFile (sshd_config cannot say) must reach the UI as unknown, not as "no keys" from the default file.
+    #[test]
+    fn windows_accounts_mark_an_undetermined_keys_file() {
+        let s = parse_windows_accounts(r#"[{"name":"dev","enabled":true,"keysFile":"","keys":[]},{"name":"bob","enabled":true,"keysFile":"C:\\Users\\bob\\.ssh\\authorized_keys","keys":[]}]"#).unwrap();
+        assert!(s.accounts[0].keys_file_unknown && !s.accounts[1].keys_file_unknown);
     }
 
     // On this build every bad config ends in a timeout, so the real sshd error must still reach the user (first line).

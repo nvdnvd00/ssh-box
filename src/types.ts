@@ -300,6 +300,7 @@ export interface LinuxAccountItem {
   nopasswdSudo: boolean;
   authorizedKeys: RemoteAuthorizedKey[];
   keysFile?: string;
+  keysFileUnknown?: boolean;
 }
 
 export interface AccessKeysSnapshot {

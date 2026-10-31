@@ -163,6 +163,9 @@ pub struct FirewallSnapshot {
     // Windows only: the SSH interface's profile blocks every inbound connection, allowed apps included.
     #[serde(default)]
     pub inbound_allows_off: bool,
+    // Windows only: Group Policy ignores local rules on the SSH interface's profile (AllowLocalFirewallRules False).
+    #[serde(default)]
+    pub local_rules_off: bool,
 }
 
 impl Default for FirewallSnapshot {
@@ -177,6 +180,7 @@ impl Default for FirewallSnapshot {
             listening_sockets: Vec::new(),
             unlisted_blocks: Vec::new(),
             inbound_allows_off: false,
+            local_rules_off: false,
         }
     }
 }
@@ -208,6 +212,9 @@ pub struct LinuxAccountItem {
     // Windows only: the file the keys were read from; empty elsewhere.
     #[serde(default)]
     pub keys_file: String,
+    // Windows only: sshd_config does not say for sure which file sshd reads (keys then empty, not "none").
+    #[serde(default)]
+    pub keys_file_unknown: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -1226,6 +1233,15 @@ pub(crate) fn find_remote_host(host_id: &str) -> Result<crate::host_store::HostE
         .ok_or_else(|| vps_err(ERR_COMMAND_FAILED, format!("unknown host {host_id}")))
 }
 
+// The longest script (sshd apply with its 15s Windows sshd -t bound, restarts and rollback) needs well under this.
+// The UI text for no_answer names this value.
+pub(crate) const VPS_EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+// A hung remote command must not hang the app; the sshd rollback timers run on the host and do not need us.
+pub(crate) async fn bounded<T>(run: impl std::future::Future<Output = Result<T, String>>, limit: std::time::Duration) -> Result<T, String> {
+    tokio::time::timeout(limit, run).await.unwrap_or_else(|_| Err(vps_err(ERR_COMMAND_FAILED, "no_answer")))
+}
+
 // Write scripts start with `set -eu` themselves; read-only scripts may tolerate failing probes.
 pub async fn run_privileged_script(
     host_id: &str,
@@ -1234,11 +1250,20 @@ pub async fn run_privileged_script(
     script: &str,
     secret: Option<&str>,
 ) -> Result<String, String> {
+    bounded(run_privileged_script_unbounded(host_id, pool, sudo_password, script, secret), VPS_EXEC_TIMEOUT).await
+}
+
+// For callers that set their own, longer limit (the installer gives package installs 600 s).
+pub async fn run_privileged_script_unbounded(
+    host_id: &str,
+    pool: &SshPool,
+    sudo_password: Option<String>,
+    script: &str,
+    secret: Option<&str>,
+) -> Result<String, String> {
     let host = find_remote_host(host_id)?;
     let stdin = privileged_stdin(sudo_password.as_deref(), secret)?;
-    let out = pool
-        .exec_bytes_on_host(&host, &build_privileged_command(script), Some(&stdin))
-        .await?;
+    let out = pool.exec_bytes_on_host(&host, &build_privileged_command(script), Some(&stdin)).await?;
     classify_privileged_output(&String::from_utf8_lossy(&out))
 }
 
@@ -1348,16 +1373,16 @@ pub async fn probe(
 ) -> Result<VpsProbe, String> {
     let host = find_remote_host(host_id)?;
     pool.get_or_connect(&host, None).await?;
-    let uname = pool
-        .exec_bytes_on_host(&host, "uname -s", None)
-        .await
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o).trim().to_string());
+    // A timeout says nothing about the OS: report it instead of trying the Windows path.
+    let uname = match bounded(pool.exec_bytes_on_host(&host, "uname -s", None), VPS_EXEC_TIMEOUT).await {
+        Err(e) if e.starts_with(ERR_COMMAND_FAILED) => return Err(e),
+        r => r.ok().map(|o| String::from_utf8_lossy(&o).trim().to_string()),
+    };
     if unix_family(uname.as_deref()).is_none() {
         return crate::vps_windows::probe_windows(&host, pool).await;
     }
     let stdin = privileged_stdin(sudo_password.as_deref(), None)?;
-    let out = pool.exec_bytes_on_host(&host, PROBE_SCRIPT, Some(&stdin)).await?;
+    let out = bounded(pool.exec_bytes_on_host(&host, PROBE_SCRIPT, Some(&stdin)), VPS_EXEC_TIMEOUT).await?;
     let auth = pool
         .session_auth(host_id)
         .await
@@ -1406,7 +1431,7 @@ fn normalize_permit_root_login(val: &str) -> String {
     }
 }
 
-fn split_sshd_directive(line: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_sshd_directive(line: &str) -> Option<(&str, &str)> {
     let without_comment = line.split('#').next().unwrap_or("").trim();
     if without_comment.is_empty() {
         return None;
@@ -1710,6 +1735,8 @@ sshbox_restore; echo SSHBOX_SEMANAGE_FAILED; exit 6; fi\n"
 {restore}R={r}
 if systemctl is-active --quiet sshbox-rollback.timer 2>/dev/null; then echo SSHBOX_ROLLBACK_PENDING; exit 3; fi
 if [ -e "$F" ]; then cp -p "$F" "$F.sshbox.bak"; rm -f "$F.sshbox.absent"; else : > "$F.sshbox.absent"; rm -f "$F.sshbox.bak"; fi
+# Until the rollback is armed, any failure puts the old file back.
+trap 'rc=$?; [ "$rc" -eq 0 ] || sshbox_restore; exit "$rc"' EXIT
 T=$(mktemp)
 cat "$SSHBOX_SECRET_FILE" > "$T"
 install -m 644 "$T" "$F"
@@ -1724,7 +1751,11 @@ echo "NOW:$(date +%s)"
 echo "ROLLBACK_AT:$(( $(date +%s) + 60 ))"
 {firewall}{reload}
 P={port}
-ss -tlnpH "sport = :$P" | grep -Eq 'sshd|systemd' || {{ echo SSHBOX_PORT_NOT_LISTENING; exit 4; }}
+# The reload returns before sshd rebinds (Debian 13): give it up to 10 s; the 60 s timer is already armed.
+n=0
+until ss -tlnpH "sport = :$P" | grep -Eq 'sshd|systemd'; do
+  n=$((n + 1)); [ "$n" -lt 10 ] || {{ echo SSHBOX_PORT_NOT_LISTENING; exit 4; }}; sleep 1
+done
 "#,
         restore = sshd_restore_fn(file),
         r = shell_single_quote(rollback_path),
@@ -1852,7 +1883,7 @@ async fn run_sshd_script(
 }
 
 // Runs in sh, cmd.exe and PowerShell alike (a Windows login shell has no `true`).
-const VERIFY_COMMAND: &str = "exit 0";
+pub(crate) const VERIFY_COMMAND: &str = "exit 0";
 
 // Opens a brand-new SSH connection on `new_port`; the live session proves nothing (spec §4.1).
 pub async fn verify_new_connection(
@@ -2034,6 +2065,7 @@ fn default_linux_account() -> LinuxAccountItem {
         nopasswd_sudo: false,
         authorized_keys: Vec::new(),
         keys_file: String::new(),
+        keys_file_unknown: false,
     }
 }
 
@@ -2836,6 +2868,10 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         dir: std::path::PathBuf,
     }
 
+    // A failing chmod stands in for a full disk while the rollback script is written.
+    #[cfg(unix)]
+    const FAKE_CHMOD: &str = r#"[ -n "${FAKE_CHMOD_FAIL:-}" ] && exit 1; exec /bin/chmod "$@""#;
+
     #[cfg(unix)]
     fn plan(socket: bool, selinux: bool, new_port: Option<u16>, engine: FirewallEngine) -> ReloadPlan {
         ReloadPlan { ssh_socket_active: socket, selinux_enforcing: selinux, port: new_port.unwrap_or(2222), new_port, firewall_engine: engine }
@@ -2851,11 +2887,14 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         };
         logger("systemctl", r#"case "$*" in *"is-active --quiet sshbox-rollback.timer"*) exit "${FAKE_PENDING:-1}";; *is-active*) exit 1;; esac"#);
         logger("sshd", r#"[ "$1" = "-t" ] && exit "${FAKE_SSHD_T:-0}""#);
-        logger("ss", r#"[ -n "${FAKE_SS_EMPTY:-}" ] || echo 'LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=7,fd=3))'"#);
+        // FAKE_SS_LATE=n: the port shows up only from the n-th call on (sshd rebinds after the reload returns).
+        logger("ss", r#"c=$(grep -c '^ss ' "$FAKE_LOG"); [ -n "${FAKE_SS_EMPTY:-}" ] || [ "$c" -lt "${FAKE_SS_LATE:-1}" ] || echo 'LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=7,fd=3))'"#);
+        logger("sleep", "");
         logger("systemd-run", "");
         logger("semanage", "");
         logger("ufw", r#"[ "$1" = "status" ] && echo 'Status: active'"#);
         logger("firewall-cmd", r#"[ "$1" = "--state" ] && echo running"#);
+        shell::fake_bin(&bin, "chmod", FAKE_CHMOD);
         let file = dir.join("00-sshbox.conf");
         if let Some(content) = existing {
             std::fs::write(&file, content).unwrap();
@@ -2921,6 +2960,27 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         let r = run_apply(&plan(false, false, None, FirewallEngine::None), Some("Port 22\n"), &[("FAKE_SSHD_T", "1")]);
         assert_eq!(std::fs::read_to_string(&r.file).unwrap(), "Port 22\n");
         assert!(!r.log.contains("systemd-run") && !r.log.contains("reload"), "{}", r.log);
+    }
+
+    // The new file is on disk before the rollback is armed: a failure in between must not leave it there unguarded.
+    #[cfg(unix)]
+    #[test]
+    fn failure_before_arming_restores_previous_file() {
+        for existing in [Some("Port 22\n"), None] {
+            let r = run_apply(&plan(false, false, None, FirewallEngine::None), existing, &[("FAKE_CHMOD_FAIL", "1")]);
+            assert_eq!(std::fs::read_to_string(&r.file).ok().as_deref(), existing, "{}", r.out);
+            assert!(!r.log.contains("systemd-run") && !r.log.contains("reload"), "{}", r.log);
+        }
+    }
+
+    // Seen once on Debian 13 (S2): ss ran before the reloaded sshd listened, and a good port change was rolled back.
+    #[cfg(unix)]
+    #[test]
+    fn apply_waits_for_a_slow_listener() {
+        let r = run_apply(&plan(false, false, Some(2222), FirewallEngine::None), Some("Port 22\n"), &[("FAKE_SS_LATE", "3")]);
+        assert!(r.out.contains("ROLLBACK_AT:") && !r.out.contains("SSHBOX_PORT_NOT_LISTENING"), "{}", r.out);
+        assert_eq!(r.log.lines().filter(|l| l.starts_with("ss ")).count(), 3, "{}", r.log);
+        assert!(r.rollback.exists(), "the 60 s timer must stay armed for the verify step");
     }
 
     // Any failure after the timer is armed rolls back at once instead of waiting 60 seconds.
@@ -3047,6 +3107,7 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         let log = dir.join("calls.log");
         shell::fake_bin(&bin, "sshd", r#"echo "sshd $*" >> "$FAKE_LOG"; [ "$1" = "-t" ] && exit "${FAKE_SSHD_T:-0}"; exit 0"#);
         shell::fake_bin(&bin, "launchctl", r#"[ "$1" = print ] && exit "${FAKE_PENDING:-1}"; echo "launchctl $*" >> "$FAKE_LOG"; [ "$1" = bootstrap ] && exit "${FAKE_BOOTSTRAP:-0}"; exit 0"#);
+        shell::fake_bin(&bin, "chmod", FAKE_CHMOD);
         let file = dir.join("00-sshbox.conf");
         if let Some(c) = existing {
             std::fs::write(&file, c).unwrap();
@@ -3084,6 +3145,17 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         assert!(r.out.contains("SSHBOX_SSHD_INVALID"), "{}", r.out);
         assert_eq!(std::fs::read_to_string(&r.file).unwrap(), "Port 22\n");
         assert!(!r.log.contains("launchctl"), "{}", r.log);
+    }
+
+    // macOS: the next connection's sshd already reads the new file, so a failure before arming must restore it.
+    #[cfg(unix)]
+    #[test]
+    fn macos_apply_restores_when_rollback_script_cannot_be_written() {
+        for existing in [Some("Port 22\n"), None] {
+            let r = run_mac_apply(existing, &[("FAKE_CHMOD_FAIL", "1")]);
+            assert_eq!(std::fs::read_to_string(&r.file).ok().as_deref(), existing, "{}", r.out);
+            assert!(!r.log.contains("launchctl"), "{}", r.log);
+        }
     }
 
     // If the timer cannot be armed (plist unwritable or bootstrap fails), the new config must not stay.

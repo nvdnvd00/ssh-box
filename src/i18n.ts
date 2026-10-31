@@ -129,6 +129,7 @@ export interface AppI18nStrings {
   vpsErrUnsupported: string;
   vpsLockoutReasons: Record<string, string>;
   vpsUnsupportedReasons: Record<string, string>;
+  vpsCommandReasons: Record<string, string>;
   vpsSshStatusTitle: string;
   vpsSshCheckPassword: string;
   vpsSshCheckRoot: string;
@@ -174,6 +175,7 @@ export interface AppI18nStrings {
   vpsFwNoPorts: string;
   vpsFwRulesTitle: string;
   vpsFwNoRules: string;
+  vpsFwUnnamedRule: string;
   vpsFwFrom: string;
   vpsFwAnywhere: string;
   vpsFwAllPorts: string;
@@ -205,6 +207,7 @@ export interface AppI18nStrings {
   vpsUsersUnlock: string;
   vpsUsersKeysTitle: string;
   vpsUsersNoKeys: string;
+  vpsUsersKeysFileUnknown: string;
   vpsUsersRevoke: string;
   vpsUsersRevokeConfirm: string;
   vpsUsersKeyInUse: string;
@@ -381,6 +384,9 @@ const VI_STRINGS: AppI18nStrings = {
   vpsErrCommandFailed: "Lệnh trên máy chủ bị lỗi:",
   vpsErrVerifyFailed: "Không mở được kết nối mới nên thay đổi đã được hoàn tác:",
   vpsErrUnsupported: "Máy chủ không hỗ trợ:",
+  vpsCommandReasons: {
+    no_answer: "Máy chủ không trả lời trong 120 giây. Nếu lúc đó đang áp dụng thay đổi cài đặt SSH, thay đổi ấy sẽ tự hoàn tác trong vòng 60 giây.",
+  },
   vpsLockoutReasons: {
     both_auth_off: "Không thể tắt cả đăng nhập bằng mật khẩu lẫn bằng SSH key.",
     no_sessions: "MaxSessions 0 từ chối mọi phiên làm việc, kể cả của ứng dụng.",
@@ -401,6 +407,8 @@ const VI_STRINGS: AppI18nStrings = {
       "Đang có rule chặn chính kết nối SSH của bạn. Bật firewall lúc này sẽ cắt kết nối, nên ứng dụng không bật.",
     windows_inbound_allows_off:
       "Firewall đang đặt chế độ chặn mọi kết nối vào, kể cả ứng dụng được phép. Bật firewall lúc này sẽ cắt SSH, nên ứng dụng không bật.",
+    windows_local_rules_off:
+      "Group Policy đang bỏ qua mọi rule tường lửa đặt trên máy (AllowLocalFirewallRules), kể cả rule SSH mà ứng dụng sẽ thêm. Bật firewall lúc này sẽ cắt SSH, nên ứng dụng không bật.",
   },
   vpsUnsupportedReasons: {
     linux_only: "Cấu hình VPS không dùng cho máy local",
@@ -515,6 +523,7 @@ const VI_STRINGS: AppI18nStrings = {
   vpsFwNoPorts: "Không có cổng nào đang lắng nghe.",
   vpsFwRulesTitle: "Quy tắc",
   vpsFwNoRules: "Chưa có quy tắc nào.",
+  vpsFwUnnamedRule: "Quy tắc Windows (không rõ tên)",
   vpsFwFrom: "từ {s}",
   vpsFwAnywhere: "mọi nơi",
   vpsFwAllPorts: "mọi cổng",
@@ -546,6 +555,7 @@ const VI_STRINGS: AppI18nStrings = {
   vpsUsersUnlock: "Mở khoá",
   vpsUsersKeysTitle: "SSH key được phép",
   vpsUsersNoKeys: "Chưa có key nào.",
+  vpsUsersKeysFileUnknown: "Không xác định được file khoá của tài khoản này: sshd_config có khối Match mà ứng dụng không xét được, hoặc không đọc được file.",
   vpsUsersRevoke: "Thu hồi",
   vpsUsersRevokeConfirm: "Thu hồi key",
   vpsUsersKeyInUse: "Ứng dụng đang dùng",
@@ -682,6 +692,9 @@ const EN_STRINGS: AppI18nStrings = {
   vpsErrCommandFailed: "The command failed on the server:",
   vpsErrVerifyFailed: "A new connection could not be opened, so the change was rolled back:",
   vpsErrUnsupported: "Not supported on this server:",
+  vpsCommandReasons: {
+    no_answer: "The server did not answer within 120 seconds. If an SSH settings change was being applied, it rolls back by itself within 60 seconds.",
+  },
   vpsLockoutReasons: {
     both_auth_off: "Password and SSH key login cannot both be turned off.",
     no_sessions: "MaxSessions 0 refuses every session, including the app's.",
@@ -702,6 +715,8 @@ const EN_STRINGS: AppI18nStrings = {
       "A rule blocks your own SSH connection. Turning the firewall on now would cut you off, so the app will not do it.",
     windows_inbound_allows_off:
       "The firewall is set to block all incoming connections, even allowed apps. Turning it on now would cut SSH, so the app will not do it.",
+    windows_local_rules_off:
+      "Group Policy ignores every firewall rule set on this machine (AllowLocalFirewallRules), including the SSH rule the app would add. Turning the firewall on now would cut SSH, so the app will not do it.",
   },
   vpsUnsupportedReasons: {
     linux_only: "Server Config is not available for the local machine",
@@ -816,6 +831,7 @@ const EN_STRINGS: AppI18nStrings = {
   vpsFwNoPorts: "No ports are listening.",
   vpsFwRulesTitle: "Rules",
   vpsFwNoRules: "No rules yet.",
+  vpsFwUnnamedRule: "Windows rule (name not readable)",
   vpsFwFrom: "from {s}",
   vpsFwAnywhere: "anywhere",
   vpsFwAllPorts: "all ports",
@@ -847,6 +863,7 @@ const EN_STRINGS: AppI18nStrings = {
   vpsUsersUnlock: "Unlock",
   vpsUsersKeysTitle: "Authorized SSH keys",
   vpsUsersNoKeys: "No keys yet.",
+  vpsUsersKeysFileUnknown: "The keys file of this account cannot be determined: sshd_config has a Match block the app cannot evaluate, or the file could not be read.",
   vpsUsersRevoke: "Revoke",
   vpsUsersRevokeConfirm: "Revoke key",
   vpsUsersKeyInUse: "Used by this app",

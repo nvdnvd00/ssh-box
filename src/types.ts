@@ -152,7 +152,35 @@ export type TabResources =
   | "sftp"
   | "vpsConfig";
 
-export type VpsStudioTab = "ssh" | "firewall" | "access";
+export type VpsStudioTab = "ssh" | "firewall" | "access" | "installer";
+
+export type HostOs = "linux" | "macos" | "windows";
+export interface InstallMethod { os: HostOs; manager: string; package: string; service: string | null }
+export type ToolStatus = { kind: "notInstalled" } | { kind: "installed"; via: Owner[] } | { kind: "external" };
+export interface Owner { manager: string; package: string }
+export interface ServiceState { enabled: boolean; active: boolean }
+export interface ManagerState { id: string; present: boolean }
+export interface ToolView {
+  id: string;
+  name: string;
+  category: string;
+  recommended: boolean;
+  descriptionVi: string;
+  descriptionEn: string;
+  status: ToolStatus;
+  service: string | null;
+  serviceState: ServiceState | null;
+  install: InstallMethod | null;
+  blockedBy: string | null;
+}
+export interface InstallerScan { os: HostOs; managers: ManagerState[]; tools: ToolView[] }
+export type InstallAction =
+  | { kind: "install"; manager: string; package: string }
+  | { kind: "uninstall"; manager: string; package: string }
+  | { kind: "enableService"; service: string }
+  | { kind: "installManager"; manager: string }
+  | { kind: "refresh" };
+export interface SearchHit { manager: string; package: string; description: string }
 
 export type AuthUsed = { kind: "password" } | { kind: "key"; publicKeyBody: string };
 export type PrivilegeLevel = "root" | "sudoNoPassword" | "sudoPassword" | "admin" | "none";

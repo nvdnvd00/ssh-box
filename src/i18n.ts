@@ -219,6 +219,29 @@ export interface AppI18nStrings {
   vpsTabSsh: string;
   vpsTabFirewall: string;
   vpsTabAccess: string;
+  vpsTabInstaller: string;
+  vpsErrTimeout: string;
+  instTabMissing: string;
+  instTabInstalled: string;
+  instTabAttention: string;
+  instCat: Record<string, string>;
+  instMgrDesc: Record<string, string>;
+  instRecommended: string;
+  instInstall: string;
+  instBrewAdminNote: string;
+  instUninstall: string;
+  instEnable: string;
+  instInstallSelected: (n: number) => string;
+  instNeedsManager: (m: string) => string;
+  instUninstallConfirm: (name: string, m: string) => string;
+  instExternal: string;
+  instNotRunning: string;
+  instSearchPlaceholder: string;
+  instSearchSkipped: (list: string) => string;
+  instStatus: Record<"waiting" | "running" | "done" | "failed", string>;
+  instWindowsPopupNote: string;
+  instWingetManual: string;
+  instRefresh: string;
   vpsPrivRoot: string;
   vpsPrivSudoNoPassword: string;
   vpsPrivSudoPassword: string;
@@ -227,6 +250,7 @@ export interface AppI18nStrings {
   vpsPrivStandard: string;
   vpsSudoTitle: string;
   vpsSudoHint: string;
+  vpsSudoLocalLabel: string;
   vpsSudoOpen: string;
   vpsSudoUnlock: string;
 }
@@ -405,6 +429,36 @@ const VI_STRINGS: AppI18nStrings = {
   vpsTabSsh: "SSH",
   vpsTabFirewall: "Tường lửa",
   vpsTabAccess: "Người dùng & khoá SSH",
+  vpsTabInstaller: "Cài công cụ",
+  vpsErrTimeout: "Máy chủ phản hồi quá lâu nên đã dừng:",
+  instTabMissing: "Chưa cài",
+  instTabInstalled: "Đã cài",
+  instTabAttention: "Cần chú ý",
+  instCat: { managers: "Trình quản lý gói", security: "Bảo mật", apps: "Chạy ứng dụng", ai: "AI", network: "Mạng", utils: "Tiện ích" },
+  instMgrDesc: {
+    apt: "Trình cài phần mềm có sẵn trên Ubuntu và Debian.",
+    dnf: "Trình cài phần mềm có sẵn trên Fedora, RHEL, Rocky.",
+    snap: "Kho ứng dụng của Canonical, một gói chạy được trên nhiều bản Linux.",
+    npm: "Cài thư viện và công cụ JavaScript; đi kèm Node.js.",
+    brew: "Homebrew: trình cài công cụ dòng lệnh phổ biến nhất trên macOS.",
+    winget: "Trình cài ứng dụng chính thức của Windows.",
+  },
+  instRecommended: "nên cài",
+  instInstall: "Cài",
+  instBrewAdminNote: "Cài Homebrew cần quyền quản trị; nếu lỗi, hãy chạy lệnh cài chính thức trong Terminal",
+  instUninstall: "Gỡ",
+  instEnable: "Bật",
+  instInstallSelected: (n) => `Cài ${n} mục đã chọn`,
+  instNeedsManager: (m) => `Cần cài ${m} trước`,
+  instUninstallConfirm: (name, m) => `Gỡ ${name} bằng ${m}?`,
+  instExternal: "Đã cài (ngoài trình quản lý gói)",
+  instNotRunning: "Đã cài · chưa bật",
+  instSearchPlaceholder: "Tìm gói trong …",
+  instSearchSkipped: (list) => `Bỏ qua (chưa có trình quản lý): ${list}`,
+  instStatus: { waiting: "Đang chờ", running: "Đang chạy", done: "Xong", failed: "Lỗi" },
+  instWindowsPopupNote: "Windows có thể hiện hộp thoại xin quyền quản trị; hãy bấm đồng ý trên máy chủ.",
+  instRefresh: "Cập nhật danh sách gói",
+  instWingetManual: "winget không cài được từ xa. Hãy cài \"App Installer\" từ Microsoft Store trên máy chủ rồi quét lại.",
   vpsPrivRoot: "Root",
   vpsPrivSudoNoPassword: "Sudo không cần mật khẩu",
   vpsPrivSudoPassword: "Sudo đã mở khoá",
@@ -412,6 +466,7 @@ const VI_STRINGS: AppI18nStrings = {
   vpsPrivNone: "Chưa có quyền sudo",
   vpsPrivStandard: "Tài khoản thường",
   vpsSudoTitle: "Mật khẩu sudo",
+  vpsSudoLocalLabel: "Máy này",
   vpsSudoHint: "Chỉ giữ trong bộ nhớ cho phiên làm việc này, không lưu lại.",
   vpsSudoOpen: "Nhập mật khẩu sudo",
   vpsSudoUnlock: "Mở khoá",
@@ -675,6 +730,36 @@ const EN_STRINGS: AppI18nStrings = {
   vpsTabSsh: "SSH",
   vpsTabFirewall: "Firewall",
   vpsTabAccess: "Users & Keys",
+  vpsTabInstaller: "Tools",
+  vpsErrTimeout: "The server took too long and the task was stopped:",
+  instTabMissing: "Not installed",
+  instTabInstalled: "Installed",
+  instTabAttention: "Needs attention",
+  instCat: { managers: "Package managers", security: "Security", apps: "Run apps", ai: "AI", network: "Network", utils: "Utilities" },
+  instMgrDesc: {
+    apt: "Built-in package installer on Ubuntu and Debian.",
+    dnf: "Built-in package installer on Fedora, RHEL and Rocky.",
+    snap: "Canonical's app store; one package runs on many Linux distros.",
+    npm: "Installs JavaScript libraries and tools; ships with Node.js.",
+    brew: "Homebrew: the most popular command-line package installer on macOS.",
+    winget: "The official Windows app installer.",
+  },
+  instRecommended: "recommended",
+  instInstall: "Install",
+  instBrewAdminNote: "Installing Homebrew needs admin rights; if it fails, run the official install command in Terminal",
+  instUninstall: "Remove",
+  instEnable: "Enable",
+  instInstallSelected: (n) => `Install ${n} selected`,
+  instNeedsManager: (m) => `Install ${m} first`,
+  instUninstallConfirm: (name, m) => `Remove ${name} using ${m}?`,
+  instExternal: "Installed (outside a package manager)",
+  instNotRunning: "Installed · not enabled",
+  instSearchPlaceholder: "Search packages in …",
+  instSearchSkipped: (list) => `Skipped (no package manager): ${list}`,
+  instStatus: { waiting: "Waiting", running: "Running", done: "Done", failed: "Failed" },
+  instWindowsPopupNote: "Windows may show an administrator prompt; approve it on the server.",
+  instRefresh: "Refresh package lists",
+  instWingetManual: "winget cannot be installed remotely. Install \"App Installer\" from the Microsoft Store on the server, then rescan.",
   vpsPrivRoot: "Root",
   vpsPrivSudoNoPassword: "Sudo, no password",
   vpsPrivSudoPassword: "Sudo unlocked",
@@ -682,6 +767,7 @@ const EN_STRINGS: AppI18nStrings = {
   vpsPrivNone: "No sudo yet",
   vpsPrivStandard: "Standard account",
   vpsSudoTitle: "Sudo password",
+  vpsSudoLocalLabel: "This machine",
   vpsSudoHint: "Kept in memory for this session only, never saved.",
   vpsSudoOpen: "Enter sudo password",
   vpsSudoUnlock: "Unlock",

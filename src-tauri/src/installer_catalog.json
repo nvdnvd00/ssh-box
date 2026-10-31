@@ -1,0 +1,554 @@
+[
+ {
+  "id": "ufw",
+  "name": "UFW",
+  "category": "security",
+  "recommended": true,
+  "descriptionVi": "Tường lửa dễ dùng: chỉ mở những cổng bạn cho phép, chặn phần còn lại.",
+  "descriptionEn": "Easy firewall: opens only the ports you allow and blocks the rest.",
+  "bin": null,
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "ufw",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "ufw",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "fail2ban",
+  "name": "Fail2ban",
+  "category": "security",
+  "recommended": true,
+  "descriptionVi": "Theo dõi nhật ký đăng nhập, tạm khóa IP đoán sai mật khẩu SSH nhiều lần.",
+  "descriptionEn": "Watches login logs and temporarily bans IPs that keep guessing SSH passwords.",
+  "bin": null,
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "fail2ban",
+    "service": "fail2ban"
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "fail2ban",
+    "service": "fail2ban"
+   }
+  ]
+ },
+ {
+  "id": "unattended-upgrades",
+  "name": "Unattended Upgrades",
+  "category": "security",
+  "recommended": true,
+  "descriptionVi": "Tự cài bản vá bảo mật mỗi ngày, không cần bạn vào cập nhật tay.",
+  "descriptionEn": "Installs security patches daily on its own, no manual updates needed.",
+  "bin": "unattended-upgrade",
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "unattended-upgrades",
+    "service": "unattended-upgrades"
+   }
+  ]
+ },
+ {
+  "id": "lynis",
+  "name": "Lynis",
+  "category": "security",
+  "recommended": false,
+  "descriptionVi": "Quét cấu hình máy, chỉ ra chỗ chưa an toàn kèm gợi ý cách sửa.",
+  "descriptionEn": "Audits the system configuration and lists weak spots with suggested fixes.",
+  "bin": null,
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "lynis",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "lynis",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "lynis",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "rkhunter",
+  "name": "rkhunter",
+  "category": "security",
+  "recommended": false,
+  "descriptionVi": "Dò rootkit (phần mềm độc hại ẩn mình) và tệp hệ thống bị sửa lén.",
+  "descriptionEn": "Looks for rootkits (hidden malware) and system files changed behind your back.",
+  "bin": null,
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "rkhunter",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "rkhunter",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "git",
+  "name": "Git",
+  "category": "apps",
+  "recommended": true,
+  "descriptionVi": "Lưu lịch sử thay đổi mã nguồn, tải mã từ GitHub, GitLab về máy.",
+  "descriptionEn": "Tracks source code history and pulls code from GitHub or GitLab.",
+  "bin": "git",
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "git",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "git",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "git",
+    "service": null
+   },
+   {
+    "os": "windows",
+    "manager": "winget",
+    "package": "Git.Git",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "node",
+  "name": "Node.js",
+  "category": "apps",
+  "recommended": false,
+  "descriptionVi": "Chạy ứng dụng JavaScript phía máy chủ; đi kèm npm để cài thư viện.",
+  "descriptionEn": "Runs server-side JavaScript apps; ships with npm for installing packages.",
+  "bin": "node",
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "nodejs",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "nodejs",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "node",
+    "service": null
+   },
+   {
+    "os": "windows",
+    "manager": "winget",
+    "package": "OpenJS.NodeJS.LTS",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "docker",
+  "name": "Docker",
+  "category": "apps",
+  "recommended": false,
+  "descriptionVi": "Chạy ứng dụng trong container (hộp riêng chứa sẵn mọi thứ ứng dụng cần), dễ triển khai và gỡ bỏ.",
+  "descriptionEn": "Runs apps in containers (self-contained boxes with everything they need), easy to deploy and remove.",
+  "bin": "docker",
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "docker.io",
+    "service": "docker"
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "docker",
+    "service": "docker"
+   },
+   {
+    "os": "linux",
+    "manager": "snap",
+    "package": "docker",
+    "service": "snap.docker.dockerd"
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "docker",
+    "service": null
+   },
+   {
+    "os": "windows",
+    "manager": "winget",
+    "package": "Docker.DockerDesktop",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "python3",
+  "name": "Python 3",
+  "category": "apps",
+  "recommended": false,
+  "descriptionVi": "Ngôn ngữ lập trình phổ biến, nhiều script và công cụ quản trị cần đến.",
+  "descriptionEn": "Popular programming language that many scripts and admin tools need.",
+  "bin": "python3",
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "python3",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "python3",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "python3",
+    "service": null
+   },
+   {
+    "os": "windows",
+    "manager": "winget",
+    "package": "Python.Python.3.12",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "nginx",
+  "name": "Nginx",
+  "category": "apps",
+  "recommended": false,
+  "descriptionVi": "Máy chủ web: phục vụ trang web và chuyển truy cập vào ứng dụng của bạn.",
+  "descriptionEn": "Web server: serves websites and forwards traffic to your apps.",
+  "bin": "nginx",
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "nginx",
+    "service": "nginx"
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "nginx",
+    "service": "nginx"
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "nginx",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "claude-code",
+  "name": "Claude Code",
+  "category": "ai",
+  "recommended": false,
+  "descriptionVi": "Trợ lý lập trình AI của Anthropic, làm việc ngay trong terminal.",
+  "descriptionEn": "Anthropic's AI coding assistant that works right in the terminal.",
+  "bin": "claude",
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "npm",
+    "package": "@anthropic-ai/claude-code",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "npm",
+    "package": "@anthropic-ai/claude-code",
+    "service": null
+   },
+   {
+    "os": "windows",
+    "manager": "npm",
+    "package": "@anthropic-ai/claude-code",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "tailscale",
+  "name": "Tailscale",
+  "category": "network",
+  "recommended": false,
+  "descriptionVi": "Nối các máy của bạn vào một mạng riêng an toàn, truy cập nhau mà không cần mở cổng.",
+  "descriptionEn": "Links your machines into a private, secure network without opening ports.",
+  "bin": "tailscale",
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "tailscale",
+    "service": "tailscaled"
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "tailscale",
+    "service": "tailscaled"
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "tailscale",
+    "service": null
+   },
+   {
+    "os": "windows",
+    "manager": "winget",
+    "package": "Tailscale.Tailscale",
+    "service": "Tailscale"
+   }
+  ]
+ },
+ {
+  "id": "curl",
+  "name": "curl",
+  "category": "network",
+  "recommended": true,
+  "descriptionVi": "Gửi yêu cầu và tải dữ liệu qua HTTP từ dòng lệnh, hay dùng để thử API.",
+  "descriptionEn": "Sends requests and fetches data over HTTP from the command line; handy for testing APIs.",
+  "bin": "curl",
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "curl",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "curl",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "curl",
+    "service": null
+   },
+   {
+    "os": "windows",
+    "manager": "winget",
+    "package": "cURL.cURL",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "wget",
+  "name": "wget",
+  "category": "network",
+  "recommended": false,
+  "descriptionVi": "Tải tệp từ web về máy, tải tiếp được khi mạng bị ngắt giữa chừng.",
+  "descriptionEn": "Downloads files from the web and resumes when the connection drops.",
+  "bin": "wget",
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "wget",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "wget",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "wget",
+    "service": null
+   },
+   {
+    "os": "windows",
+    "manager": "winget",
+    "package": "JernejSimoncic.Wget",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "htop",
+  "name": "htop",
+  "category": "utils",
+  "recommended": true,
+  "descriptionVi": "Xem trực tiếp CPU, RAM và các tiến trình đang chạy; dừng được tiến trình bị treo.",
+  "descriptionEn": "Live view of CPU, RAM and running processes; lets you kill stuck ones.",
+  "bin": "htop",
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "htop",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "htop",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "htop",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "tmux",
+  "name": "tmux",
+  "category": "utils",
+  "recommended": false,
+  "descriptionVi": "Giữ lệnh chạy tiếp khi mất kết nối SSH; chia một màn hình thành nhiều ô terminal.",
+  "descriptionEn": "Keeps commands running when SSH drops; splits one screen into many terminal panes.",
+  "bin": "tmux",
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "tmux",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "tmux",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "tmux",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "jq",
+  "name": "jq",
+  "category": "utils",
+  "recommended": false,
+  "descriptionVi": "Đọc, lọc và trình bày gọn dữ liệu JSON ngay trên dòng lệnh.",
+  "descriptionEn": "Reads, filters and pretty-prints JSON on the command line.",
+  "bin": "jq",
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "jq",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "jq",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "jq",
+    "service": null
+   },
+   {
+    "os": "windows",
+    "manager": "winget",
+    "package": "jqlang.jq",
+    "service": null
+   }
+  ]
+ },
+ {
+  "id": "ripgrep",
+  "name": "ripgrep",
+  "category": "utils",
+  "recommended": false,
+  "descriptionVi": "Tìm chữ trong hàng nghìn tệp rất nhanh (lệnh rg).",
+  "descriptionEn": "Searches text across thousands of files very fast (the rg command).",
+  "bin": "rg",
+  "methods": [
+   {
+    "os": "linux",
+    "manager": "apt",
+    "package": "ripgrep",
+    "service": null
+   },
+   {
+    "os": "linux",
+    "manager": "dnf",
+    "package": "ripgrep",
+    "service": null
+   },
+   {
+    "os": "macos",
+    "manager": "brew",
+    "package": "ripgrep",
+    "service": null
+   },
+   {
+    "os": "windows",
+    "manager": "winget",
+    "package": "BurntSushi.ripgrep.MSVC",
+    "service": null
+   }
+  ]
+ }
+]

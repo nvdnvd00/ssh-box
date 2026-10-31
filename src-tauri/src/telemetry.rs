@@ -1284,7 +1284,41 @@ async fn probe_local_snapshot() -> Result<String, String> {
             }
         }
     }
+    #[cfg(target_os = "windows")]
+    {
+        let run = crate::vps_config::bounded(probe_local_windows(), crate::vps_config::VPS_EXEC_TIMEOUT);
+        if let Ok(raw) = run.await {
+            if is_snapshot(&raw) {
+                return Ok(raw);
+            }
+        }
+    }
     Ok(build_portable_fallback_snapshot())
+}
+
+// The same bootstrap a remote Windows host runs: UTF-8 output, the script on stdin.
+#[cfg(target_os = "windows")]
+async fn probe_local_windows() -> Result<String, String> {
+    use tokio::io::AsyncWriteExt;
+    let cmd = crate::vps_windows::build_powershell_command();
+    let mut args = cmd.split(' ');
+    let mut child = tokio::process::Command::new(args.next().unwrap_or_default())
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        // CREATE_NO_WINDOW: GUI-subsystem app otherwise pops a console per spawn
+        .creation_flags(0x0800_0000)
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let mut stdin = child.stdin.take().ok_or("no stdin")?;
+    stdin
+        .write_all(&crate::vps_windows::powershell_stdin(WINDOWS_TELEMETRY_SCRIPT, None))
+        .await
+        .map_err(|e| e.to_string())?;
+    drop(stdin);
+    let out = child.wait_with_output().await.map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 // On Windows the sh probe comes back as a cmd/PowerShell error with no sections.
@@ -1298,8 +1332,8 @@ async fn probe_windows_snapshot(host_id: &str, pool: &SshPool) -> Result<String,
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
-// ponytail: each Windows sample starts a PowerShell (~1.5 s of host CPU), so Windows hosts are sampled at most this
-// often; a long-lived PowerShell printing one snapshot per tick would remove that cost.
+// ponytail: each Windows sample starts a PowerShell (~1.5 s of host CPU), so Windows hosts, and this machine when it
+// runs Windows, are sampled at most this often; a long-lived PowerShell printing one snapshot per tick would remove that cost.
 const WINDOWS_MIN_INTERVAL: Duration = Duration::from_secs(10);
 
 pub fn start_monitoring(
@@ -1315,7 +1349,7 @@ pub fn start_monitoring(
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs.clamp(1, 60)));
         let mut consecutive_failures = 0u8;
         let mut backoff_skip = 0u8;
-        let mut windows = false;
+        let mut windows = cfg!(target_os = "windows") && host_id == "local";
 
         loop {
             tokio::select! {

@@ -852,7 +852,11 @@ async fn w12_powershell_default_shell(pool: &SshPool, h: &HostEntry) -> Result<S
     let r = async {
         let shell = fresh.exec_on_host(h, "$PSVersionTable.PSVersion.Major").await?;
         ensure(shell.trim().parse::<u32>().is_ok(), format!("default shell is not PowerShell: '{}'", shell.trim()))?;
-        Ok::<_, String>(format!("PS {} as DefaultShell | {} | {}", shell.trim(), w1_probe(&fresh, h).await?, w3_sshd_view(&fresh, h).await?))
+        let read = format!("PS {} as DefaultShell | {} | {}", shell.trim(), w1_probe(&fresh, h).await?, w3_sshd_view(&fresh, h).await?);
+        if !WINDOWS_SSH_WRITE_VERIFIED {
+            return Ok(read);
+        }
+        Ok::<_, String>(format!("{read} | write: {}", w8_max_auth_tries(&fresh, h).await?))
     }
     .await;
     let unset = ps(pool, h, r"Remove-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell; 'UNSET'").await;

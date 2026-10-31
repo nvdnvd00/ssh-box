@@ -1682,24 +1682,46 @@ fn sshd_reload_cmd(plan: &ReloadPlan, restart: bool) -> &'static str {
     }
 }
 
-// Opens (or, on rollback, closes) the new SSH port in the active firewall.
-fn sshd_firewall_cmd(plan: &ReloadPlan, open: bool) -> String {
+// Opens the new SSH port in the active firewall. `$F.sshbox.fw` marks an allow this apply really added.
+fn sshd_firewall_cmd(plan: &ReloadPlan) -> String {
     let Some(port) = plan.new_port else {
         return String::new();
     };
-    match (plan.firewall_engine, open) {
-        (FirewallEngine::Ufw, true) => format!(
-            "if ufw status 2>/dev/null | grep -q '^Status: active'; then ufw allow {port}/tcp; fi\n"
+    match plan.firewall_engine {
+        FirewallEngine::Ufw => format!(
+            "if ufw status 2>/dev/null | grep -q '^Status: active'; then ufw show added | grep -Eq '^ufw allow {port}/tcp( |$)' || {{ : > \"$F.sshbox.fw\"; ufw allow {port}/tcp; }}; fi\n"
         ),
-        (FirewallEngine::Ufw, false) => format!("ufw delete allow {port}/tcp 2>/dev/null || true\n"),
-        (FirewallEngine::Firewalld, true) => format!(
-            "if firewall-cmd --state >/dev/null 2>&1; then firewall-cmd --permanent --add-port={port}/tcp && firewall-cmd --reload; fi\n"
-        ),
-        (FirewallEngine::Firewalld, false) => format!(
-            "firewall-cmd --permanent --remove-port={port}/tcp 2>/dev/null && firewall-cmd --reload 2>/dev/null || true\n"
+        FirewallEngine::Firewalld => format!(
+            "if firewall-cmd --state >/dev/null 2>&1; then firewall-cmd --permanent --query-port={port}/tcp >/dev/null 2>&1 || {{ : > \"$F.sshbox.fw\"; firewall-cmd --permanent --add-port={port}/tcp; }}; firewall-cmd --reload; fi\n"
         ),
         _ => String::new(),
     }
+}
+
+// Undoes only what the markers say this apply added: the allow, and the SELinux label (`$F.sshbox.selabel` holds the
+// port's local label from before, empty when it had none).
+fn sshd_undo_fn(plan: &ReloadPlan) -> String {
+    let mut body = String::new();
+    if let Some(port) = plan.new_port {
+        let close = match plan.firewall_engine {
+            FirewallEngine::Ufw => format!("ufw delete allow {port}/tcp 2>/dev/null || true"),
+            FirewallEngine::Firewalld => format!(
+                "firewall-cmd --permanent --remove-port={port}/tcp 2>/dev/null && firewall-cmd --reload 2>/dev/null || true"
+            ),
+            _ => String::new(),
+        };
+        if !close.is_empty() {
+            body += &format!("  if [ -e \"$F.sshbox.fw\" ]; then {close}; rm -f \"$F.sshbox.fw\"; fi\n");
+        }
+        if plan.selinux_enforcing && port != 22 {
+            body += &format!(
+                "  if [ -e \"$F.sshbox.selabel\" ]; then L=$(cat \"$F.sshbox.selabel\"); \
+if [ -n \"$L\" ]; then semanage port -m -t \"$L\" -p tcp {port}; else semanage port -d -p tcp {port}; fi 2>/dev/null || true; \
+rm -f \"$F.sshbox.selabel\"; fi\n"
+            );
+        }
+    }
+    format!("sshbox_undo() {{\n{body}  :\n}}\n")
 }
 
 pub(crate) fn sshd_restore_fn(file: &str) -> String {
@@ -1713,30 +1735,35 @@ elif [ -e \"$F.sshbox.absent\" ]; then rm -f \"$F\" \"$F.sshbox.absent\"; fi\n}}
 // Run by the systemd timer after 60s, on any failure after arming, or by "Roll back now".
 pub fn build_sshd_rollback_script(file: &str, plan: &ReloadPlan) -> String {
     format!(
-        "#!/bin/sh\n{restore}sshbox_restore\n{reload}\n{firewall}systemctl stop sshbox-rollback.timer 2>/dev/null || true\nrm -f \"$0\"\n",
+        "#!/bin/sh\n{restore}{undo}sshbox_restore\n{reload}\nsshbox_undo\nsystemctl stop sshbox-rollback.timer 2>/dev/null || true\nrm -f \"$0\"\n",
         restore = sshd_restore_fn(file),
+        undo = sshd_undo_fn(plan),
         reload = sshd_reload_cmd(plan, true),
-        firewall = sshd_firewall_cmd(plan, false),
     )
 }
 
 // Spec §4.2 steps 3–7. The new file content comes from $SSHBOX_SECRET_FILE.
 pub fn build_sshd_apply_script(file: &str, rollback_path: &str, plan: &ReloadPlan) -> String {
-    // semanage is slow on RHEL, so it runs before the 60s timer starts.
+    // semanage is slow on RHEL, so it runs before the 60s timer starts. `-a` also succeeds for a port that
+    // already has a label (it modifies it), so the local label is read first.
     let semanage = match plan.new_port {
         Some(port) if plan.selinux_enforcing && port != 22 => format!(
-            "if ! {{ semanage port -a -t ssh_port_t -p tcp {port} 2>/dev/null || semanage port -m -t ssh_port_t -p tcp {port}; }}; then \
-sshbox_restore; echo SSHBOX_SEMANAGE_FAILED; exit 6; fi\n"
+            "L=$(semanage export 2>/dev/null | sed -n 's/^port -a -t \\([^ ]*\\) .*-p tcp {port}$/\\1/p')\n\
+if [ \"$L\" != ssh_port_t ]; then\n  \
+if ! {{ semanage port -a -t ssh_port_t -p tcp {port} 2>/dev/null || semanage port -m -t ssh_port_t -p tcp {port}; }}; then \
+sshbox_restore; echo SSHBOX_SEMANAGE_FAILED; exit 6; fi\n  \
+printf '%s\\n' \"$L\" > \"$F.sshbox.selabel\"\nfi\n"
         ),
         _ => String::new(),
     };
     format!(
         r#"set -eu
-{restore}R={r}
+{restore}{undo}R={r}
 if systemctl is-active --quiet sshbox-rollback.timer 2>/dev/null; then echo SSHBOX_ROLLBACK_PENDING; exit 3; fi
 if [ -e "$F" ]; then cp -p "$F" "$F.sshbox.bak"; rm -f "$F.sshbox.absent"; else : > "$F.sshbox.absent"; rm -f "$F.sshbox.bak"; fi
-# Until the rollback is armed, any failure puts the old file back.
-trap 'rc=$?; [ "$rc" -eq 0 ] || sshbox_restore; exit "$rc"' EXIT
+rm -f "$F.sshbox.fw" "$F.sshbox.selabel"
+# Until the rollback is armed, any failure puts the old file (and the old SELinux label) back.
+trap 'rc=$?; [ "$rc" -eq 0 ] || {{ sshbox_restore; sshbox_undo; }}; exit "$rc"' EXIT
 T=$(mktemp)
 cat "$SSHBOX_SECRET_FILE" > "$T"
 install -m 644 "$T" "$F"
@@ -1758,9 +1785,10 @@ until ss -tlnpH "sport = :$P" | grep -Eq 'sshd|systemd'; do
 done
 "#,
         restore = sshd_restore_fn(file),
+        undo = sshd_undo_fn(plan),
         r = shell_single_quote(rollback_path),
         rollback = build_sshd_rollback_script(file, plan),
-        firewall = sshd_firewall_cmd(plan, true),
+        firewall = sshd_firewall_cmd(plan),
         reload = sshd_reload_cmd(plan, false),
         port = plan.port,
     )
@@ -1921,7 +1949,7 @@ fn sshd_cleanup_script(rollback: &str, files: [&str; 2], os: OsFamily) -> String
     let r = shell_single_quote(rollback);
     let markers: Vec<String> = files
         .iter()
-        .flat_map(|f| [format!("{f}.sshbox.bak"), format!("{f}.sshbox.absent")])
+        .flat_map(|f| ["bak", "absent", "fw", "selabel"].map(|m| format!("{f}.sshbox.{m}")))
         .map(|m| shell_single_quote(&m))
         .collect();
     format!(
@@ -2851,10 +2879,17 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         let out = shell::run_local(&script, b"", &bin, &[], &dir);
         assert!(out.contains("SSHBOX_ALREADY_ROLLED_BACK"), "{out}");
         std::fs::write(&rollback, "").unwrap();
-        std::fs::write(dir.join("a.conf.sshbox.bak"), "").unwrap();
+        // A kept change owns its allow and label: a marker left behind would let a later rollback remove them.
+        let markers = ["a.conf.sshbox.bak", "a.conf.sshbox.fw", "b.conf.sshbox.selabel"];
+        for m in markers {
+            std::fs::write(dir.join(m), "").unwrap();
+        }
         let out = shell::run_local(&script, b"", &bin, &[], &dir);
         assert!(!out.contains("SSHBOX_ALREADY_ROLLED_BACK"), "{out}");
-        assert!(!rollback.exists() && !dir.join("a.conf.sshbox.bak").exists());
+        assert!(!rollback.exists());
+        for m in markers {
+            assert!(!dir.join(m).exists(), "{m} left");
+        }
     }
 
     // Runs the apply script locally with fake systemctl/sshd/ss/semanage/ufw that log each call in order.
@@ -2891,9 +2926,11 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         logger("ss", r#"c=$(grep -c '^ss ' "$FAKE_LOG"); [ -n "${FAKE_SS_EMPTY:-}" ] || [ "$c" -lt "${FAKE_SS_LATE:-1}" ] || echo 'LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=7,fd=3))'"#);
         logger("sleep", "");
         logger("systemd-run", "");
-        logger("semanage", "");
-        logger("ufw", r#"[ "$1" = "status" ] && echo 'Status: active'"#);
-        logger("firewall-cmd", r#"[ "$1" = "--state" ] && echo running"#);
+        // FAKE_SE=<type>: the host already has a local label for 2222 (`port -a` then modifies it, as RHEL 9 does).
+        logger("semanage", r#"[ "$1" = export ] && { echo 'port -D'; echo "port -a -t http_port_t -r 's0' -p tcp 22220"; [ -z "${FAKE_SE:-}" ] || echo "port -a -t $FAKE_SE -r 's0' -p tcp 2222"; }"#);
+        // FAKE_FW_HAS=1: the host already allows 2222/tcp.
+        logger("ufw", r#"[ "$1" = "status" ] && echo 'Status: active'; [ "$1" = show ] && [ -n "${FAKE_FW_HAS:-}" ] && echo 'ufw allow 2222/tcp'"#);
+        logger("firewall-cmd", r#"[ "$1" = "--state" ] && echo running; case "$*" in *--query-port*) [ -n "${FAKE_FW_HAS:-}" ]; exit $?;; esac"#);
         shell::fake_bin(&bin, "chmod", FAKE_CHMOD);
         let file = dir.join("00-sshbox.conf");
         if let Some(content) = existing {
@@ -3026,6 +3063,55 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         run_rollback(&r);
         assert!(!r.file.exists());
         assert!(!r.dir.join("00-sshbox.conf.sshbox.absent").exists());
+    }
+
+    // The old rollback deleted the new port's allow by port, so an allow the user already had was lost with it.
+    #[cfg(unix)]
+    #[test]
+    fn rollback_removes_only_the_allow_the_apply_added() {
+        for (engine, open, close) in [
+            (FirewallEngine::Ufw, "ufw allow 2222/tcp", "ufw delete allow 2222/tcp"),
+            (FirewallEngine::Firewalld, "--add-port=2222/tcp", "--remove-port=2222/tcp"),
+        ] {
+            let added = run_apply(&plan(false, false, Some(2222), engine), Some("Port 22\n"), &[]);
+            assert!(added.log.contains(open), "{}", added.log);
+            assert!(run_rollback(&added)[added.log.len()..].contains(close), "{engine:?}: the allow it opened stays open");
+            let had = run_apply(&plan(false, false, Some(2222), engine), Some("Port 22\n"), &[("FAKE_FW_HAS", "1")]);
+            assert!(!had.log.contains(open), "{}", had.log);
+            let log = run_rollback(&had);
+            assert!(!log[had.log.len()..].contains(close), "{engine:?}: the user's own allow was removed:\n{log}");
+        }
+    }
+
+    // `semanage port -a` on RHEL 9 also succeeds for a port that already has a label (it modifies it), so only the
+    // label read before the change tells the rollback what to put back.
+    #[cfg(unix)]
+    #[test]
+    fn rollback_puts_the_selinux_label_back_as_it_was() {
+        for (label, undo) in [
+            ("", Some("semanage port -d -p tcp 2222")),
+            ("ssh_port_t", None),
+            ("http_port_t", Some("semanage port -m -t http_port_t -p tcp 2222")),
+        ] {
+            let r = run_apply(&plan(false, true, Some(2222), FirewallEngine::None), Some("Port 22\n"), &[("FAKE_SE", label)]);
+            assert!(r.out.contains("ROLLBACK_AT:"), "{}", r.out);
+            assert_eq!(r.log.contains("semanage port -"), label != "ssh_port_t", "label {label:?}:\n{}", r.log);
+            let log = run_rollback(&r);
+            let rolled = &log[r.log.len()..];
+            match undo {
+                Some(cmd) => assert!(rolled.contains(cmd), "label {label:?}: {rolled}"),
+                None => assert!(!rolled.contains("semanage"), "label {label:?}: an existing ssh_port_t label was touched: {rolled}"),
+            }
+        }
+    }
+
+    // semanage runs before the rollback is armed: a failure in between must not leave the new label behind.
+    #[cfg(unix)]
+    #[test]
+    fn failure_before_arming_drops_the_label_it_added() {
+        let r = run_apply(&plan(false, true, Some(2222), FirewallEngine::None), Some("Port 22\n"), &[("FAKE_CHMOD_FAIL", "1")]);
+        assert!(pos(&r.log, "semanage port -a") < pos(&r.log, "semanage port -d -p tcp 2222"), "{}", r.log);
+        assert!(!r.dir.join("00-sshbox.conf.sshbox.selabel").exists());
     }
 
     // macOS: turning off only PasswordAuthentication still allows password login via keyboard-interactive.

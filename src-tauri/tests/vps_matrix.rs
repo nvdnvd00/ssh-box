@@ -5,8 +5,8 @@
 //!   limactl start --name=u24 --vm-type=vz --network=vzNAT --plain template://ubuntu-24.04
 //!   (also template://debian-13 and template://rocky-9; ufw / firewalld + semanage may need installing)
 //! MX_DISTRO=macos runs the macOS scenarios M1-M6 (VM user needs passwordless sudo; M3 adds and removes `mxpw`).
-//! MX_DISTRO=windows runs W1-W12: MX_USER is an Administrator (key in administrators_authorized_keys),
-//! `sshbox-std` a standard account accepting the same key; W8-W11 (sshd writes) run only when
+//! MX_DISTRO=windows runs W1-W19: MX_USER is an Administrator (key in administrators_authorized_keys),
+//! `sshbox-std` a standard account accepting the same key; W8-W11 and W19 (sshd writes) run only when
 //! WINDOWS_SSH_WRITE_VERIFIED is true; W7 reboots the VM (Restart-Computer) unless MX_NO_REBOOT is set.
 //! W13 adds a temporary port-less block for MX_IP's /24 (raw admin PowerShell, not the app) while the firewall is off.
 //! W14-W16 do the same with an ICMPv4 block, a .1-.10 block in that /24 and AllowInboundRules False on all three
@@ -103,11 +103,46 @@ async fn s1_port_change(pool: &SshPool, h: &mut HostEntry, distro: &str) -> Resu
     Ok(note + " moved back to 22")
 }
 
+// "ALLOW" when the firewall allows port/tcp the way the app opens it, "LABEL" when SELinux labels it ssh_port_t.
+async fn port_marks(pool: &SshPool, h: &HostEntry, port: u16) -> String {
+    root(pool, h, &format!("ufw show added 2>/dev/null | grep -qx 'ufw allow {port}/tcp' && echo ALLOW; \
+firewall-cmd --permanent --query-port={port}/tcp >/dev/null 2>&1 && echo ALLOW; \
+semanage port -l 2>/dev/null | grep '^ssh_port_t' | grep -qw {port} && echo LABEL; true")).await.trim().to_string()
+}
+
+async fn firewall_on(pool: &SshPool, h: &HostEntry) -> bool {
+    root(pool, h, "ufw status 2>/dev/null | grep -q '^Status: active' && echo FW_ON; firewall-cmd --state >/dev/null 2>&1 && echo FW_ON; true").await.contains("FW_ON")
+}
+
 async fn s2_blocked_port(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let fw = firewall_on(pool, h).await;
+    let note = blocked_port_rollback(pool, h, 2300).await?;
+    // The rollback takes back the allow and the SELinux label the apply added.
+    let marks = port_marks(pool, h, 2300).await;
+    ensure(marks.is_empty(), format!("rollback left {marks:?} for 2300"))?;
+    Ok(format!("{note}; no 2300 allow/label left (firewall on: {fw})"))
+}
+
+// An allow (and on RHEL a label) the host already had for the new port is not the apply's to remove.
+async fn s8_existing_allow_kept(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    ensure(firewall_on(pool, h).await, "firewall not active: there is no allow to keep".into())?;
+    root(pool, h, "ufw allow 2301/tcp; firewall-cmd --permanent --add-port=2301/tcp && firewall-cmd --reload; \
+semanage port -a -t ssh_port_t -p tcp 2301; true").await;
+    let before = port_marks(pool, h, 2301).await;
+    let rolled = blocked_port_rollback(pool, h, 2301).await;
+    let after = port_marks(pool, h, 2301).await;
+    root(pool, h, "ufw delete allow 2301/tcp; firewall-cmd --permanent --remove-port=2301/tcp && firewall-cmd --reload; \
+semanage port -d -p tcp 2301; true").await;
+    let note = rolled?;
+    ensure(before.contains("ALLOW") && after == before, format!("before {before:?}, after rollback {after:?}"))?;
+    Ok(format!("{note}; kept {after:?}"))
+}
+
+async fn blocked_port_rollback(pool: &SshPool, h: &HostEntry, port: u16) -> Result<String, String> {
     // Stand-in for a provider firewall the app cannot see or change.
-    root(pool, h, "nft add table inet mxblock; nft add chain inet mxblock in '{ type filter hook input priority -10; }'; nft add rule inet mxblock in tcp dport 2300 drop").await;
+    root(pool, h, &format!("nft add table inet mxblock; nft add chain inet mxblock in '{{ type filter hook input priority -10; }}'; nft add rule inet mxblock in tcp dport {port} drop")).await;
     let view = get_sshd_view(&h.id, pool, None).await?;
-    let started = apply_sshd_settings(&h.id, pool, None, SshdSettings { port: 2300, ..view.settings }).await;
+    let started = apply_sshd_settings(&h.id, pool, None, SshdSettings { port, ..view.settings }).await;
     let result = match started {
         Err(e) => Err(format!("apply failed before verify: {e}")),
         Ok(s) => match finish_sshd_apply(&h.id, pool, None, s.new_port).await {
@@ -824,6 +859,25 @@ async fn w10_apply_then_disconnect(pool: &SshPool, h: &HostEntry) -> Result<Stri
 }
 
 async fn w11_blocked_port(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let (note, rules) = win_blocked_port_rollback(pool, h).await?;
+    ensure(!rules.contains("2222"), format!("2222 rule left: {rules}"))?;
+    Ok(format!("{note}, no 2222 rule"))
+}
+
+// The user's own "allow 2222 from any" has the same DisplayName as the rule the apply adds: the rollback must keep it.
+async fn w19_existing_allow_kept(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    const NAME: &str = "ssh-box: ALLOW 2222/tcp from any";
+    ps(pool, h, &format!("New-NetFirewallRule -Name mx-w19 -DisplayName '{NAME}' -Group 'ssh-box' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 2222 | Out-Null")).await;
+    let r = win_blocked_port_rollback(pool, h).await;
+    let kept = ps(pool, h, "Get-NetFirewallRule -Group 'ssh-box' -ErrorAction SilentlyContinue | Where-Object DisplayName -like '*2222*' | ForEach-Object Name").await;
+    ps(pool, h, "Remove-NetFirewallRule -Name mx-w19 -ErrorAction SilentlyContinue").await;
+    let (note, _) = r?;
+    ensure(kept == "mx-w19", format!("2222 rules after rollback: '{kept}'"))?;
+    Ok(format!("{note}; the existing '{NAME}' kept, the apply's own removed"))
+}
+
+// (summary, DisplayNames of the ssh-box rules left after the rollback)
+async fn win_blocked_port_rollback(pool: &SshPool, h: &HostEntry) -> Result<(String, String), String> {
     // Block beats the app's own allow for the new port, so only the new-connection check can catch it.
     ps(pool, h, "New-NetFirewallRule -DisplayName 'mx-block-2222' -Direction Inbound -Action Block -Protocol TCP -LocalPort 2222 | Out-Null").await;
     let view = get_sshd_view(&h.id, pool, None).await?;
@@ -840,11 +894,10 @@ async fn w11_blocked_port(pool: &SshPool, h: &HostEntry) -> Result<String, Strin
     let port = win_effective(pool, h, "port").await;
     ensure(port == "port 22", format!("after rollback sshd -T: {port}"))?;
     let rules = ps(pool, h, "Get-NetFirewallRule -Group 'ssh-box' -ErrorAction SilentlyContinue | ForEach-Object DisplayName").await;
-    ensure(!rules.contains("2222"), format!("2222 rule left: {rules}"))?;
     let left = win_leftovers(pool, h).await;
     ensure(left.is_empty(), format!("rollback leftovers: {left}"))?;
     ssh_works(h, "rollback").await?;
-    Ok(format!("rolled back ({}), port 22 reachable, no 2222 rule", err.chars().take(70).collect::<String>()))
+    Ok((format!("rolled back ({}), port 22 reachable", err.chars().take(70).collect::<String>()), rules))
 }
 
 async fn w12_powershell_default_shell(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
@@ -948,6 +1001,7 @@ fn run_windows(only: &str) {
             run!("W9 password off/on (coupled)", w9_password_off_on(&pool, &h));
             run!("W10 apply then disconnect -> rollback", w10_apply_then_disconnect(&pool, &h));
             run!("W11 blocked port -> rollback", w11_blocked_port(&pool, &h));
+            run!("W19 existing allow kept on rollback", w19_existing_allow_kept(&pool, &h));
         } else {
             println!("SKIP W8-W11: WINDOWS_SSH_WRITE_VERIFIED is false");
         }
@@ -1005,6 +1059,8 @@ systemctl reload ssh 2>/dev/null || systemctl reload sshd").await;
         let pool = SshPool::default();
         pool.get_or_connect(&h, None).await.expect("reconnect");
         run!("S6 blocked lockout actions", s6_blocked_actions(&pool, &h));
+        // After S5, so the firewall is on.
+        run!("S8 existing allow kept on rollback", s8_existing_allow_kept(&pool, &h));
         run!("S7 users & keys smoke", s7_users_keys(&pool, &h));
         let failed = rows.iter().filter(|(_, r)| r.is_err()).count();
         println!("== {distro}: {} passed, {failed} failed", rows.len() - failed);

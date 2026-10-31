@@ -666,18 +666,18 @@ async fn w15_range_block_refuses(pool: &SshPool, h: &HostEntry) -> Result<String
 // The undo restores each profile's own AllowInboundRules (persistent store, where the setup writes), not a forced default.
 async fn w16_inbound_allows_off_refuses(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
     const TMP: &str = "sshbox-w16-temp";
-    let before = ps(pool, h, "(Get-NetFirewallProfile | ForEach-Object { [string]$_.Name + '=' + [string]$_.AllowInboundRules }) -join ';'").await;
+    let before = ps(pool, h, "(Get-NetFirewallProfile -PolicyStore PersistentStore | ForEach-Object { [string]$_.Name + '=' + [string]$_.AllowInboundRules }) -join ';'").await;
     let mut undo = Vec::new();
     for pair in before.split(';') {
         match pair.split_once('=') {
             Some((name @ ("Domain" | "Private" | "Public"), value @ ("True" | "False" | "NotConfigured"))) => {
-                undo.push(format!("Set-NetFirewallProfile -Profile {name} -AllowInboundRules {value}"))
+                undo.push(format!("Set-NetFirewallProfile -PolicyStore PersistentStore -Profile {name} -AllowInboundRules {value}"))
             }
             _ => return Err(format!("AllowInboundRules before: {before}")),
         }
     }
     ensure(undo.len() == 3, format!("AllowInboundRules before: {before}"))?;
-    let setup = "Set-NetFirewallProfile -Profile Domain,Private,Public -AllowInboundRules False";
+    let setup = "Set-NetFirewallProfile -PolicyStore PersistentStore -Profile Domain,Private,Public -AllowInboundRules False";
     let done = win_enable_refused(pool, h, TMP, setup, &undo.join("; "), "windows_inbound_allows_off").await?;
     Ok(format!("AllowInboundRules before {before}, restored; {done}"))
 }

@@ -1733,7 +1733,11 @@ echo "NOW:$(date +%s)"
 echo "ROLLBACK_AT:$(( $(date +%s) + 60 ))"
 {firewall}{reload}
 P={port}
-ss -tlnpH "sport = :$P" | grep -Eq 'sshd|systemd' || {{ echo SSHBOX_PORT_NOT_LISTENING; exit 4; }}
+# The reload returns before sshd rebinds (Debian 13): give it up to 10 s; the 60 s timer is already armed.
+n=0
+until ss -tlnpH "sport = :$P" | grep -Eq 'sshd|systemd'; do
+  n=$((n + 1)); [ "$n" -lt 10 ] || {{ echo SSHBOX_PORT_NOT_LISTENING; exit 4; }}; sleep 1
+done
 "#,
         restore = sshd_restore_fn(file),
         r = shell_single_quote(rollback_path),
@@ -2864,7 +2868,9 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         };
         logger("systemctl", r#"case "$*" in *"is-active --quiet sshbox-rollback.timer"*) exit "${FAKE_PENDING:-1}";; *is-active*) exit 1;; esac"#);
         logger("sshd", r#"[ "$1" = "-t" ] && exit "${FAKE_SSHD_T:-0}""#);
-        logger("ss", r#"[ -n "${FAKE_SS_EMPTY:-}" ] || echo 'LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=7,fd=3))'"#);
+        // FAKE_SS_LATE=n: the port shows up only from the n-th call on (sshd rebinds after the reload returns).
+        logger("ss", r#"c=$(grep -c '^ss ' "$FAKE_LOG"); [ -n "${FAKE_SS_EMPTY:-}" ] || [ "$c" -lt "${FAKE_SS_LATE:-1}" ] || echo 'LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=7,fd=3))'"#);
+        logger("sleep", "");
         logger("systemd-run", "");
         logger("semanage", "");
         logger("ufw", r#"[ "$1" = "status" ] && echo 'Status: active'"#);
@@ -2946,6 +2952,16 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
             assert_eq!(std::fs::read_to_string(&r.file).ok().as_deref(), existing, "{}", r.out);
             assert!(!r.log.contains("systemd-run") && !r.log.contains("reload"), "{}", r.log);
         }
+    }
+
+    // Seen once on Debian 13 (S2): ss ran before the reloaded sshd listened, and a good port change was rolled back.
+    #[cfg(unix)]
+    #[test]
+    fn apply_waits_for_a_slow_listener() {
+        let r = run_apply(&plan(false, false, Some(2222), FirewallEngine::None), Some("Port 22\n"), &[("FAKE_SS_LATE", "3")]);
+        assert!(r.out.contains("ROLLBACK_AT:") && !r.out.contains("SSHBOX_PORT_NOT_LISTENING"), "{}", r.out);
+        assert_eq!(r.log.lines().filter(|l| l.starts_with("ss ")).count(), 3, "{}", r.log);
+        assert!(r.rollback.exists(), "the 60 s timer must stay armed for the verify step");
     }
 
     // Any failure after the timer is armed rolls back at once instead of waiting 60 seconds.

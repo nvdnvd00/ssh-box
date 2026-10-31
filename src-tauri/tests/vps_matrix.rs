@@ -61,6 +61,18 @@ fn ensure(cond: bool, msg: String) -> Result<(), String> {
     if cond { Ok(()) } else { Err(msg) }
 }
 
+// The app opens each new SSH port and never closes the old one, and SELinux labels stay. Undo what S1/S2 added, or
+// every later run starts with extra SSH allows (S6 then finds no single SSH rule) and the VMs drift.
+async fn undo_port_moves(pool: &SshPool, h: &HostEntry, before: &str) {
+    let keep: Vec<&str> = before.split_whitespace().collect();
+    let mut sh = String::new();
+    for p in ["22/tcp", "2299/tcp", "2300/tcp"].into_iter().filter(|p| !keep.contains(p)) {
+        sh += &format!("ufw delete allow {p} >/dev/null 2>&1; firewall-cmd --permanent --remove-port={p} >/dev/null 2>&1; ");
+    }
+    sh += "firewall-cmd --reload >/dev/null 2>&1; semanage port -d -t ssh_port_t -p tcp 2299 2>/dev/null; semanage port -d -t ssh_port_t -p tcp 2300 2>/dev/null; true";
+    root(pool, h, &sh).await;
+}
+
 async fn s1_port_change(pool: &SshPool, h: &mut HostEntry, distro: &str) -> Result<String, String> {
     let view = get_sshd_view(&h.id, pool, None).await?;
     let started = apply_sshd_settings(&h.id, pool, None, SshdSettings { port: 2299, ..view.settings.clone() }).await?;
@@ -884,8 +896,10 @@ systemctl reload ssh 2>/dev/null || systemctl reload sshd").await;
                 }
             };
         }
+        let ports_before = root(&pool, &h, "ufw status 2>/dev/null; firewall-cmd --permanent --list-ports 2>/dev/null").await;
         run!("S1 port change", s1_port_change(&pool, &mut h, &distro));
         run!("S2 blocked port -> rollback", s2_blocked_port(&pool, &h));
+        undo_port_moves(&pool, &h, &ports_before).await;
         run!("S3 password off while app uses password", s3_password_blocked(&pool, &h));
         run!("S4 cloud-init password on -> off", s4_cloud_init_password(&pool, &h));
         run!("S5 firewall on + reboot", s5_firewall_reboot(&pool, &h));

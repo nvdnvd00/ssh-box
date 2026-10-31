@@ -180,7 +180,7 @@ printf 'PasswordAuthentication yes\\n' > /etc/ssh/sshd_config.d/01-matrix.conf; 
 }
 
 async fn s4_cloud_init_password(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
-    root(pool, h, "printf 'PasswordAuthentication yes\\n' > /etc/ssh/sshd_config.d/50-cloud-init.conf; systemctl reload ssh 2>/dev/null || systemctl reload sshd").await;
+    root(pool, h, "printf 'PasswordAuthentication yes\\nMaxAuthTries 4\\n' > /etc/ssh/sshd_config.d/50-cloud-init.conf; systemctl reload ssh 2>/dev/null || systemctl reload sshd").await;
     let view = get_sshd_view(&h.id, pool, None).await?;
     ensure(view.settings.password_authentication, "app shows password off while 50-cloud-init.conf enables it".into())?;
     let s = apply_sshd_settings(&h.id, pool, None, SshdSettings { password_authentication: false, ..view.settings }).await?;
@@ -189,7 +189,20 @@ async fn s4_cloud_init_password(pool: &SshPool, h: &HostEntry) -> Result<String,
     ensure(pa == "passwordauthentication no", format!("sshd -T: {pa}"))?;
     let dropin = root(pool, h, "grep -v '^#' /etc/ssh/sshd_config.d/00-sshbox.conf").await;
     ensure(!dropin.contains("MaxAuthTries") && !dropin.contains("AllowUsers"), format!("drop-in wrote unchanged directives: {dropin}"))?;
-    Ok(format!("drop-in: {}", dropin.split_whitespace().collect::<Vec<_>>().join(" ")))
+    // Set back, a value sshd uses anyway (cloud-init's yes) loses its line; 6, OpenSSH's default, still needs one
+    // to beat cloud-init's 4, and going back to 4 removes it.
+    let view = get_sshd_view(&h.id, pool, None).await?;
+    let s = apply_sshd_settings(&h.id, pool, None, SshdSettings { password_authentication: true, max_auth_tries: 6, ..view.settings.clone() }).await?;
+    finish_sshd_apply(&h.id, pool, None, s.new_port).await?;
+    let back = root(pool, h, "grep -v '^#' /etc/ssh/sshd_config.d/00-sshbox.conf; sshd -T | grep -iE '^(passwordauthentication|maxauthtries) '").await;
+    ensure(!back.contains("PasswordAuthentication") && back.contains("MaxAuthTries 6"), format!("after password on, MaxAuthTries 6: {back}"))?;
+    ensure(back.contains("passwordauthentication yes") && back.contains("maxauthtries 6"), format!("sshd -T: {back}"))?;
+    let s = apply_sshd_settings(&h.id, pool, None, SshdSettings { password_authentication: true, max_auth_tries: 4, ..view.settings }).await?;
+    finish_sshd_apply(&h.id, pool, None, s.new_port).await?;
+    let four = root(pool, h, "grep -v '^#' /etc/ssh/sshd_config.d/00-sshbox.conf; sshd -T | grep -i '^maxauthtries '").await;
+    ensure(!four.contains("MaxAuthTries") && four.contains("maxauthtries 4"), format!("after MaxAuthTries 4: {four}"))?;
+    Ok(format!("off: drop-in {}; set back: no restated lines, MaxAuthTries 6 kept over cloud-init's 4, then removed",
+        dropin.split_whitespace().collect::<Vec<_>>().join(" ")))
 }
 
 async fn wait_ssh(h: &HostEntry) -> Result<(), String> {
@@ -337,6 +350,9 @@ async fn m2_password_off_on(pool: &SshPool, h: &HostEntry) -> Result<String, Str
     ensure(m_on.contains("password") && m_on.contains("keyboard-interactive"), format!("methods on: {m_on}"))?;
     let left = mac_leftovers(pool, h).await;
     ensure(left.trim().is_empty(), format!("rollback leftovers after on: {left}"))?;
+    // Back to what sshd uses anyway: no line restates it.
+    let restated = root(pool, h, "grep -iE '^(passwordauthentication|kbdinteractiveauthentication)' /etc/ssh/sshd_config.d/00-sshbox.conf").await;
+    ensure(restated.trim().is_empty(), format!("drop-in restates sshd's own values: {restated}"))?;
     Ok(format!("off: sshd -T {} / methods '{m_off}'; on: methods '{m_on}'", t.split_whitespace().collect::<Vec<_>>().join(" ")))
 }
 
@@ -818,6 +834,8 @@ async fn w8_max_auth_tries(pool: &SshPool, h: &HostEntry) -> Result<String, Stri
     win_apply_finish(pool, h, SshdSettings { max_auth_tries: orig, ..kept.settings }).await?;
     let back = win_effective(pool, h, "maxauthtries").await;
     ensure(back == format!("maxauthtries {orig}"), format!("set back: {back}"))?;
+    let restated = win_global_lines(pool, h, "MaxAuthTries").await?;
+    ensure(restated.is_empty(), format!("set back to sshd's own value, still written: {restated:?}"))?;
     Ok(format!("{orig}->{want} kept (sshd -T '{t}'), no task/script/markers, CRLF kept, +{added} lines ({added_blank} blank), directive line {at} < Match line {first_match}; set back to {orig}"))
 }
 
@@ -835,7 +853,15 @@ async fn w9_password_off_on(pool: &SshPool, h: &HostEntry) -> Result<String, Str
     ensure(m_on.contains("password") && m_on.contains("keyboard-interactive"), format!("methods on: {m_on}"))?;
     let left = win_leftovers(pool, h).await;
     ensure(left.is_empty(), format!("rollback leftovers: {left}"))?;
-    Ok(format!("off: '{t}', methods '{m_off}'; on: methods '{m_on}'"))
+    let restated = [win_global_lines(pool, h, "PasswordAuthentication").await?, win_global_lines(pool, h, "KbdInteractiveAuthentication").await?].concat();
+    ensure(restated.is_empty(), format!("on is sshd's own value, still written: {restated:?}"))?;
+    Ok(format!("off: '{t}', methods '{m_off}'; on: methods '{m_on}', no restated lines"))
+}
+
+// Uncommented `key` lines before the first Match block of the Windows sshd_config.
+async fn win_global_lines(pool: &SshPool, h: &HostEntry, key: &str) -> Result<Vec<String>, String> {
+    let cfg = win_config(pool, h).await?;
+    Ok(cfg.lines().map(str::trim).take_while(|l| !l.starts_with("Match ")).filter(|l| l.starts_with(&format!("{key} "))).map(String::from).collect())
 }
 
 async fn w10_apply_then_disconnect(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
@@ -1054,7 +1080,7 @@ systemctl reload ssh 2>/dev/null || systemctl reload sshd").await;
         run!("S2 blocked port -> rollback", s2_blocked_port(&pool, &h));
         undo_port_moves(&pool, &h, &ports_before).await;
         run!("S3 password off while app uses password", s3_password_blocked(&pool, &h));
-        run!("S4 cloud-init password on -> off", s4_cloud_init_password(&pool, &h));
+        run!("S4 cloud-init password off, then set back", s4_cloud_init_password(&pool, &h));
         run!("S5 firewall on + reboot", s5_firewall_reboot(&pool, &h));
         let pool = SshPool::default();
         pool.get_or_connect(&h, None).await.expect("reconnect");

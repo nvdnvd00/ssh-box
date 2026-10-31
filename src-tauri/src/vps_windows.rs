@@ -158,6 +158,19 @@ if ((Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) -and (Get-Sche
     )
 }
 
+// `sshd -T` for the config in $SSHBOX_SECRET (sshd_config without ssh-box's lines), read from a side copy.
+pub fn windows_sshd_baseline_script(spec: &str) -> String {
+    format!(
+        r#"{SSHD_HELPER}$C = '{WINDOWS_SSHD_CONFIG}.sshbox.baseline'
+[IO.File]::WriteAllText($C, $SSHBOX_SECRET, (New-Object Text.UTF8Encoding $false))
+try {{ $r = sshbox_sshd ('-T -C "' + {spec} + '" -f "' + $C + '"') }} finally {{ Remove-Item -LiteralPath $C -Force -ErrorAction SilentlyContinue }}
+if ($r.Code -ne 0) {{ throw "sshd -T failed with exit code $($r.Code): $($r.Err)" }}
+$r.Out
+"#,
+        spec = ps_quote(spec)
+    )
+}
+
 pub const WINDOWS_ROLLBACK_TASK: &str = "sshbox-rollback";
 pub const WINDOWS_ROLLBACK_SCRIPT: &str = r"C:\ProgramData\ssh\sshbox-rollback.ps1";
 
@@ -286,8 +299,7 @@ pub fn parse_windows_sshd_view(raw: &str) -> Result<SshdView, String> {
 
 pub async fn get_windows_sshd_view(host_id: &str, pool: &SshPool, probe: &VpsProbe) -> Result<SshdView, String> {
     check_windows_readable(probe)?;
-    let c = &probe.context;
-    let spec = format!("user={},host={},addr={},laddr={},lport={}", c.login_user, c.client_ip, c.client_ip, c.server_ip, c.server_port);
+    let spec = crate::vps_config::sshd_match_spec(&probe.context);
     parse_windows_sshd_view(&run_windows_script(host_id, pool, &windows_sshd_view_script(&spec), None).await?)
 }
 
@@ -1602,7 +1614,7 @@ mod tests {
     // A hung sshd.exe must never hang the app: no Windows script may call sshd.exe except through the bounded helper.
     #[test]
     fn windows_scripts_only_call_sshd_through_the_timeout_helper() {
-        let scripts = [windows_sshd_view_script("user=a"), build_sshd_apply_script_windows(Some(2222), 2222)];
+        let scripts = [windows_sshd_view_script("user=a"), build_sshd_apply_script_windows(Some(2222), 2222), windows_sshd_baseline_script("user=a")];
         for s in &scripts {
             assert!(s.contains("WaitForExit(15000)") && s.contains(".Kill()"));
             assert!(!s.contains("& $sshd") && !s.contains("& \"$env:WINDIR"), "{s}");
@@ -1637,6 +1649,15 @@ mod tests {
     fn windows_apply_reads_new_config_from_secret_only() {
         let s = build_sshd_apply_script_windows(None, 22);
         assert!(s.contains("$SSHBOX_SECRET") && s.contains("0xEF") && s.contains("`r`n"));
+    }
+
+    // sshd is asked about a side copy, which goes away even when sshd fails; the live sshd_config is never written.
+    #[test]
+    fn windows_baseline_reads_a_side_copy_and_removes_it() {
+        let s = windows_sshd_baseline_script("user=a");
+        assert!(s.contains("-f \"' + $C + '\"") && s.contains("WriteAllText($C, $SSHBOX_SECRET"), "{s}");
+        assert!(s.find("finally { Remove-Item -LiteralPath $C").unwrap() < s.find("throw").unwrap(), "{s}");
+        assert!(!s.contains(&format!("'{WINDOWS_SSHD_CONFIG}'")), "{s}");
     }
 
     // A rolled-back port change must not leave its firewall hole, and the task and script must not linger.

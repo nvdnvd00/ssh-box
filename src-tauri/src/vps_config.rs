@@ -1529,6 +1529,56 @@ pub fn changed_directives(current: &SshdSettings, desired: &SshdSettings) -> Vec
         .collect()
 }
 
+// A changed directive whose line would say what sshd uses without ssh-box's line is removed instead (None). sshd
+// keeps the first value it reads, so such a line would only hide a later edit of the main file.
+pub fn drop_restated(changes: Vec<(&'static str, Option<String>)>, baseline: &SshdSettings) -> Vec<(&'static str, Option<String>)> {
+    let base = sshd_directives(baseline);
+    changes
+        .into_iter()
+        .map(|(k, line)| if base.contains(&(k, line.clone())) { (k, None) } else { (k, line) })
+        .collect()
+}
+
+pub const SSHD_DROPIN_DIR: &str = "/etc/ssh/sshd_config.d";
+pub const SSHD_BASELINE_WORK: &str = "/etc/ssh/sshbox-baseline";
+
+// The config sshd is asked about (as `work`/sshd_config): the real one without ssh-box's lines for the changed
+// directives. Drop-in: the main file reading `work`/d, a copy of the drop-in folder without 00-sshbox.conf. None when no
+// changed directive has a line in the file ssh-box writes: the value shown then already is sshd's own.
+pub fn baseline_config(view: &SshdView, changes: &[(&'static str, Option<String>)], work: &str) -> Option<String> {
+    let (ours, cfg) = match view.write_target {
+        WriteTarget::DropIn => (&view.dropin_raw, view.main_raw.clone()),
+        WriteTarget::MainFile => {
+            let removed: Vec<_> = changes.iter().map(|(k, _)| (*k, None)).collect();
+            (&view.main_raw, render_sshd_config(&view.main_raw, &removed))
+        }
+    };
+    let keys = main_file_keys(ours);
+    let copy = format!("{work}/d");
+    changes
+        .iter()
+        .any(|(k, _)| keys.iter().any(|m| m == k))
+        .then(|| cfg.replace(SSHD_DROPIN_DIR, &copy).replace("sshd_config.d", &copy))
+}
+
+// Prints `sshd -T` (this connection's Match context) for the config in $SSHBOX_SECRET_FILE. Only copies are written.
+pub fn sshd_baseline_script(spec: &str, dropin_dir: &str, work: &str) -> String {
+    format!(
+        r#"set -eu
+W={w}
+trap 'rm -rf "$W"' EXIT
+rm -rf "$W"; mkdir -m 700 "$W" "$W/d"
+cp -p {d}/* "$W/d/" 2>/dev/null || true
+rm -f "$W/d/00-sshbox.conf"*
+cat "$SSHBOX_SECRET_FILE" > "$W/sshd_config"
+sshd -T -C {spec} -f "$W/sshd_config"
+"#,
+        w = shell_single_quote(work),
+        d = shell_single_quote(dropin_dir),
+        spec = shell_single_quote(spec),
+    )
+}
+
 const DROPIN_HEADER: &str = "# Managed by ssh-box. Changes here are overwritten by Server Config.\n";
 
 // Only the given directives change; whatever the drop-in already holds stays.
@@ -1537,12 +1587,15 @@ pub fn render_dropin(existing: &str, directives: &[(&'static str, Option<String>
     render_sshd_config(base, directives)
 }
 
+const MANAGED_HEADER: &str = "# --- Managed by ssh-box ---";
+
 // Replaces the given directives in place, keeps everything else (comments included), and
 // appends missing ones before the first Match block.
 pub fn render_sshd_config(base_raw: &str, managed: &[(&'static str, Option<String>)]) -> String {
     let mut emitted = std::collections::HashSet::new();
     let mut before: Vec<String> = Vec::new();
     let mut from_match: Vec<String> = Vec::new();
+    let mut dropped = false;
     for line in base_raw.lines() {
         if from_match.is_empty() {
             if let Some((key, _)) = split_sshd_directive(line) {
@@ -1556,15 +1609,29 @@ pub fn render_sshd_config(base_raw: &str, managed: &[(&'static str, Option<Strin
                     continue;
                 }
                 if let Some((_, replacement)) = managed.iter().find(|(k, _)| *k == key) {
-                    if emitted.insert(key) {
+                    let first = emitted.insert(key);
+                    if first {
                         before.extend(replacement.clone());
                     }
+                    dropped = !first || replacement.is_none();
                     continue;
                 }
             }
+            // A removed line takes one blank line around it along, so adding and removing it again adds nothing.
+            if dropped && line.trim().is_empty() && before.last().map_or(true, |l| l.trim().is_empty()) {
+                dropped = false;
+                continue;
+            }
+            dropped = false;
             before.push(line.to_string());
         } else {
             from_match.push(line.to_string());
+        }
+    }
+    // An ssh-box block left with no lines goes too.
+    if let Some(h) = before.iter().rposition(|l| l == MANAGED_HEADER) {
+        if before[h + 1..].iter().all(|l| l.trim().is_empty()) {
+            before.truncate(h);
         }
     }
     let missing: Vec<String> = managed
@@ -1576,8 +1643,8 @@ pub fn render_sshd_config(base_raw: &str, managed: &[(&'static str, Option<Strin
         if before.last().is_some_and(|l| !l.trim().is_empty()) {
             before.push(String::new());
         }
-        if !base_raw.contains("Managed by ssh-box") {
-            before.push("# --- Managed by ssh-box ---".to_string());
+        if !before.iter().any(|l| l.contains("Managed by ssh-box")) {
+            before.push(MANAGED_HEADER.to_string());
         }
         before.extend(missing);
     }
@@ -1628,6 +1695,11 @@ pub fn parse_sshd_view(raw: &str) -> Result<SshdView, String> {
     })
 }
 
+// For `sshd -T -C`: Match blocks are applied for this exact connection, so the result is what the app gets.
+pub(crate) fn sshd_match_spec(c: &ConnectionContext) -> String {
+    format!("user={},host={},addr={},laddr={},lport={}", c.login_user, c.client_ip, c.client_ip, c.server_ip, c.server_port)
+}
+
 pub async fn get_sshd_view(
     host_id: &str,
     pool: &SshPool,
@@ -1638,11 +1710,7 @@ pub async fn get_sshd_view(
     if probe.os_family == OsFamily::Windows {
         return crate::vps_windows::get_windows_sshd_view(host_id, pool, &probe).await;
     }
-    // -C applies Match blocks for this exact connection, so the result is what the app gets.
-    let spec = format!(
-        "user={},host={},addr={},laddr={},lport={}",
-        c.login_user, c.client_ip, c.client_ip, c.server_ip, c.server_port
-    );
+    let spec = sshd_match_spec(c);
     let script = format!(
         "sshd -T -C {spec} || exit 1\necho {SSHD_PART}\ncat {SSHD_MAIN_CONFIG}\necho {SSHD_PART}\n\
 cat {SSHD_DROPIN} 2>/dev/null || true\necho {SSHD_PART}\n{pending}\n",
@@ -1828,6 +1896,7 @@ pub fn parse_apply_started(raw: &str, new_port: Option<u16>) -> Result<SshdApply
 pub struct ApplyPlan {
     pub file: &'static str,
     pub content: String,
+    pub changes: Vec<(&'static str, Option<String>)>,
     pub reload: ReloadPlan,
 }
 
@@ -1838,9 +1907,19 @@ fn main_file_keys(main_raw: &str) -> Vec<String> {
     main_raw
         .lines()
         .filter_map(split_sshd_directive)
-        .map(|(k, _)| k.to_ascii_lowercase())
+        .map(|(k, _)| match k.to_ascii_lowercase().as_str() {
+            "challengeresponseauthentication" => "kbdinteractiveauthentication".to_string(),
+            k => k.to_string(),
+        })
         .take_while(|k| k != "match")
         .collect()
+}
+
+fn render_target(view: &SshdView, changes: &[(&'static str, Option<String>)]) -> (&'static str, String) {
+    match view.write_target {
+        WriteTarget::DropIn => (SSHD_DROPIN, render_dropin(&view.dropin_raw, changes)),
+        WriteTarget::MainFile => (SSHD_MAIN_CONFIG, render_sshd_config(&view.main_raw, changes)),
+    }
 }
 
 // Writes only what changed, so Match-specific values read for the app's own connection are
@@ -1861,13 +1940,11 @@ pub fn plan_sshd_apply(probe: &VpsProbe, view: &SshdView, desired: &SshdSettings
             return Err(vps_err(ERR_UNSUPPORTED, "set_in_main_file"));
         }
     }
-    let (file, content) = match view.write_target {
-        WriteTarget::DropIn => (SSHD_DROPIN, render_dropin(&view.dropin_raw, &changes)),
-        WriteTarget::MainFile => (SSHD_MAIN_CONFIG, render_sshd_config(&view.main_raw, &changes)),
-    };
+    let (file, content) = render_target(view, &changes);
     Ok(ApplyPlan {
         file,
         content,
+        changes,
         reload: ReloadPlan {
             ssh_socket_active: probe.ssh_socket_active,
             selinux_enforcing: probe.selinux_enforcing,
@@ -1886,7 +1963,16 @@ pub async fn apply_sshd_settings(
 ) -> Result<SshdApplyStarted, String> {
     let probe = probe(host_id, pool, sudo_password.clone()).await?;
     let view = get_sshd_view(host_id, pool, sudo_password.clone()).await?;
-    let plan = plan_sshd_apply(&probe, &view, &desired)?;
+    let mut plan = plan_sshd_apply(&probe, &view, &desired)?;
+    if let Some(cfg) = baseline_config(&view, &plan.changes, SSHD_BASELINE_WORK) {
+        let spec = sshd_match_spec(&probe.context);
+        let script = match probe.os_family {
+            OsFamily::Windows => crate::vps_windows::windows_sshd_baseline_script(&spec),
+            OsFamily::Linux | OsFamily::Macos => sshd_baseline_script(&spec, SSHD_DROPIN_DIR, SSHD_BASELINE_WORK),
+        };
+        let raw = run_sshd_script(host_id, pool, sudo_password.clone(), probe.os_family, &script, Some(&cfg)).await?;
+        plan.content = render_target(&view, &drop_restated(plan.changes.clone(), &parse_sshd_t(&raw))).1;
+    }
     let script = match probe.os_family {
         OsFamily::Macos => build_sshd_apply_script_macos(plan.file, SSHD_ROLLBACK_SCRIPT, MACOS_ROLLBACK_PLIST),
         OsFamily::Linux => build_sshd_apply_script(plan.file, SSHD_ROLLBACK_SCRIPT, &plan.reload),
@@ -2833,6 +2919,55 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
             port_count: 1,
             ..Default::default()
         }
+    }
+
+    // sshd keeps the first value it reads, so a line restating what sshd would use anyway still beats a later edit of
+    // the main file. What counts is sshd's own value without ssh-box's line (here 4, from a cloud-init drop-in), not
+    // OpenSSH's built-in default (6): MaxAuthTries 6 must stay to override that 4.
+    #[test]
+    fn a_value_set_back_to_what_sshd_uses_without_it_drops_the_line() {
+        let baseline = SshdSettings { max_auth_tries: 4, ..SshdSettings::default() };
+        let changes = vec![
+            ("passwordauthentication", Some("PasswordAuthentication yes".to_string())),
+            ("maxauthtries", Some("MaxAuthTries 6".to_string())),
+        ];
+        assert_eq!(drop_restated(changes, &baseline), vec![("passwordauthentication", None), ("maxauthtries", Some("MaxAuthTries 6".to_string()))]);
+        let back = vec![("maxauthtries", Some("MaxAuthTries 4".to_string()))];
+        assert_eq!(drop_restated(back, &baseline), vec![("maxauthtries", None)]);
+    }
+
+    // sshd is asked about a copy of the config that lacks ssh-box's line. A changed directive with no line in the file
+    // ssh-box writes already shows sshd's own value, so then there is nothing to ask.
+    #[test]
+    fn baseline_config_leaves_out_only_ssh_box_lines() {
+        let pw = [("passwordauthentication", Some("PasswordAuthentication yes".to_string()))];
+        let main = "Include /etc/ssh/sshd_config.d/*.conf\nPasswordAuthentication no\n";
+        let view = SshdView { main_raw: main.to_string(), dropin_raw: "# Managed by ssh-box\nPasswordAuthentication no\n".to_string(), ..dropin_view() };
+        let cfg = baseline_config(&view, &pw, "/w").unwrap();
+        assert_eq!(cfg, "Include /w/d/*.conf\nPasswordAuthentication no\n", "the main file stays, the drop-in folder is the copy without 00-sshbox.conf");
+        let relative = SshdView { main_raw: "Include sshd_config.d/*.conf\n".to_string(), ..view.clone() };
+        assert_eq!(baseline_config(&relative, &pw, "/w").unwrap(), "Include /w/d/*.conf\n");
+        let unset = SshdView { dropin_raw: "# Managed by ssh-box\nMaxAuthTries 3\n".to_string(), ..view.clone() };
+        assert_eq!(baseline_config(&unset, &pw, "/w"), None);
+        // Main file: that directive's lines go (its old ChallengeResponseAuthentication name too), the rest stays.
+        let kbd = [("kbdinteractiveauthentication", Some("KbdInteractiveAuthentication yes".to_string()))];
+        let mf = SshdView { write_target: WriteTarget::MainFile, main_raw: "ChallengeResponseAuthentication no\nUsePAM yes\n".to_string(), ..view };
+        assert_eq!(baseline_config(&mf, &kbd, "/w").unwrap(), "UsePAM yes\n");
+    }
+
+    // Set back and forth, the file must come back as it was: removed lines take their blank separator along and an empty
+    // ssh-box block goes away, or each round trip leaves one more blank line in a main file (Windows).
+    #[test]
+    fn removing_managed_lines_gives_the_file_back() {
+        let base = "UsePAM yes\n\nMatch Group administrators\n  AuthorizedKeysFile x\n";
+        let mat = |v: u32| [("maxauthtries", Some(format!("MaxAuthTries {v}")))];
+        let on = render_sshd_config(base, &mat(5));
+        assert_eq!(render_sshd_config(&on, &[("maxauthtries", None)]), base);
+        let two = render_sshd_config(&on, &[("passwordauthentication", Some("PasswordAuthentication no".into()))]);
+        let without = render_sshd_config(&two, &[("maxauthtries", None)]);
+        let again = render_sshd_config(&render_sshd_config(&without, &mat(4)), &[("maxauthtries", None)]);
+        assert_eq!(again, without, "a round trip added lines");
+        assert!(without.contains("# --- Managed by ssh-box ---\n") && without.contains("PasswordAuthentication no"), "{without}");
     }
 
     // Writing all 11 directives (read with this connection's Match context) changed other users' login.

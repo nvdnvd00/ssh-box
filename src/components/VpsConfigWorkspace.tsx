@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { RefreshCw, Server } from "lucide-react";
 import { HostEntry, PrivilegeLevel, ResourcesStoreData, VpsProbe, VpsStudioTab } from "../types";
@@ -61,6 +61,9 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
   const isLocal = !host || host.id === "local";
   const probe = host ? probes[host.id] : undefined;
   const sudoPassword = host ? sudoPasswords[host.id] : undefined;
+  // A slow probe of a host the user has already left must not touch the current host's state.
+  const selectedRef = useRef(selectedHostId);
+  selectedRef.current = selectedHostId;
 
   const runProbe = useCallback(
     async (hostId: string, password?: string) => {
@@ -71,7 +74,7 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
         setProbes((prev) => ({ ...prev, [hostId]: result }));
         return result;
       } finally {
-        setProbing(false);
+        if (selectedRef.current === hostId) setProbing(false);
       }
     },
     [],
@@ -79,7 +82,9 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
 
   useEffect(() => {
     if (!host || isLocal) return;
-    runProbe(host.id, sudoPasswords[host.id]).catch((e) => setProbeError(vpsErrorText(t, e)));
+    runProbe(host.id, sudoPasswords[host.id]).catch((e) => {
+      if (selectedRef.current === host.id) setProbeError(vpsErrorText(t, e));
+    });
     // Re-probe only when the host changes; unlocking sudo probes explicitly.
   }, [host?.id, isLocal]);
 

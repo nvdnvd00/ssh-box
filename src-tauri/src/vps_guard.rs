@@ -158,13 +158,23 @@ pub fn check_firewall_delete_windows(
 }
 
 // Windows: enabling turns every saved block on, and the auto-allow cannot beat a block that covers this session,
-// nor a profile that ignores every allow (AllowInboundRules False).
-pub fn check_firewall_enable_windows(ctx: &ConnectionContext, rules: &[FirewallRuleItem], inbound_allows_off: bool) -> Result<(), String> {
+// nor a profile that ignores every allow (AllowInboundRules False). The auto-allow is a local rule, so when Group Policy
+// ignores local rules only a policy allow can carry this session.
+pub fn check_firewall_enable_windows(
+    ctx: &ConnectionContext,
+    rules: &[FirewallRuleItem],
+    inbound_allows_off: bool,
+    local_rules_off: bool,
+) -> Result<(), String> {
     if inbound_allows_off {
         return block("windows_inbound_allows_off");
     }
     if rules.iter().any(|r| r.effective && blocks_my_ssh(ctx, r)) {
         return block("windows_block_covers_me");
+    }
+    let effective: Vec<FirewallRuleItem> = rules.iter().filter(|r| r.effective).cloned().collect();
+    if local_rules_off && ssh_allow_needed(ctx, &effective) {
+        return block("windows_local_rules_off");
     }
     Ok(())
 }
@@ -569,15 +579,15 @@ mod tests {
         let deny = |from: &str| FirewallRuleItem { v6: from.contains(':'), ..rule(1, "DENY", "2222/tcp", from) };
         let c = deploy_key();
         for from in ["203.0.113.1-203.0.113.50", "LocalSubnet", "Internet", "DefaultGateway", "10.0.0.0/255.0.255.0"] {
-            assert!(blocked(check_firewall_enable_windows(&c, &[deny(from)], false)), "{from}");
+            assert!(blocked(check_firewall_enable_windows(&c, &[deny(from)], false, false)), "{from}");
         }
         for from in ["203.0.113.8-203.0.113.50", "2001:db8::1-2001:db8::ff"] {
-            assert!(check_firewall_enable_windows(&c, &[deny(from)], false).is_ok(), "{from}");
+            assert!(check_firewall_enable_windows(&c, &[deny(from)], false, false).is_ok(), "{from}");
         }
         let c6 = ConnectionContext { client_ip: "2001:db8::7".to_string(), ..deploy_key() };
-        assert!(blocked(check_firewall_enable_windows(&c6, &[deny("2001:db8::1-2001:db8::ff")], false)));
-        assert!(blocked(check_firewall_enable_windows(&c6, &[deny("LocalSubnet")], false)), "a keyword item is v4-tagged yet may hold a v6 client");
-        assert!(check_firewall_enable_windows(&c6, &[deny("203.0.113.1-203.0.113.50")], false).is_ok());
+        assert!(blocked(check_firewall_enable_windows(&c6, &[deny("2001:db8::1-2001:db8::ff")], false, false)));
+        assert!(blocked(check_firewall_enable_windows(&c6, &[deny("LocalSubnet")], false, false)), "a keyword item is v4-tagged yet may hold a v6 client");
+        assert!(check_firewall_enable_windows(&c6, &[deny("203.0.113.1-203.0.113.50")], false, false).is_ok());
     }
 
     // Allows are never widened: an allow on LocalSubnet or a range is no known way in, so deleting the real allow stays refused.

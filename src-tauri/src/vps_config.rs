@@ -163,6 +163,9 @@ pub struct FirewallSnapshot {
     // Windows only: the SSH interface's profile blocks every inbound connection, allowed apps included.
     #[serde(default)]
     pub inbound_allows_off: bool,
+    // Windows only: Group Policy ignores local rules on the SSH interface's profile (AllowLocalFirewallRules False).
+    #[serde(default)]
+    pub local_rules_off: bool,
 }
 
 impl Default for FirewallSnapshot {
@@ -177,6 +180,7 @@ impl Default for FirewallSnapshot {
             listening_sockets: Vec::new(),
             unlisted_blocks: Vec::new(),
             inbound_allows_off: false,
+            local_rules_off: false,
         }
     }
 }

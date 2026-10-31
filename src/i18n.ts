@@ -406,6 +406,8 @@ const VI_STRINGS: AppI18nStrings = {
       "Đang có rule chặn chính kết nối SSH của bạn. Bật firewall lúc này sẽ cắt kết nối, nên ứng dụng không bật.",
     windows_inbound_allows_off:
       "Firewall đang đặt chế độ chặn mọi kết nối vào, kể cả ứng dụng được phép. Bật firewall lúc này sẽ cắt SSH, nên ứng dụng không bật.",
+    windows_local_rules_off:
+      "Group Policy đang bỏ qua mọi rule tường lửa đặt trên máy (AllowLocalFirewallRules), kể cả rule SSH mà ứng dụng sẽ thêm. Bật firewall lúc này sẽ cắt SSH, nên ứng dụng không bật.",
   },
   vpsUnsupportedReasons: {
     linux_only: "Cấu hình VPS không dùng cho máy local",
@@ -711,6 +713,8 @@ const EN_STRINGS: AppI18nStrings = {
       "A rule blocks your own SSH connection. Turning the firewall on now would cut you off, so the app will not do it.",
     windows_inbound_allows_off:
       "The firewall is set to block all incoming connections, even allowed apps. Turning it on now would cut SSH, so the app will not do it.",
+    windows_local_rules_off:
+      "Group Policy ignores every firewall rule set on this machine (AllowLocalFirewallRules), including the SSH rule the app would add. Turning the firewall on now would cut SSH, so the app will not do it.",
   },
   vpsUnsupportedReasons: {
     linux_only: "Server Config is not available for the local machine",

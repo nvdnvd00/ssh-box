@@ -375,7 +375,7 @@ pub const WINDOWS_RULE_GROUP: &str = "ssh-box";
 // $ErrorActionPreference is Stop (bootstrap), so a failing cmdlet fails the read instead of showing a false "safe" state.
 // Only the process-name lookup is lenient: a process can exit between listing the socket and naming it.
 // The SSH interface's profile lookup is lenient too: unknown ('') only narrows which rules count.
-const WINDOWS_FIREWALL_READ_SCRIPT: &str = r#"$profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore | ForEach-Object { [ordered]@{ name = [string]$_.Name; enabled = ([string]$_.Enabled -eq 'True'); defaultInbound = [string]$_.DefaultInboundAction; allowInbound = [string]$_.AllowInboundRules } })
+const WINDOWS_FIREWALL_READ_SCRIPT: &str = r#"$profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore | ForEach-Object { [ordered]@{ name = [string]$_.Name; enabled = ([string]$_.Enabled -eq 'True'); defaultInbound = [string]$_.DefaultInboundAction; allowInbound = [string]$_.AllowInboundRules; allowLocal = [string]$_.AllowLocalFirewallRules } })
 $active = @(Get-NetConnectionProfile | ForEach-Object { [string]$_.NetworkCategory -replace 'Authenticated','' } | Select-Object -Unique)
 $sshProfile = ''
 if ($sshIp) { try { $ifx = @(Get-NetIPAddress -IPAddress $sshIp -ErrorAction Stop)[0].InterfaceIndex; $sshProfile = ([string]@(Get-NetConnectionProfile -InterfaceIndex $ifx -ErrorAction Stop)[0].NetworkCategory) -replace 'Authenticated','' } catch { $sshProfile = '' } }
@@ -391,7 +391,7 @@ $rules = @(Get-NetFirewallRule -PolicyStore ActiveStore -Direction Inbound -Enab
     # No application filter read: '' (treated as scoped). Otherwise 'Any' or the program path with %SystemRoot% etc. expanded.
     $app = $apps[$_.InstanceID]; $prog = if ($app) { [Environment]::ExpandEnvironmentVariables([string]$app.Program) } else { '' }
     $scoped = ((@($a.LocalAddress) -join ',') -ne 'Any') -or ([string]$ifs[$_.InstanceID].InterfaceType -ne 'Any')
-    [ordered]@{ displayName = [string]$_.DisplayName; group = [string]$_.Group; profile = [string]$_.Profile; program = $prog; service = [string]$svcs[$_.InstanceID].Service; scoped = [bool]$scoped; action = [string]$_.Action; localPort = (@($p.LocalPort) -join ','); protocol = [string]$p.Protocol; remoteAddress = (@($a.RemoteAddress) -join ',') }
+    [ordered]@{ displayName = [string]$_.DisplayName; policy = ([string]$_.PolicyStoreSourceType -eq 'GroupPolicy'); group = [string]$_.Group; profile = [string]$_.Profile; program = $prog; service = [string]$svcs[$_.InstanceID].Service; scoped = [bool]$scoped; action = [string]$_.Action; localPort = (@($p.LocalPort) -join ','); protocol = [string]$p.Protocol; remoteAddress = (@($a.RemoteAddress) -join ',') }
   }
 })
 $names = @{}; $paths = @{}; Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $names[[int]$_.Id] = $_.ProcessName; $paths[[int]$_.Id] = [string]$_.Path }
@@ -418,12 +418,18 @@ struct WinProfile {
     // AllowInboundRules: "False" blocks every inbound connection, allowed apps included; "NotConfigured" (default) and "True" do not.
     #[serde(default)]
     allow_inbound: String,
+    // AllowLocalFirewallRules: "False" (set by Group Policy) ignores every local rule, which ActiveStore still lists.
+    #[serde(default)]
+    allow_local: String,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WinRule {
     display_name: String,
+    // Comes from Group Policy; anything else (local, or unknown) is ignored when local rules are off.
+    #[serde(default)]
+    policy: bool,
     #[serde(default)]
     group: String,
     #[serde(default)]
@@ -506,6 +512,10 @@ pub fn parse_windows_firewall(json: &str, server_port: u16) -> Result<FirewallSn
     let allows_off = w.profiles.iter().any(|p| {
         p.allow_inbound.trim().eq_ignore_ascii_case("false") && (ssh_profile.is_empty() || p.name.eq_ignore_ascii_case(ssh_profile))
     });
+    // Local rules ignored on the SSH NIC's profile (any profile when unknown): only Group Policy allows let this session in.
+    let local_off = w.profiles.iter().any(|p| {
+        p.allow_local.trim().eq_ignore_ascii_case("false") && (ssh_profile.is_empty() || p.name.eq_ignore_ascii_case(ssh_profile))
+    });
     // A program-scoped rule (the stock OpenSSH one is limited to sshd.exe) applies only while exactly that file owns every
     // socket on its port: another sshd.exe (zip/MSI install, Cygwin) does not, and an unknown listener path never does.
     // Lenient (blocks, for the guard): that file may own one of the sockets, an unknown path included (conservative).
@@ -567,6 +577,7 @@ pub fn parse_windows_firewall(json: &str, server_port: u16) -> Result<FirewallSn
                     && !service_scoped
                     && (!sshd_service || rule_port_matches(&r.local_port, protocol, server_port, "tcp"))
                     && !(allow && allows_off)
+                    && !(allow && local_off && !r.policy)
                     && applies(&r.profile, !allow)
                     && program_owns(r, protocol, !allow),
             };
@@ -607,6 +618,7 @@ pub fn parse_windows_firewall(json: &str, server_port: u16) -> Result<FirewallSn
         listening_sockets,
         unlisted_blocks,
         inbound_allows_off: allows_off,
+        local_rules_off: local_off,
     })
 }
 
@@ -671,7 +683,7 @@ fn guard_rules(snap: &FirewallSnapshot) -> Vec<FirewallRuleItem> {
 // Enabling makes every saved block live, and a block beats the auto-allow: refuse while one covers this session.
 pub fn build_windows_set_state(ctx: &ConnectionContext, snap: &FirewallSnapshot, enable: bool) -> Result<String, String> {
     if enable {
-        crate::vps_guard::check_firewall_enable_windows(ctx, &guard_rules(snap), snap.inbound_allows_off)?;
+        crate::vps_guard::check_firewall_enable_windows(ctx, &guard_rules(snap), snap.inbound_allows_off, snap.local_rules_off)?;
     }
     Ok(build_windows_firewall_state_script(enable, windows_ensure_port(ctx, &snap.rules)))
 }
@@ -1301,6 +1313,31 @@ mod tests {
     // "Block all incoming connections, including allowed apps" (AllowInboundRules False) on the SSH NIC's profile, or on any profile
     // when that is unknown: no allow, not even the auto-allow, lets SSH in, so enabling is refused and allows do not count.
     // NotConfigured is the default (allows apply), and the setting on another known profile changes nothing.
+    // Group Policy with AllowLocalFirewallRules False ignores every local rule, yet ActiveStore still lists them (seen on
+    // the VM): a local allow is no way in, and the auto-allow is a local rule too, so enabling must be refused.
+    #[test]
+    fn windows_enable_refused_when_group_policy_ignores_local_rules() {
+        let with = |allow_local: &str, ssh: &str, extra: &str| {
+            let j = FW_OFF
+                .replace(r#""defaultInbound":"Block"}]"#, &format!(r#""defaultInbound":"Block","allowLocal":"{allow_local}"}}]"#))
+                .replace(r#""sshProfile":"Private""#, &format!(r#""sshProfile":"{ssh}""#))
+                .replace("EXTRA", extra);
+            parse_windows_firewall(&j, 22).unwrap()
+        };
+        let refused = Err("LOCKOUT_BLOCKED: windows_local_rules_off".to_string());
+        let snap = with("False", "Private", "");
+        assert!(snap.rules.iter().all(|r| !r.effective), "the stock OpenSSH rule is local");
+        assert_eq!(build_windows_set_state(&admin_ctx(), &snap, true), refused);
+        assert_eq!(build_windows_set_state(&admin_ctx(), &with("False", "", ""), true), refused, "unknown SSH profile: any profile counts");
+        let gpo_allow = r#",{"displayName":"GPO SSH","service":"Any","group":"","program":"Any","profile":"Any","action":"Allow","localPort":"22","protocol":"TCP","remoteAddress":"Any","policy":true}"#;
+        assert!(build_windows_set_state(&admin_ctx(), &with("False", "Private", gpo_allow), true).is_ok(), "a Group Policy allow still lets us in");
+        assert!(build_windows_set_state(&admin_ctx(), &with("False", "Public", ""), true).is_ok());
+        assert!(build_windows_set_state(&admin_ctx(), &with("True", "Private", ""), true).is_ok());
+        assert!(build_windows_set_state(&admin_ctx(), &with("NotConfigured", "Private", ""), true).is_ok());
+        let script = windows_firewall_read_script("10.0.0.9");
+        assert!(script.contains("allowLocal = [string]$_.AllowLocalFirewallRules") && script.contains("$_.PolicyStoreSourceType -eq 'GroupPolicy'"));
+    }
+
     #[test]
     fn windows_enable_refused_when_inbound_allows_are_off() {
         let profiles = |private: &str| format!(r#""profiles":[{{"name":"Private","enabled":false,"defaultInbound":"Block","allowInbound":"{private}"}},{{"name":"Public","enabled":false,"defaultInbound":"Block","allowInbound":"NotConfigured"}}]"#);

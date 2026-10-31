@@ -10,8 +10,8 @@
 //! WINDOWS_SSH_WRITE_VERIFIED is true; W7 reboots the VM (Restart-Computer) unless MX_NO_REBOOT is set.
 //! W13 adds a temporary port-less block for MX_IP's /24 (raw admin PowerShell, not the app) while the firewall is off.
 //! W14-W16 do the same with an ICMPv4 block, a .1-.10 block in that /24 and AllowInboundRules False on all three
-//! profiles (restored to their original values); a SYSTEM task, registered before each change, undoes it after 120s in case
-//! an enable that should be refused goes through.
+//! profiles (restored to their original values), W18 with AllowLocalFirewallRules False in the local GPO; a SYSTEM task,
+//! registered before each change, undoes it after 120s in case an enable that should be refused goes through.
 //! Run (MX_DISTRO = ubuntu | debian | rocky; MX_ONLY=S1,S5 runs a subset):
 //!   MX_VM=u24 MX_IP=<lima0 address> MX_USER=$USER MX_KEY=$HOME/.lima/_config/user MX_DISTRO=ubuntu \
 //!   env -u SSH_AUTH_SOCK cargo test --manifest-path src-tauri/Cargo.toml --test vps_matrix -- --ignored --nocapture
@@ -855,6 +855,16 @@ async fn w12_powershell_default_shell(pool: &SshPool, h: &HostEntry) -> Result<S
     r
 }
 
+// Group Policy ignoring local rules (the local GPO, applied by gpupdate) must refuse enable: the stock OpenSSH allow and the
+// auto-allow are both local. The VM's local GPO leaves the setting NotConfigured; the undo puts that back.
+async fn w18_local_rules_off_refuses(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    const TMP: &str = "sshbox-w18-temp";
+    let before = ps(pool, h, "(Get-NetFirewallProfile -PolicyStore localhost | ForEach-Object { [string]$_.AllowLocalFirewallRules }) -join ','").await;
+    ensure(before == "NotConfigured,NotConfigured,NotConfigured", format!("local GPO AllowLocalFirewallRules before: {before}"))?;
+    let set = |v: &str| format!("Set-NetFirewallProfile -PolicyStore localhost -Profile Domain,Private,Public -AllowLocalFirewallRules {v}; gpupdate /target:computer /force | Out-Null");
+    win_enable_refused(pool, h, TMP, &set("False"), &set("NotConfigured"), "windows_local_rules_off").await
+}
+
 fn run_windows(only: &str) {
     let h = host("mx-main", &env("MX_USER"), Some(env("MX_KEY")), 22);
     let std_host = host("mx-std", "sshbox-std", Some(env("MX_KEY")), 22);
@@ -888,6 +898,7 @@ fn run_windows(only: &str) {
         run!("W14 ICMP block does not refuse enable", w14_icmp_block_does_not_refuse(&pool, &h));
         run!("W15 range block refuses enable", w15_range_block_refuses(&pool, &h));
         run!("W16 AllowInboundRules False refuses enable", w16_inbound_allows_off_refuses(&pool, &h));
+        run!("W18 Group Policy ignores local rules refuses enable", w18_local_rules_off_refuses(&pool, &h));
         if WINDOWS_SSH_WRITE_VERIFIED {
             run!("W8 MaxAuthTries change kept", w8_max_auth_tries(&pool, &h));
             run!("W9 password off/on (coupled)", w9_password_off_on(&pool, &h));

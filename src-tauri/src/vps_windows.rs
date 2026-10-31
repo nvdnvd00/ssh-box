@@ -277,7 +277,12 @@ pub async fn get_windows_sshd_view(host_id: &str, pool: &SshPool, probe: &VpsPro
     parse_windows_sshd_view(&run_windows_script(host_id, pool, &windows_sshd_view_script(&spec), None).await?)
 }
 
-const WINDOWS_ACCOUNTS_BODY: &str = r#"$admins = @(Get-LocalGroupMember -SID S-1-5-32-544 -ErrorAction SilentlyContinue | ForEach-Object { $_.Name.Split('\')[-1] })
+// PS 5.1 Get-LocalGroupMember throws on an orphaned SID or an AzureAD member, which listed no admin at all; ADSI still
+// names every member it can. The group is found by SID: its name is localized.
+const WINDOWS_ACCOUNTS_BODY: &str = r#"$admins = @(try { Get-LocalGroupMember -SID S-1-5-32-544 -ErrorAction Stop | ForEach-Object { $_.Name.Split('\')[-1] } } catch {
+  $g = ([Security.Principal.SecurityIdentifier]'S-1-5-32-544').Translate([Security.Principal.NTAccount]).Value.Split('\')[-1]
+  ([ADSI]"WinNT://./$g,group").psbase.Invoke('Members') | ForEach-Object { $_.GetType().InvokeMember('Name', 'GetProperty', $null, $_, $null) }
+})
 $rows = foreach ($u in Get-LocalUser) {
   $isAdmin = $admins -contains $u.Name
   $file = "C:\Users\$($u.Name)\.ssh\authorized_keys"
@@ -1505,6 +1510,15 @@ mod tests {
         let s = windows_cleanup_script();
         assert!(s.find("Unregister-ScheduledTask").unwrap() < s.find("SSHBOX_ALREADY_ROLLED_BACK").unwrap());
         assert!(s.contains("throw"));
+    }
+
+    // PS 5.1 Get-LocalGroupMember throws on one orphaned SID or AzureAD member; SilentlyContinue then listed no admin at all.
+    #[test]
+    fn windows_accounts_list_admins_even_when_get_localgroupmember_throws() {
+        let s = windows_accounts_read_script();
+        assert!(!s.contains("Get-LocalGroupMember -SID S-1-5-32-544 -ErrorAction SilentlyContinue"));
+        // The fallback finds the group by its SID: the name is localized ("Administratoren", "Administrateurs").
+        assert!(s.contains("WinNT://") && s.contains("'S-1-5-32-544').Translate("));
     }
 
     // One disabled built-in admin (sshd hangs on it) or a failing sshd -T must degrade a row, never fail the whole tab.

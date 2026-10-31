@@ -23,8 +23,10 @@ const NUMBER_FIELDS = ["maxAuthTries", "maxSessions", "loginGraceTime", "clientA
 
 export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host, onSaveHost }) => {
   const { t, hostId } = vps;
-  const res = useVpsResource<SshdView>(vps, (pw) =>
-    invoke<SshdView>("vps_get_sshd_settings", { hostId, sudoPassword: pw ?? null }),
+  // Non-admin Windows cannot read sshd -T: the backend refuses, and the notice below already says why.
+  const skipRead = probe.support.ssh.reason === "windows_not_admin";
+  const res = useVpsResource<SshdView | null>(vps, (pw) =>
+    skipRead ? Promise.resolve(null) : invoke<SshdView>("vps_get_sshd_settings", { hostId, sudoPassword: pw ?? null }),
   );
   const current = res.data?.settings ?? null;
   const [draft, setDraft] = useState<SshdSettings | null>(null);
@@ -47,7 +49,10 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
     return () => window.clearInterval(id);
   }, [progress?.phase]);
 
-  const readOnly = !probe.hasSystemd || !!res.data?.rollbackPending;
+  const { ssh, sshRows, passwordCoupled } = probe.support;
+  // macOS: password login also works through keyboard-interactive, so both fields move together.
+  const passwordOn = (c: SshdSettings) => c.passwordAuthentication || (passwordCoupled && c.kbdInteractiveAuthentication);
+  const readOnly = ssh.level === "readOnly" || !!res.data?.rollbackPending;
   const set = <K extends keyof SshdSettings>(key: K, value: SshdSettings[K]) =>
     setDraft((d) => (d ? { ...d, [key]: value } : d));
 
@@ -60,6 +65,7 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
   const labels: Record<keyof SshdSettings, string> = {
     port: t.vpsSshPort,
     passwordAuthentication: t.vpsSshPassword,
+    kbdInteractiveAuthentication: t.vpsSshPassword,
     pubkeyAuthentication: t.vpsSshPubkey,
     permitRootLogin: t.vpsSshRoot,
     allowUsers: t.vpsSshAllowUsers,
@@ -79,9 +85,11 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
   const changes: PendingChange[] = useMemo(() => {
     if (!current || !draft) return [];
     return (Object.keys(labels) as (keyof SshdSettings)[])
-      .filter((k) => show(k, current[k]) !== show(k, draft[k]))
-      .map((k) => ({ label: labels[k], from: show(k, current[k]), to: show(k, draft[k]) }));
-  }, [current, draft, t]);
+      .map((k) => ({ k, from: current[k], to: draft[k] }))
+      .filter((c) => c.k !== "kbdInteractiveAuthentication" || passwordCoupled)
+      .filter((c) => show(c.k, c.from) !== show(c.k, c.to))
+      .map((c) => ({ label: c.k === "kbdInteractiveAuthentication" ? "KbdInteractiveAuthentication" : labels[c.k], from: show(c.k, c.from), to: show(c.k, c.to) }));
+  }, [current, draft, t, passwordCoupled]);
   const valid =
     !!draft &&
     Number.isInteger(draft.port) && draft.port >= 1 && draft.port <= 65535 &&
@@ -137,11 +145,12 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
   };
 
   if (res.loading && !res.data) return <p className="text-sm text-muted-foreground">{t.vpsCommonLoading}</p>;
+  if (skipRead) return <Notice tone="warn">{t.vpsUnsupportedReasons[ssh.reason!] ?? ssh.reason}</Notice>;
   if (!draft || !current) return res.error ? <Notice tone="danger">{res.error}</Notice> : null;
 
   const checks = [
-    { id: "row-password", label: t.vpsSshCheckPassword, ok: !current.passwordAuthentication },
-    { id: "row-root", label: t.vpsSshCheckRoot, ok: current.permitRootLogin !== "yes" },
+    { id: "row-password", label: t.vpsSshCheckPassword, ok: !passwordOn(current) },
+    ...(sshRows.permitRootLogin ? [{ id: "row-root", label: t.vpsSshCheckRoot, ok: current.permitRootLogin !== "yes" }] : []),
     { id: "row-maxauth", label: t.vpsSshCheckMaxAuth, ok: current.maxAuthTries <= 4 },
   ];
   const numberInput = (key: "port" | (typeof NUMBER_FIELDS)[number]) => (
@@ -168,7 +177,7 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
   return (
     <div className="space-y-5">
       {res.error && <Notice tone="danger">{res.error}</Notice>}
-      {!probe.hasSystemd && <Notice tone="warn">{t.vpsUnsupportedReasons.no_systemd}</Notice>}
+      {ssh.reason && <Notice tone="warn">{t.vpsUnsupportedReasons[ssh.reason] ?? ssh.reason}</Notice>}
       {res.data?.rollbackPending && (
         <Notice tone="warn">
           {t.vpsSshPending}{" "}
@@ -199,28 +208,34 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
 
       <fieldset disabled={readOnly} className="space-y-5 min-w-0">
         <SettingGroup title={t.vpsSshGroupLogin}>
-          <SettingRow label={t.vpsSshPort} description={t.vpsSshPortHint} directive="Port" effective={String(current.port)}>
-            {numberInput("port")}
-          </SettingRow>
+          {sshRows.port && (
+            <SettingRow label={t.vpsSshPort} description={t.vpsSshPortHint} directive="Port" effective={String(current.port)}>
+              {numberInput("port")}
+            </SettingRow>
+          )}
           <SettingRow id="row-password" label={t.vpsSshPassword} directive="PasswordAuthentication">
-            <Switch label={t.vpsSshPassword} checked={draft.passwordAuthentication} onChange={(v) => set("passwordAuthentication", v)} />
+            <Switch label={t.vpsSshPassword} checked={passwordOn(draft)} onChange={(v) => setDraft((d) => d && { ...d, passwordAuthentication: v, ...(passwordCoupled && { kbdInteractiveAuthentication: v }) })} />
           </SettingRow>
           <SettingRow label={t.vpsSshPubkey} directive="PubkeyAuthentication">
             <Switch label={t.vpsSshPubkey} checked={draft.pubkeyAuthentication} onChange={(v) => set("pubkeyAuthentication", v)} />
           </SettingRow>
-          <SettingRow id="row-root" label={t.vpsSshRoot} directive="PermitRootLogin">
-            <SelectField size="sm" className="w-full sm:w-52" value={draft.permitRootLogin} options={rootOptions} onChange={(v) => set("permitRootLogin", v)} />
-          </SettingRow>
+          {sshRows.permitRootLogin && (
+            <SettingRow id="row-root" label={t.vpsSshRoot} directive="PermitRootLogin">
+              <SelectField size="sm" className="w-full sm:w-52" value={draft.permitRootLogin} options={rootOptions} onChange={(v) => set("permitRootLogin", v)} />
+            </SettingRow>
+          )}
         </SettingGroup>
 
-        <SettingGroup title={t.vpsSshGroupWho}>
-          <SettingRow label={t.vpsSshAllowUsers} description={t.vpsSshUsersHint} directive="AllowUsers">
-            {usersInput("allowUsers")}
-          </SettingRow>
-          <SettingRow label={t.vpsSshDenyUsers} directive="DenyUsers">
-            {usersInput("denyUsers")}
-          </SettingRow>
-        </SettingGroup>
+        {sshRows.allowDenyUsers && (
+          <SettingGroup title={t.vpsSshGroupWho}>
+            <SettingRow label={t.vpsSshAllowUsers} description={t.vpsSshUsersHint} directive="AllowUsers">
+              {usersInput("allowUsers")}
+            </SettingRow>
+            <SettingRow label={t.vpsSshDenyUsers} directive="DenyUsers">
+              {usersInput("denyUsers")}
+            </SettingRow>
+          </SettingGroup>
+        )}
 
         <SettingGroup title={t.vpsSshGroupLimits}>
           <SettingRow id="row-maxauth" label={t.vpsSshMaxAuthTries} directive="MaxAuthTries">{numberInput("maxAuthTries")}</SettingRow>
@@ -232,7 +247,7 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
       </fieldset>
 
       <p className="text-xs text-muted-foreground font-mono break-all">
-        {res.data?.writeTarget === "dropIn" ? t.vpsSshWriteDropIn : t.vpsSshWriteMain}
+        {probe.osFamily === "windows" ? t.vpsSshWriteWindows : res.data?.writeTarget === "dropIn" ? t.vpsSshWriteDropIn : t.vpsSshWriteMain}
       </p>
 
       {changes.length > 0 && (

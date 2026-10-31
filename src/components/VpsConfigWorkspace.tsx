@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { RefreshCw, Server } from "lucide-react";
 import { HostEntry, PrivilegeLevel, ResourcesStoreData, VpsProbe, VpsStudioTab } from "../types";
@@ -27,6 +27,7 @@ const PRIVILEGE_TONE: Record<PrivilegeLevel, StatusTone> = {
   root: "ok",
   sudoNoPassword: "ok",
   sudoPassword: "ok",
+  admin: "ok",
   none: "warn",
 };
 
@@ -60,6 +61,9 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
   const isLocal = !host || host.id === "local";
   const probe = host ? probes[host.id] : undefined;
   const sudoPassword = host ? sudoPasswords[host.id] : undefined;
+  // A slow probe of a host the user has already left must not touch the current host's state.
+  const selectedRef = useRef(selectedHostId);
+  selectedRef.current = selectedHostId;
 
   const runProbe = useCallback(
     async (hostId: string, password?: string) => {
@@ -70,7 +74,7 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
         setProbes((prev) => ({ ...prev, [hostId]: result }));
         return result;
       } finally {
-        setProbing(false);
+        if (selectedRef.current === hostId) setProbing(false);
       }
     },
     [],
@@ -78,7 +82,9 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
 
   useEffect(() => {
     if (!host || isLocal) return;
-    runProbe(host.id, sudoPasswords[host.id]).catch((e) => setProbeError(vpsErrorText(t, e)));
+    runProbe(host.id, sudoPasswords[host.id]).catch((e) => {
+      if (selectedRef.current === host.id) setProbeError(vpsErrorText(t, e));
+    });
     // Re-probe only when the host changes; unlocking sudo probes explicitly.
   }, [host?.id, isLocal]);
 
@@ -109,13 +115,16 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
     root: t.vpsPrivRoot,
     sudoNoPassword: t.vpsPrivSudoNoPassword,
     sudoPassword: t.vpsPrivSudoPassword,
+    admin: t.vpsPrivAdmin,
     none: t.vpsPrivNone,
   };
-  const tabs: { id: VpsStudioTab; label: string }[] = [
+  const allTabs: { id: VpsStudioTab; label: string }[] = [
     { id: "ssh", label: t.vpsTabSsh },
     { id: "firewall", label: t.vpsTabFirewall },
     { id: "access", label: t.vpsTabAccess },
   ];
+  const tabs = probe ? allTabs.filter((tab) => probe.support[tab.id].level !== "hidden") : [];
+  const studio = tabs.some((tab) => tab.id === activeStudio) ? activeStudio : tabs[0]?.id;
 
   if (hosts.length === 0) {
     return (
@@ -146,8 +155,13 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
             {probe ? ` · ${probe.osId} ${probe.osVersion}` : ""}
           </span>
         )}
-        {probe && <StatusBadge tone={PRIVILEGE_TONE[probe.privilege]}>{privilegeLabel[probe.privilege]}</StatusBadge>}
-        {probe?.privilege === "none" && (
+        {probe && (
+          <StatusBadge tone={PRIVILEGE_TONE[probe.privilege]}>
+            {/* Windows has no sudo: a non-admin login is simply a standard account. */}
+            {probe.osFamily === "windows" && probe.privilege === "none" ? t.vpsPrivStandard : privilegeLabel[probe.privilege]}
+          </StatusBadge>
+        )}
+        {probe?.privilege === "none" && probe.osFamily !== "windows" && (
           <button
             type="button"
             onClick={() => setSudoOpen(true)}
@@ -169,6 +183,7 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
         )}
       </div>
 
+      {probe && (
       <div className="border-b border-border/70 px-2 flex gap-1 overflow-x-auto">
         {tabs.map((tab) => (
           <button
@@ -176,7 +191,7 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
             type="button"
             onClick={() => setActiveStudio(tab.id)}
             className={`shrink-0 px-3 py-2.5 text-sm border-b-2 cursor-pointer ${
-              activeStudio === tab.id
+              studio === tab.id
                 ? "border-primary text-foreground font-medium"
                 : "border-transparent text-muted-foreground hover:text-foreground"
             }`}
@@ -185,19 +200,20 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
           </button>
         ))}
       </div>
+      )}
 
       <div className="flex-1 overflow-y-auto select-text">
         <div className="max-w-4xl mx-auto w-full p-4 sm:p-6 space-y-4">
           {isLocal && <Notice tone="warn">{t.vpsUnsupportedReasons.linux_only}</Notice>}
           {!isLocal && probeError && <Notice tone="danger">{probeError}</Notice>}
           {!isLocal && probing && !probe && <p className="text-sm text-muted-foreground">{t.vpsShellProbing}</p>}
-          {!isLocal && probe && host && !probeError && activeStudio === "ssh" && (
+          {!isLocal && probe && host && !probeError && studio === "ssh" && (
             <SshHardeningStudio key={host.id} vps={vps} probe={probe} host={host} onSaveHost={onSaveHost} />
           )}
-          {!isLocal && probe && host && !probeError && activeStudio === "firewall" && (
+          {!isLocal && probe && host && !probeError && studio === "firewall" && (
             <FirewallStudio key={host.id} vps={vps} probe={probe} host={host} onSaveHost={onSaveHost} />
           )}
-          {!isLocal && probe && host && !probeError && activeStudio === "access" && (
+          {!isLocal && probe && host && !probeError && studio === "access" && (
             <AccessKeysStudio
               key={host.id}
               vps={vps}

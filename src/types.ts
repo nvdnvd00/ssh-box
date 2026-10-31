@@ -155,8 +155,18 @@ export type TabResources =
 export type VpsStudioTab = "ssh" | "firewall" | "access";
 
 export type AuthUsed = { kind: "password" } | { kind: "key"; publicKeyBody: string };
-export type PrivilegeLevel = "root" | "sudoNoPassword" | "sudoPassword" | "none";
-export type FirewallEngine = "ufw" | "firewalld" | "iptables" | "none";
+export type PrivilegeLevel = "root" | "sudoNoPassword" | "sudoPassword" | "admin" | "none";
+export type FirewallEngine = "ufw" | "firewalld" | "iptables" | "windows" | "none";
+export type OsFamily = "linux" | "macos" | "windows";
+export type SupportLevel = "full" | "readOnly" | "hidden";
+export interface TabSupport { level: SupportLevel; reason: string | null }
+export interface VpsSupport {
+  ssh: TabSupport;
+  sshRows: { port: boolean; permitRootLogin: boolean; allowDenyUsers: boolean };
+  firewall: TabSupport;
+  access: TabSupport;
+  passwordCoupled: boolean;
+}
 
 export interface ConnectionContext {
   loginUser: string;
@@ -176,12 +186,15 @@ export interface VpsProbe {
   sshSocketActive: boolean;
   selinuxEnforcing: boolean;
   firewallEngine: FirewallEngine;
+  osFamily: OsFamily;
+  support: VpsSupport;
 }
 
 export interface SshdSettings {
   port: number;
   permitRootLogin: string;
   passwordAuthentication: boolean;
+  kbdInteractiveAuthentication: boolean;
   pubkeyAuthentication: boolean;
   allowUsers: string[];
   denyUsers: string[];
@@ -225,6 +238,7 @@ export interface FirewallRuleItem {
   v6: boolean;
   comment: string;
   rawSpec: string;
+  effective?: boolean;
 }
 
 export interface FirewallSnapshot {
@@ -257,6 +271,7 @@ export interface LinuxAccountItem {
   hasSudo: boolean;
   nopasswdSudo: boolean;
   authorizedKeys: RemoteAuthorizedKey[];
+  keysFile?: string;
 }
 
 export interface AccessKeysSnapshot {

@@ -16,6 +16,7 @@ const EXPOSURE_TONE: Record<string, StatusTone> = {
   restricted: "ok",
   blocked: "neutral",
   loopback: "neutral",
+  unknown: "neutral",
 };
 
 interface Pending {
@@ -25,8 +26,10 @@ interface Pending {
 
 export const FirewallStudio: React.FC<VpsStudioProps> = ({ vps, probe }) => {
   const { t, hostId } = vps;
-  const res = useVpsResource<FirewallSnapshot>(vps, (pw) =>
-    invoke<FirewallSnapshot>("vps_get_firewall_snapshot", { hostId, sudoPassword: pw ?? null }),
+  // Non-admin Windows cannot read the firewall: the backend refuses, and the notice below already says why.
+  const skipRead = probe.support.firewall.reason === "windows_not_admin";
+  const res = useVpsResource<FirewallSnapshot | null>(vps, (pw) =>
+    skipRead ? Promise.resolve(null) : invoke<FirewallSnapshot>("vps_get_firewall_snapshot", { hostId, sudoPassword: pw ?? null }),
   );
   const [pending, setPending] = useState<Pending | null>(null);
   const [blocked, setBlocked] = useState<string | null>(null);
@@ -34,7 +37,8 @@ export const FirewallStudio: React.FC<VpsStudioProps> = ({ vps, probe }) => {
   const [form, setForm] = useState({ action: "allow", source: "", port: "", proto: "tcp" });
 
   const engine = probe.firewallEngine;
-  const writable = engine === "ufw" || engine === "firewalld";
+  const { reason } = probe.support.firewall;
+  const writable = probe.support.firewall.level === "full";
   const snap = res.data;
   const anywhere = (src: string) => (/^(any|anywhere|0\.0\.0\.0\/0|::\/0)?$/i.test(src.trim()) ? t.vpsFwAnywhere : src);
 
@@ -65,11 +69,15 @@ export const FirewallStudio: React.FC<VpsStudioProps> = ({ vps, probe }) => {
   };
 
   if (res.loading && !snap) return <p className="text-sm text-muted-foreground">{t.vpsCommonLoading}</p>;
+  if (skipRead) return <Notice tone="warn">{t.vpsUnsupportedReasons[reason!] ?? reason}</Notice>;
   if (!snap) return res.error ? <Notice tone="danger">{res.error}</Notice> : null;
 
   // firewalld services/ports are listed once per address family; show each rule once.
   const rules = snap.rules.filter((r, i, all) => all.findIndex((o) => o.rawSpec === r.rawSpec) === i);
-  const actionOptions = ["allow", "limit", "deny", "reject"].map((a) => ({ value: a, label: t.vpsFwActions[a] }));
+  // Windows Firewall only allows or blocks, and every rule needs a port: offer nothing that would always fail.
+  const isWindows = engine === "windows";
+  const portMissing = isWindows && !form.port.trim();
+  const actionOptions = (isWindows ? ["allow", "deny"] : ["allow", "limit", "deny", "reject"]).map((a) => ({ value: a, label: t.vpsFwActions[a] }));
   const protoOptions = [
     { value: "tcp", label: "TCP" },
     { value: "udp", label: "UDP" },
@@ -82,7 +90,7 @@ export const FirewallStudio: React.FC<VpsStudioProps> = ({ vps, probe }) => {
     <div className="space-y-5">
       {res.error && <Notice tone="danger">{res.error}</Notice>}
       {engine === "none" && <Notice tone="warn">{t.vpsFwNoEngine}</Notice>}
-      {engine === "iptables" && <Notice tone="warn">{t.vpsUnsupportedReasons.firewall_read_only}</Notice>}
+      {reason && <Notice tone="warn">{t.vpsUnsupportedReasons[reason] ?? reason}</Notice>}
       {snap.enabled && !snap.ipv6Filtered && <Notice tone="warn">{t.vpsFwIpv6Off}</Notice>}
 
       <SettingGroup title={t.vpsFwStatusTitle}>
@@ -125,7 +133,7 @@ export const FirewallStudio: React.FC<VpsStudioProps> = ({ vps, probe }) => {
             label={describe(r.action, r.toPort === "Anywhere" ? "" : r.toPort.replace(/\/(tcp|udp)$/, ""), r.protocol, r.fromSource)}
             directive={r.rawSpec}
           >
-            {writable && (
+            {writable && (engine !== "windows" || r.comment === "ssh-box") && (
               <ConfirmButton
                 label={t.vpsFwDelete}
                 confirmLabel={t.vpsFwDeleteConfirm}
@@ -162,12 +170,14 @@ export const FirewallStudio: React.FC<VpsStudioProps> = ({ vps, probe }) => {
               </div>
             </label>
             <label className="space-y-1">
-              <span className="ui-label">{t.vpsFwPort}</span>
+              <span className="ui-label">{isWindows ? t.vpsFwPortOnly : t.vpsFwPort}</span>
               <input className="ui-input font-mono" inputMode="numeric" value={form.port} onChange={(e) => setForm({ ...form, port: e.target.value })} />
+              {portMissing && <span className="text-xs text-muted-foreground">{t.vpsUnsupportedReasons.windows_port_required}</span>}
             </label>
             <div className="sm:col-span-2 flex justify-end">
               <button
                 type="button"
+                disabled={portMissing}
                 onClick={() =>
                   ask(
                     { label: t.vpsFwAddTitle, from: "", to: describe(form.action, form.port, form.proto, form.source) },
@@ -177,7 +187,7 @@ export const FirewallStudio: React.FC<VpsStudioProps> = ({ vps, probe }) => {
                       }),
                   )
                 }
-                className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-primary text-primary-foreground hover:opacity-90 cursor-pointer"
+                className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-primary text-primary-foreground hover:opacity-90 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {t.vpsFwAdd}
               </button>

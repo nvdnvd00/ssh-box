@@ -1,4 +1,6 @@
 use crate::ssh_pool::{AuthUsed, SshPool};
+use crate::vps_macos::{build_sshd_apply_script_macos, MACOS_ROLLBACK_LABEL, MACOS_ROLLBACK_PLIST};
+use crate::vps_support::{check_hidden_rows, compute_support, unix_family, OsCaps, OsFamily, SupportLevel, VpsSupport};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -7,6 +9,7 @@ pub enum PrivilegeLevel {
     Root,
     SudoNoPassword,
     SudoPassword,
+    Admin,
     None,
 }
 
@@ -16,6 +19,7 @@ pub enum FirewallEngine {
     Ufw,
     Firewalld,
     Iptables,
+    Windows,
     None,
 }
 
@@ -42,6 +46,10 @@ pub struct VpsProbe {
     pub ssh_socket_active: bool,
     pub selinux_enforcing: bool,
     pub firewall_engine: FirewallEngine,
+    pub os_family: OsFamily,
+    pub support: VpsSupport,
+    #[serde(skip)]
+    pub caps: OsCaps,
 }
 
 // The sshd directives the SSH studio reads and writes (spec §1.1).
@@ -59,6 +67,8 @@ pub struct SshdSettings {
     pub login_grace_time: u32,
     pub client_alive_interval: u32,
     pub client_alive_count_max: u32,
+    // macOS: password login also goes through keyboard-interactive, so the UI toggles both together.
+    pub kbd_interactive_authentication: bool,
 }
 
 // OpenSSH defaults, used when `sshd -T` omits a directive.
@@ -76,6 +86,7 @@ impl Default for SshdSettings {
             login_grace_time: 120,
             client_alive_interval: 0,
             client_alive_count_max: 3,
+            kbd_interactive_authentication: true,
         }
     }
 }
@@ -126,6 +137,13 @@ pub struct FirewallRuleItem {
     pub v6: bool,
     pub comment: String,
     pub raw_spec: String,
+    // false: listed, but not a plain port rule of an active profile (Windows only); true everywhere else.
+    #[serde(default = "default_effective")]
+    pub effective: bool,
+}
+
+fn default_effective() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -138,6 +156,13 @@ pub struct FirewallSnapshot {
     pub ipv6_filtered: bool,
     pub rules: Vec<FirewallRuleItem>,
     pub listening_sockets: Vec<ListeningSocketItem>,
+    // Windows only: enabled block rules without a port filter. Not listed in the UI, but a block beats any allow,
+    // so the lockout guard and the exposure must still see them.
+    #[serde(default)]
+    pub unlisted_blocks: Vec<FirewallRuleItem>,
+    // Windows only: the SSH interface's profile blocks every inbound connection, allowed apps included.
+    #[serde(default)]
+    pub inbound_allows_off: bool,
 }
 
 impl Default for FirewallSnapshot {
@@ -150,6 +175,8 @@ impl Default for FirewallSnapshot {
             ipv6_filtered: true,
             rules: Vec::new(),
             listening_sockets: Vec::new(),
+            unlisted_blocks: Vec::new(),
+            inbound_allows_off: false,
         }
     }
 }
@@ -178,6 +205,9 @@ pub struct LinuxAccountItem {
     pub has_sudo: bool,
     pub nopasswd_sudo: bool,
     pub authorized_keys: Vec<RemoteAuthorizedKey>,
+    // Windows only: the file the keys were read from; empty elsewhere.
+    #[serde(default)]
+    pub keys_file: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -186,7 +216,7 @@ pub struct AccessKeysSnapshot {
     pub accounts: Vec<LinuxAccountItem>,
 }
 
-fn is_public_bind_address(bind_addr: &str) -> bool {
+pub(crate) fn is_public_bind_address(bind_addr: &str) -> bool {
     let clean = bind_addr
         .trim()
         .trim_matches(|c| c == '[' || c == ']')
@@ -289,6 +319,39 @@ pub fn compute_socket_exposure(
     .to_string()
 }
 
+// Windows Firewall: a block rule beats any allow regardless of order, so there is no first-match walk.
+pub fn compute_socket_exposure_windows(
+    socket: &ListeningSocketItem,
+    firewall_enabled: bool,
+    rules: &[FirewallRuleItem],
+) -> String {
+    if !socket.is_public {
+        return "loopback".to_string();
+    }
+    if !firewall_enabled {
+        return "exposed".to_string();
+    }
+    let (mut allow_any, mut allow_src, mut block_any, mut block_src) = (false, false, false, false);
+    for r in rules.iter().filter(|r| rule_port_matches(&r.to_port, &r.protocol, socket.port, &socket.protocol)) {
+        let allow = matches!(r.action.to_ascii_uppercase().as_str(), "ALLOW" | "LIMIT" | "ACCEPT");
+        match (allow, is_anywhere_source(&r.from_source)) {
+            (true, true) => allow_any = true,
+            (true, false) => allow_src = true,
+            (false, true) => block_any = true,
+            (false, false) => block_src = true,
+        }
+    }
+    // No rule for the port says nothing about the default: never claim "blocked" from silence.
+    match (block_any, allow_any, allow_src, block_src) {
+        (true, ..) => "blocked",
+        // An allow-from-anywhere stays open to everyone except the one blocked source.
+        (_, true, ..) => "exposed",
+        (_, false, true, _) => "restricted",
+        _ => "unknown",
+    }
+    .to_string()
+}
+
 fn parse_ufw_numbered_line(line: &str) -> Option<FirewallRuleItem> {
     let trimmed = line.trim();
     if !trimmed.starts_with('[') {
@@ -369,7 +432,7 @@ fn parse_ufw_numbered_line(line: &str) -> Option<FirewallRuleItem> {
         from_source: from_clean,
         v6,
         comment,
-        raw_spec: after_bracket.to_string(),
+        raw_spec: after_bracket.to_string(), effective: true,
     })
 }
 
@@ -457,7 +520,7 @@ fn parse_iptables_input_line(line: &str, next_index: u32) -> Option<FirewallRule
         from_source,
         v6: false,
         comment,
-        raw_spec: spec.to_string(),
+        raw_spec: spec.to_string(), effective: true,
     })
 }
 
@@ -692,7 +755,7 @@ if iptables -S INPUT 2>/dev/null | grep -qE -- '-P INPUT (DROP|REJECT)'; then ec
 if ip6tables -S INPUT 2>/dev/null | grep -qE -- '-P INPUT (DROP|REJECT)|^-A INPUT'; then echo IPV6:1; else echo IPV6:0; fi
 echo ---IPTABLES---
 iptables -S INPUT 2>/dev/null || true"#,
-        FirewallEngine::None => "echo ENABLED:0\necho DEFAULT_INCOMING:allow\necho IPV6:0",
+        FirewallEngine::None | FirewallEngine::Windows => "echo ENABLED:0\necho DEFAULT_INCOMING:allow\necho IPV6:0",
     };
     format!(
         "echo ---META---\n{meta}\necho ---SOCKETS---\nss -tulpnH 2>/dev/null || ss -tulpn 2>/dev/null || true\n"
@@ -704,6 +767,7 @@ fn engine_name(engine: FirewallEngine) -> &'static str {
         FirewallEngine::Ufw => "ufw",
         FirewallEngine::Firewalld => "firewalld",
         FirewallEngine::Iptables => "iptables",
+        FirewallEngine::Windows => "windows",
         FirewallEngine::None => "none",
     }
 }
@@ -721,18 +785,21 @@ pub async fn get_firewall_snapshot(
     sudo_password: Option<String>,
 ) -> Result<FirewallSnapshot, String> {
     let probe = probe(host_id, pool, sudo_password.clone()).await?;
+    if probe.firewall_engine == FirewallEngine::Windows {
+        return crate::vps_windows::get_windows_firewall(host_id, pool, &probe).await;
+    }
     let raw = run_privileged_script(host_id, pool, sudo_password, &firewall_read_script(probe.firewall_engine), None).await?;
     Ok(snapshot_after(&raw, probe.firewall_engine))
 }
 
-struct UfwRuleArgs {
-    action: &'static str,
-    source: String,
-    port: String,
-    proto: &'static str,
+pub(crate) struct UfwRuleArgs {
+    pub action: &'static str,
+    pub source: String,
+    pub port: String,
+    pub proto: &'static str,
 }
 
-fn validate_rule_args(action: &str, source: &str, port: &str, proto: &str) -> Result<UfwRuleArgs, String> {
+pub(crate) fn validate_rule_args(action: &str, source: &str, port: &str, proto: &str) -> Result<UfwRuleArgs, String> {
     let action = match action.trim().to_ascii_lowercase().as_str() {
         "allow" => "allow",
         "limit" => "limit",
@@ -831,7 +898,7 @@ pub fn build_set_firewall_state_script(
                 "systemctl disable --now firewalld\n"
             });
         }
-        FirewallEngine::Iptables | FirewallEngine::None => {
+        FirewallEngine::Iptables | FirewallEngine::Windows | FirewallEngine::None => {
             return Err(vps_err(ERR_UNSUPPORTED, "firewall_read_only"))
         }
     }
@@ -856,7 +923,7 @@ async fn run_firewall_write(
 
 fn writable_engine(engine: FirewallEngine) -> Result<(), String> {
     match engine {
-        FirewallEngine::Ufw | FirewallEngine::Firewalld => Ok(()),
+        FirewallEngine::Ufw | FirewallEngine::Firewalld | FirewallEngine::Windows => Ok(()),
         _ => Err(vps_err(ERR_UNSUPPORTED, "firewall_read_only")),
     }
 }
@@ -873,6 +940,10 @@ pub async fn add_firewall_rule(
     let probe = probe(host_id, pool, sudo_password.clone()).await?;
     writable_engine(probe.firewall_engine)?;
     crate::vps_guard::check_firewall_add(&probe.context, &action, &source, &port)?;
+    if probe.firewall_engine == FirewallEngine::Windows {
+        let script = crate::vps_windows::build_windows_add_rule_script(&action, &source, &port, &proto)?;
+        return crate::vps_windows::run_windows_firewall_write(host_id, pool, &probe.context, &script).await;
+    }
     let script = match probe.firewall_engine {
         FirewallEngine::Firewalld => build_firewalld_add_rule_script(&action, &source, &port, &proto)?,
         _ => build_ufw_add_rule_script(&action, &source, &port, &proto)?,
@@ -889,6 +960,10 @@ pub async fn delete_firewall_rule(
     let probe = probe(host_id, pool, sudo_password.clone()).await?;
     writable_engine(probe.firewall_engine)?;
     let current = get_firewall_snapshot(host_id, pool, sudo_password.clone()).await?;
+    if probe.firewall_engine == FirewallEngine::Windows {
+        let script = crate::vps_windows::build_windows_delete(&probe.context, &current, &rule.raw_spec)?;
+        return crate::vps_windows::run_windows_firewall_write(host_id, pool, &probe.context, &script).await;
+    }
     crate::vps_guard::check_firewall_delete(&probe.context, &current.rules, &rule)?;
     let script = match probe.firewall_engine {
         FirewallEngine::Firewalld => build_firewalld_delete_rule_script(&rule),
@@ -906,6 +981,10 @@ pub async fn set_firewall_state(
     let probe = probe(host_id, pool, sudo_password.clone()).await?;
     writable_engine(probe.firewall_engine)?;
     let current = get_firewall_snapshot(host_id, pool, sudo_password.clone()).await?;
+    if probe.firewall_engine == FirewallEngine::Windows {
+        let script = crate::vps_windows::build_windows_set_state(&probe.context, &current, enable)?;
+        return crate::vps_windows::run_windows_firewall_write(host_id, pool, &probe.context, &script).await;
+    }
     let ensure = crate::vps_guard::ssh_allow_needed(&probe.context, &current.rules).then_some(probe.context.server_port);
     let script = build_set_firewall_state_script(probe.firewall_engine, enable, ensure)?;
     run_firewall_write(host_id, pool, sudo_password, probe.firewall_engine, &script).await
@@ -934,7 +1013,7 @@ pub fn parse_firewalld_list_all(raw: &str) -> Vec<FirewallRuleItem> {
             let protocol = to.rsplit_once('/').map(|(_, p)| p.to_string()).unwrap_or_else(|| "any".to_string());
             keyed.push(((2, 0), FirewallRuleItem {
                 index: 0, to_port: to.clone(), protocol, action: "ALLOW".to_string(),
-                from_source: "Anywhere".to_string(), v6, comment: String::new(), raw_spec: raw_spec.clone(),
+                from_source: "Anywhere".to_string(), v6, comment: String::new(), raw_spec: raw_spec.clone(), effective: true,
             }));
         }
     }
@@ -976,7 +1055,7 @@ pub fn parse_firewalld_list_all(raw: &str) -> Vec<FirewallRuleItem> {
                 keyed.push((key, FirewallRuleItem {
                     index: 0, to_port: to_port.clone(), protocol: protocol.clone(),
                     action: if deny { "DENY" } else { "ALLOW" }.to_string(),
-                    from_source: source.clone(), v6, comment: String::new(), raw_spec: t.to_string(),
+                    from_source: source.clone(), v6, comment: String::new(), raw_spec: t.to_string(), effective: true,
                 }));
             }
         } else if !t.is_empty() && t.contains(':') {
@@ -1105,7 +1184,7 @@ elif sudo -n true 2>/dev/null; then
   sshbox_body | sudo -n sh -s 2>&1
   rc=$?
 elif [ -n "$SSHBOX_PW" ]; then
-  {{ printf '%s\n' "$SSHBOX_PW"; sshbox_body; }} | sudo -S -p '' sh -s 2>&1
+  {{ printf '%s\n' "$SSHBOX_PW"; sshbox_body; }} | sudo -k -S -p '' sh -s 2>&1
   rc=$?
 else
   echo "SSHBOX_ERR_SUDO_PASSWORD_REQUIRED"
@@ -1174,7 +1253,7 @@ echo "UID:$uid"
 if [ "$uid" = "0" ]; then s=root
 elif sudo -n true 2>/dev/null; then s=nopasswd
 elif [ -z "$pw" ]; then s=none
-elif printf '%s\n' "$pw" | sudo -S -p '' true >/dev/null 2>&1; then s=password_ok
+elif printf '%s\n' "$pw" | sudo -k -S -p '' true >/dev/null 2>&1; then s=password_ok
 else s=password_bad
 fi
 echo "SUDO:$s"
@@ -1192,6 +1271,11 @@ elif command -v iptables >/dev/null 2>&1; then fw=iptables
 else fw=none
 fi
 echo "FW:$fw"
+if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+echo "MAC_VERSION:$(sw_vers -productVersion 2>/dev/null)"
+echo ---SSHD_MAIN---
+cat /etc/ssh/sshd_config 2>/dev/null
+fi
 "#;
 
 pub fn parse_probe_output(raw: &str, auth: AuthUsed) -> Result<VpsProbe, String> {
@@ -1200,9 +1284,11 @@ pub fn parse_probe_output(raw: &str, auth: AuthUsed) -> Result<VpsProbe, String>
             .find_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_string()))
             .unwrap_or_default()
     };
-    if field("UNAME:") != "Linux" {
-        return Err(vps_err(ERR_UNSUPPORTED, "linux_only"));
-    }
+    let os_family = match field("UNAME:").as_str() {
+        "Linux" => OsFamily::Linux,
+        "Darwin" => OsFamily::Macos,
+        _ => return Err(vps_err(ERR_UNSUPPORTED, "unsupported_os")),
+    };
     let privilege = match field("SUDO:").as_str() {
         "root" => PrivilegeLevel::Root,
         "nopasswd" => PrivilegeLevel::SudoNoPassword,
@@ -1210,8 +1296,41 @@ pub fn parse_probe_output(raw: &str, auth: AuthUsed) -> Result<VpsProbe, String>
         "password_bad" => return Err(vps_err(ERR_SUDO_DENIED, "incorrect sudo password")),
         _ => PrivilegeLevel::None,
     };
-    // $SSH_CONNECTION = "client_ip client_port server_ip server_port"
-    let conn = field("SSH_CONNECTION:");
+    let (client_ip, server_ip, server_port) = parse_ssh_connection(&field("SSH_CONNECTION:"))?;
+    let firewall_engine = match field("FW:").as_str() {
+        "ufw" => FirewallEngine::Ufw,
+        "firewalld" => FirewallEngine::Firewalld,
+        "iptables" => FirewallEngine::Iptables,
+        _ => FirewallEngine::None,
+    };
+    let macos = os_family == OsFamily::Macos;
+    let sshd_main = raw.split_once("---SSHD_MAIN---\n").map_or("", |(_, rest)| rest);
+    let mut probe = VpsProbe {
+        privilege,
+        context: ConnectionContext {
+            login_user: field("USER:"),
+            auth,
+            client_ip,
+            server_ip,
+            server_port,
+        },
+        os_id: if macos { "macOS".to_string() } else { field("OS_ID:") },
+        os_version: if macos { field("MAC_VERSION:") } else { field("OS_VERSION:") },
+        openssh_version: field("OPENSSH:"),
+        has_systemd: field("SYSTEMD:") == "1",
+        ssh_socket_active: field("SSH_SOCKET:") == "active",
+        selinux_enforcing: field("SELINUX:").eq_ignore_ascii_case("enforcing"),
+        firewall_engine,
+        os_family,
+        support: VpsSupport::default(),
+        caps: OsCaps { sshd_dropin: macos && sshd_write_target(sshd_main) == WriteTarget::DropIn, ..Default::default() },
+    };
+    probe.support = compute_support(&probe);
+    Ok(probe)
+}
+
+// $SSH_CONNECTION = "client_ip client_port server_ip server_port" -> (client_ip, server_ip, server_port)
+pub(crate) fn parse_ssh_connection(conn: &str) -> Result<(String, String, u16), String> {
     let parts: Vec<&str> = conn.split_whitespace().collect();
     let [client_ip, _, server_ip, port] = parts.as_slice() else {
         return Err(vps_err(ERR_UNSUPPORTED, "no_ssh_connection"));
@@ -1219,29 +1338,7 @@ pub fn parse_probe_output(raw: &str, auth: AuthUsed) -> Result<VpsProbe, String>
     let server_port = port
         .parse::<u16>()
         .map_err(|_| vps_err(ERR_UNSUPPORTED, "no_ssh_connection"))?;
-    let firewall_engine = match field("FW:").as_str() {
-        "ufw" => FirewallEngine::Ufw,
-        "firewalld" => FirewallEngine::Firewalld,
-        "iptables" => FirewallEngine::Iptables,
-        _ => FirewallEngine::None,
-    };
-    Ok(VpsProbe {
-        privilege,
-        context: ConnectionContext {
-            login_user: field("USER:"),
-            auth,
-            client_ip: client_ip.to_string(),
-            server_ip: server_ip.to_string(),
-            server_port,
-        },
-        os_id: field("OS_ID:"),
-        os_version: field("OS_VERSION:"),
-        openssh_version: field("OPENSSH:"),
-        has_systemd: field("SYSTEMD:") == "1",
-        ssh_socket_active: field("SSH_SOCKET:") == "active",
-        selinux_enforcing: field("SELINUX:").eq_ignore_ascii_case("enforcing"),
-        firewall_engine,
-    })
+    Ok((client_ip.to_string(), server_ip.to_string(), server_port))
 }
 
 pub async fn probe(
@@ -1250,6 +1347,15 @@ pub async fn probe(
     sudo_password: Option<String>,
 ) -> Result<VpsProbe, String> {
     let host = find_remote_host(host_id)?;
+    pool.get_or_connect(&host, None).await?;
+    let uname = pool
+        .exec_bytes_on_host(&host, "uname -s", None)
+        .await
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o).trim().to_string());
+    if unix_family(uname.as_deref()).is_none() {
+        return crate::vps_windows::probe_windows(&host, pool).await;
+    }
     let stdin = privileged_stdin(sudo_password.as_deref(), None)?;
     let out = pool.exec_bytes_on_host(&host, PROBE_SCRIPT, Some(&stdin)).await?;
     let auth = pool
@@ -1336,6 +1442,9 @@ pub fn parse_sshd_t(raw: &str) -> SshdSettings {
             }
             "permitrootlogin" => s.permit_root_login = normalize_permit_root_login(val),
             "passwordauthentication" => s.password_authentication = parse_yes_no(val, true),
+            "kbdinteractiveauthentication" | "challengeresponseauthentication" => {
+                s.kbd_interactive_authentication = parse_yes_no(val, true)
+            }
             "pubkeyauthentication" => s.pubkey_authentication = parse_yes_no(val, true),
             "allowusers" => allow.extend(val.split_whitespace().map(str::to_string)),
             "denyusers" => deny.extend(val.split_whitespace().map(str::to_string)),
@@ -1373,6 +1482,7 @@ fn sshd_directives(s: &SshdSettings) -> Vec<(&'static str, Option<String>)> {
         ("port", Some(format!("Port {}", s.port.max(1)))),
         ("permitrootlogin", Some(format!("PermitRootLogin {}", normalize_permit_root_login(&s.permit_root_login)))),
         ("passwordauthentication", Some(format!("PasswordAuthentication {}", yes_no(s.password_authentication)))),
+        ("kbdinteractiveauthentication", Some(format!("KbdInteractiveAuthentication {}", yes_no(s.kbd_interactive_authentication)))),
         ("pubkeyauthentication", Some(format!("PubkeyAuthentication {}", yes_no(s.pubkey_authentication)))),
         ("maxauthtries", Some(format!("MaxAuthTries {}", s.max_auth_tries.max(1)))),
         ("maxsessions", Some(format!("MaxSessions {}", s.max_sessions))),
@@ -1411,7 +1521,11 @@ pub fn render_sshd_config(base_raw: &str, managed: &[(&'static str, Option<Strin
     for line in base_raw.lines() {
         if from_match.is_empty() {
             if let Some((key, _)) = split_sshd_directive(line) {
-                let key = key.to_ascii_lowercase();
+                let key = match key.to_ascii_lowercase().as_str() {
+                    // Same directive under its old name: replaced too when the kbd line is written, or its value could win.
+                    "challengeresponseauthentication" => "kbdinteractiveauthentication".to_string(),
+                    k => k.to_string(),
+                };
                 if key == "match" {
                     from_match.push(line.to_string());
                     continue;
@@ -1453,7 +1567,23 @@ pub fn render_sshd_config(base_raw: &str, managed: &[(&'static str, Option<Strin
     out
 }
 
-const SSHD_PART: &str = "---SSHBOX-PART---";
+pub(crate) fn rollback_pending_cmd(os: OsFamily) -> String {
+    match os {
+        OsFamily::Macos => format!("launchctl print system/{MACOS_ROLLBACK_LABEL} >/dev/null 2>&1 && echo active || true"),
+        OsFamily::Linux => "systemctl is-active sshbox-rollback.timer 2>/dev/null || true".to_string(),
+        OsFamily::Windows => unreachable!("Windows reads the pending rollback in its own view script"),
+    }
+}
+
+fn stop_rollback_timer_cmd(os: OsFamily) -> String {
+    match os {
+        OsFamily::Macos => format!("launchctl bootout system/{MACOS_ROLLBACK_LABEL} 2>/dev/null || true; rm -f {MACOS_ROLLBACK_PLIST}"),
+        OsFamily::Linux => "systemctl stop sshbox-rollback.timer 2>/dev/null || true".to_string(),
+        OsFamily::Windows => unreachable!("Windows has its own cleanup scripts"),
+    }
+}
+
+pub(crate) const SSHD_PART: &str = "---SSHBOX-PART---";
 
 pub fn parse_sshd_view(raw: &str) -> Result<SshdView, String> {
     let parts: Vec<&str> = raw.split(SSHD_PART).collect();
@@ -1480,6 +1610,9 @@ pub async fn get_sshd_view(
 ) -> Result<SshdView, String> {
     let probe = probe(host_id, pool, sudo_password.clone()).await?;
     let c = &probe.context;
+    if probe.os_family == OsFamily::Windows {
+        return crate::vps_windows::get_windows_sshd_view(host_id, pool, &probe).await;
+    }
     // -C applies Match blocks for this exact connection, so the result is what the app gets.
     let spec = format!(
         "user={},host={},addr={},laddr={},lport={}",
@@ -1487,8 +1620,9 @@ pub async fn get_sshd_view(
     );
     let script = format!(
         "sshd -T -C {spec} || exit 1\necho {SSHD_PART}\ncat {SSHD_MAIN_CONFIG}\necho {SSHD_PART}\n\
-cat {SSHD_DROPIN} 2>/dev/null || true\necho {SSHD_PART}\nsystemctl is-active sshbox-rollback.timer 2>/dev/null || true\n",
+cat {SSHD_DROPIN} 2>/dev/null || true\necho {SSHD_PART}\n{pending}\n",
         spec = shell_single_quote(&spec),
+        pending = rollback_pending_cmd(probe.os_family),
     );
     let raw = run_privileged_script(host_id, pool, sudo_password, &script, None).await?;
     parse_sshd_view(&raw)
@@ -1543,7 +1677,7 @@ fn sshd_firewall_cmd(plan: &ReloadPlan, open: bool) -> String {
     }
 }
 
-fn sshd_restore_fn(file: &str) -> String {
+pub(crate) fn sshd_restore_fn(file: &str) -> String {
     format!(
         "F={f}\nsshbox_restore() {{\n  if [ -e \"$F.sshbox.bak\" ]; then mv -f \"$F.sshbox.bak\" \"$F\";\n  \
 elif [ -e \"$F.sshbox.absent\" ]; then rm -f \"$F\" \"$F.sshbox.absent\"; fi\n}}\n",
@@ -1602,13 +1736,21 @@ ss -tlnpH "sport = :$P" | grep -Eq 'sshd|systemd' || {{ echo SSHBOX_PORT_NOT_LIS
 }
 
 pub fn apply_preflight(probe: &VpsProbe, view: &SshdView, desired: &SshdSettings) -> Result<(), String> {
-    if !probe.has_systemd {
-        return Err(vps_err(ERR_UNSUPPORTED, "no_systemd"));
+    if probe.support.ssh.level != SupportLevel::Full {
+        return Err(vps_err(
+            ERR_UNSUPPORTED,
+            probe.support.ssh.reason.as_deref().unwrap_or("read_only_os"),
+        ));
     }
+    check_hidden_rows(&probe.support.ssh_rows, &view.settings, desired)?;
     if view.rollback_pending {
         return Err(vps_err(ERR_COMMAND_FAILED, "a previous change is still waiting for verification"));
     }
-    crate::vps_guard::check_sshd(&probe.context, desired)
+    match probe.os_family {
+        // AllowUsers / DenyUsers / PermitRootLogin are hidden on Windows, so only the auth rules apply.
+        OsFamily::Windows => crate::vps_guard::check_sshd_auth(&probe.context, desired),
+        OsFamily::Linux | OsFamily::Macos => crate::vps_guard::check_sshd(&probe.context, desired),
+    }
 }
 
 pub fn parse_apply_started(raw: &str, new_port: Option<u16>) -> Result<SshdApplyStarted, String> {
@@ -1686,10 +1828,31 @@ pub async fn apply_sshd_settings(
     let probe = probe(host_id, pool, sudo_password.clone()).await?;
     let view = get_sshd_view(host_id, pool, sudo_password.clone()).await?;
     let plan = plan_sshd_apply(&probe, &view, &desired)?;
-    let script = build_sshd_apply_script(plan.file, SSHD_ROLLBACK_SCRIPT, &plan.reload);
-    let raw = run_privileged_script(host_id, pool, sudo_password, &script, Some(&plan.content)).await?;
+    let script = match probe.os_family {
+        OsFamily::Macos => build_sshd_apply_script_macos(plan.file, SSHD_ROLLBACK_SCRIPT, MACOS_ROLLBACK_PLIST),
+        OsFamily::Linux => build_sshd_apply_script(plan.file, SSHD_ROLLBACK_SCRIPT, &plan.reload),
+        OsFamily::Windows => crate::vps_windows::build_sshd_apply_script_windows(plan.reload.new_port, plan.reload.port),
+    };
+    let raw = run_sshd_script(host_id, pool, sudo_password, probe.os_family, &script, Some(&plan.content)).await?;
     parse_apply_started(&raw, plan.reload.new_port)
 }
+
+async fn run_sshd_script(
+    host_id: &str,
+    pool: &SshPool,
+    sudo_password: Option<String>,
+    os: OsFamily,
+    script: &str,
+    secret: Option<&str>,
+) -> Result<String, String> {
+    match os {
+        OsFamily::Windows => crate::vps_windows::run_windows_script(host_id, pool, script, secret).await,
+        OsFamily::Linux | OsFamily::Macos => run_privileged_script(host_id, pool, sudo_password, script, secret).await,
+    }
+}
+
+// Runs in sh, cmd.exe and PowerShell alike (a Windows login shell has no `true`).
+const VERIFY_COMMAND: &str = "exit 0";
 
 // Opens a brand-new SSH connection on `new_port`; the live session proves nothing (spec §4.1).
 pub async fn verify_new_connection(
@@ -1702,7 +1865,7 @@ pub async fn verify_new_connection(
     let before = crate::ssh_pool::list_known_hosts_at(&known_hosts);
     let mut target = host.clone();
     target.port = new_port;
-    let reason = match pool.test_exec(&target, "true").await {
+    let reason = match pool.test_exec(&target, VERIFY_COMMAND).await {
         Ok(fp) if fp == expected_fp => return Ok(()),
         Ok(fp) => format!("host key changed on port {new_port} ({fp})"),
         Err(e) => e,
@@ -1720,7 +1883,10 @@ pub async fn verify_new_connection(
 }
 
 // Keeps the change. Fails if the rollback already ran (timer fired or "Roll back now").
-fn sshd_cleanup_script(rollback: &str, files: [&str; 2]) -> String {
+fn sshd_cleanup_script(rollback: &str, files: [&str; 2], os: OsFamily) -> String {
+    if os == OsFamily::Windows {
+        return crate::vps_windows::windows_cleanup_script();
+    }
     let r = shell_single_quote(rollback);
     let markers: Vec<String> = files
         .iter()
@@ -1728,15 +1894,19 @@ fn sshd_cleanup_script(rollback: &str, files: [&str; 2]) -> String {
         .map(|m| shell_single_quote(&m))
         .collect();
     format!(
-        "systemctl stop sshbox-rollback.timer 2>/dev/null || true\n\
-if [ ! -e {r} ]; then echo SSHBOX_ALREADY_ROLLED_BACK; exit 5; fi\nrm -f {} {r}\n",
+        "{}\nif [ ! -e {r} ]; then echo SSHBOX_ALREADY_ROLLED_BACK; exit 5; fi\nrm -f {} {r}\n",
+        stop_rollback_timer_cmd(os),
         markers.join(" ")
     )
 }
 
-fn sshd_rollback_now_script() -> String {
+fn sshd_rollback_now_script(os: OsFamily) -> String {
+    if os == OsFamily::Windows {
+        return crate::vps_windows::windows_rollback_now_script();
+    }
     format!(
-        "if [ -e {r} ]; then /bin/sh {r}; fi\nsystemctl stop sshbox-rollback.timer 2>/dev/null || true\n",
+        "if [ -e {r} ]; then /bin/sh {r}; fi\n{}\n",
+        stop_rollback_timer_cmd(os),
         r = SSHD_ROLLBACK_SCRIPT
     )
 }
@@ -1749,17 +1919,18 @@ pub async fn finish_sshd_apply(
     new_port: Option<u16>,
 ) -> Result<SshdView, String> {
     let host = find_remote_host(host_id)?;
+    let os = probe(host_id, pool, sudo_password.clone()).await?.os_family;
     let expected_fp = pool
         .session_fingerprint(host_id)
         .await
         .ok_or_else(|| vps_err(ERR_COMMAND_FAILED, "no SSH session for this host"))?;
     // Unchanged port: verify where the app already connects (may differ from sshd's port behind NAT).
     if let Err(e) = verify_new_connection(pool, &host, new_port.unwrap_or(host.port), &expected_fp).await {
-        run_privileged_script(host_id, pool, sudo_password, &sshd_rollback_now_script(), None).await?;
+        run_sshd_script(host_id, pool, sudo_password, os, &sshd_rollback_now_script(os), None).await?;
         return Err(e);
     }
-    let cleanup = sshd_cleanup_script(SSHD_ROLLBACK_SCRIPT, [SSHD_DROPIN, SSHD_MAIN_CONFIG]);
-    run_privileged_script(host_id, pool, sudo_password.clone(), &cleanup, None)
+    let cleanup = sshd_cleanup_script(SSHD_ROLLBACK_SCRIPT, [SSHD_DROPIN, SSHD_MAIN_CONFIG], os);
+    run_sshd_script(host_id, pool, sudo_password.clone(), os, &cleanup, None)
         .await
         .map_err(|_| vps_err(ERR_VERIFY_FAILED, "the change was rolled back before it could be kept"))?;
     get_sshd_view(host_id, pool, sudo_password).await
@@ -1770,7 +1941,8 @@ pub async fn revert_sshd_settings(
     pool: &SshPool,
     sudo_password: Option<String>,
 ) -> Result<SshdView, String> {
-    run_privileged_script(host_id, pool, sudo_password.clone(), &sshd_rollback_now_script(), None).await?;
+    let os = probe(host_id, pool, sudo_password.clone()).await?.os_family;
+    run_sshd_script(host_id, pool, sudo_password.clone(), os, &sshd_rollback_now_script(os), None).await?;
     get_sshd_view(host_id, pool, sudo_password).await
 }
 
@@ -1861,6 +2033,7 @@ fn default_linux_account() -> LinuxAccountItem {
         has_sudo: false,
         nopasswd_sudo: false,
         authorized_keys: Vec::new(),
+        keys_file: String::new(),
     }
 }
 
@@ -1874,8 +2047,15 @@ pub fn parse_access_keys_snapshot(raw: &str) -> AccessKeysSnapshot {
         .find_map(|l| l.trim().strip_prefix("TODAY:"))
         .and_then(|v| v.trim().parse().ok());
 
+    // macOS regular users start at 501; Linux scripts omit the line and keep 1000.
+    let min_uid: u32 = raw
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("MIN_UID:"))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(1000);
+
     let push_if_eligible = |acc: LinuxAccountItem, out: &mut Vec<LinuxAccountItem>| {
-        if !acc.username.is_empty() && (acc.uid == 0 || (acc.uid >= 1000 && acc.uid < 65534)) {
+        if !acc.username.is_empty() && (acc.uid == 0 || (acc.uid >= min_uid && acc.uid < 65534)) {
             out.push(acc);
         }
     };
@@ -2043,7 +2223,12 @@ pub async fn get_access_keys_snapshot(
     pool: &SshPool,
     sudo_password: Option<String>,
 ) -> Result<AccessKeysSnapshot, String> {
-    let raw = run_privileged_script(host_id, pool, sudo_password, ACCOUNTS_READ_SCRIPT, None).await?;
+    let os = probe(host_id, pool, sudo_password.clone()).await?.os_family;
+    if os == OsFamily::Windows {
+        return crate::vps_windows::get_windows_accounts(host_id, pool).await;
+    }
+    let script = if os == OsFamily::Macos { crate::vps_macos::MACOS_ACCOUNTS_READ_SCRIPT } else { ACCOUNTS_READ_SCRIPT };
+    let raw = run_privileged_script(host_id, pool, sudo_password, script, None).await?;
     Ok(parse_access_keys_snapshot(&raw))
 }
 
@@ -2182,6 +2367,21 @@ pub fn build_revoke_key_script(username: &str, key_body: &str) -> Result<String,
     )
 }
 
+// Users & Keys can only be edited on Linux; macOS/Windows are read-only.
+fn check_access_writable(os: OsFamily) -> Result<(), String> {
+    if os == OsFamily::Linux {
+        Ok(())
+    } else {
+        Err(vps_err(ERR_UNSUPPORTED, "read_only_os"))
+    }
+}
+
+async fn require_linux(host_id: &str, pool: &SshPool, sudo_password: Option<String>) -> Result<VpsProbe, String> {
+    let p = probe(host_id, pool, sudo_password).await?;
+    check_access_writable(p.os_family)?;
+    Ok(p)
+}
+
 async fn run_access_write(
     host_id: &str,
     pool: &SshPool,
@@ -2202,6 +2402,7 @@ pub async fn create_linux_user(
     sudo: SudoMode,
     password: Option<String>,
 ) -> Result<AccessKeysSnapshot, String> {
+    require_linux(host_id, pool, sudo_password.clone()).await?;
     validate_user_password(&username, password.as_deref(), &sudo)?;
     let script = build_create_user_script(&username, sudo)?;
     let secret = password.filter(|_| sudo == SudoMode::WithPassword).map(|p| format!("{}:{p}\n", username.trim()));
@@ -2215,8 +2416,8 @@ pub async fn set_user_lock(
     username: String,
     lock: bool,
 ) -> Result<AccessKeysSnapshot, String> {
+    let probe = require_linux(host_id, pool, sudo_password.clone()).await?;
     if lock {
-        let probe = probe(host_id, pool, sudo_password.clone()).await?;
         let current = get_access_keys_snapshot(host_id, pool, sudo_password.clone()).await?;
         crate::vps_guard::check_user_change(&probe.context, &current.accounts, &username, crate::vps_guard::UserChange::Lock)?;
     }
@@ -2232,9 +2433,9 @@ pub async fn set_user_sudo(
     sudo: SudoMode,
     password: Option<String>,
 ) -> Result<AccessKeysSnapshot, String> {
+    let probe = require_linux(host_id, pool, sudo_password.clone()).await?;
     validate_user_password(&username, password.as_deref(), &sudo)?;
     if sudo == SudoMode::None {
-        let probe = probe(host_id, pool, sudo_password.clone()).await?;
         let current = get_access_keys_snapshot(host_id, pool, sudo_password.clone()).await?;
         crate::vps_guard::check_user_change(&probe.context, &current.accounts, &username, crate::vps_guard::UserChange::RemoveSudo)?;
     }
@@ -2250,6 +2451,7 @@ pub async fn authorize_ssh_key(
     username: String,
     key_line: String,
 ) -> Result<AccessKeysSnapshot, String> {
+    require_linux(host_id, pool, sudo_password.clone()).await?;
     let line = key_line
         .lines()
         .map(str::trim)
@@ -2267,7 +2469,7 @@ pub async fn revoke_ssh_key(
     username: String,
     key_body: String,
 ) -> Result<AccessKeysSnapshot, String> {
-    let probe = probe(host_id, pool, sudo_password.clone()).await?;
+    let probe = require_linux(host_id, pool, sudo_password.clone()).await?;
     crate::vps_guard::check_key_revoke(&probe.context, &username, &key_body)?;
     let script = build_revoke_key_script(&username, &key_body)?;
     run_access_write(host_id, pool, sudo_password, &script, None).await
@@ -2276,6 +2478,15 @@ pub async fn revoke_ssh_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // cmd.exe and PowerShell have no `true`: with it every Windows change failed its new-connection check and rolled back.
+    #[cfg(unix)]
+    #[test]
+    fn verify_command_is_a_builtin_of_sh_cmd_and_powershell() {
+        assert_eq!(VERIFY_COMMAND, "exit 0");
+        let ok = std::process::Command::new("/bin/sh").args(["-c", VERIFY_COMMAND]).env_clear().status().unwrap();
+        assert!(ok.success());
+    }
 
     // Runs shell snippets locally against fake `sudo`/`id` binaries placed first in PATH.
     #[cfg(unix)]
@@ -2383,6 +2594,26 @@ exec sh -s"#;
         }
     }
 
+    // With cached sudo credentials, plain `sudo -S` skips the password line and `sh -s` would run it as a command.
+    #[cfg(unix)]
+    #[test]
+    fn sudo_with_cached_credentials_never_feeds_the_password_to_the_shell() {
+        let dir = shell::temp_dir();
+        let bin = dir.join("bin");
+        shell::fake_bin(&bin, "id", "echo 1000");
+        // Cached creds: only `-k` makes it read the password line; otherwise it execs the shell on stdin as-is.
+        shell::fake_bin(
+            &bin,
+            "sudo",
+            "case \"$1\" in -n) exit 1;; -k) IFS= read -r _pw;; esac\nexec sh -s",
+        );
+        let pw = "S3cr3t-pw";
+        let stdin = privileged_stdin(Some(pw), None).unwrap();
+        let out = shell::run_local(&build_privileged_command("echo SCRIPT_RAN"), &stdin, &bin, &[], &dir);
+        assert!(out.contains("SCRIPT_RAN"), "{out}");
+        assert!(!out.contains(pw), "password reached the shell: {out}");
+    }
+
     // New-user passwords and key lines must reach the script without being part of the command line.
     #[cfg(unix)]
     #[test]
@@ -2454,6 +2685,7 @@ exec sh -s"#;
             login_grace_time: 60,
             client_alive_interval: 300,
             client_alive_count_max: 2,
+            kbd_interactive_authentication: true,
         }
     }
 
@@ -2583,7 +2815,7 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         shell::fake_bin(&bin, "systemctl", "exit 0");
         let rollback = dir.join("rollback.sh");
         let files = [dir.join("a.conf"), dir.join("b.conf")];
-        let script = sshd_cleanup_script(rollback.to_str().unwrap(), [files[0].to_str().unwrap(), files[1].to_str().unwrap()]);
+        let script = sshd_cleanup_script(rollback.to_str().unwrap(), [files[0].to_str().unwrap(), files[1].to_str().unwrap()], OsFamily::Linux);
         let out = shell::run_local(&script, b"", &bin, &[], &dir);
         assert!(out.contains("SSHBOX_ALREADY_ROLLED_BACK"), "{out}");
         std::fs::write(&rollback, "").unwrap();
@@ -2736,10 +2968,171 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         assert!(!r.dir.join("00-sshbox.conf.sshbox.absent").exists());
     }
 
+    // macOS: turning off only PasswordAuthentication still allows password login via keyboard-interactive.
+    #[test]
+    fn parses_kbd_interactive_from_both_names() {
+        assert!(!parse_sshd_t("kbdinteractiveauthentication no\n").kbd_interactive_authentication);
+        assert!(!parse_sshd_t("challengeresponseauthentication no\n").kbd_interactive_authentication);
+        assert!(parse_sshd_t("port 22\n").kbd_interactive_authentication);
+    }
+
+    // An uncommented ChallengeResponseAuthentication above the Match block is the same directive as KbdInteractiveAuthentication
+    // and sshd keeps the first value it reads, so writing the kbd line must replace it in place.
+    #[test]
+    fn kbd_write_replaces_the_challenge_response_alias() {
+        let base = "Port 22\nChallengeResponseAuthentication yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\nMatch Group administrators\n  ChallengeResponseAuthentication yes\n";
+        let out = render_sshd_config(base, &[("kbdinteractiveauthentication", Some("KbdInteractiveAuthentication no".into()))]);
+        let head = &out[..out.find("Match").unwrap()];
+        assert_eq!(head.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>(), ["Port 22", "KbdInteractiveAuthentication no", "PasswordAuthentication yes"]);
+        assert!(out.ends_with("Match Group administrators\n  ChallengeResponseAuthentication yes\n"), "{out:?}");
+        // Linux never writes the kbd directive, so its alias line stays untouched.
+        let out = render_sshd_config(base, &[("passwordauthentication", Some("PasswordAuthentication no".into()))]);
+        assert!(out.starts_with("Port 22\nChallengeResponseAuthentication yes\nPasswordAuthentication no\nKbdInteractiveAuthentication yes\n"), "{out:?}");
+    }
+
+    // Linux must never get an extra KbdInteractiveAuthentication line written behind the user's back.
+    #[test]
+    fn linux_password_toggle_does_not_touch_kbd() {
+        let cur = SshdSettings::default();
+        let want = SshdSettings { password_authentication: false, ..cur.clone() };
+        let d = changed_directives(&cur, &want);
+        assert_eq!(d, vec![("passwordauthentication", Some("PasswordAuthentication no".to_string()))]);
+    }
+
+    fn macos_probe(include: bool) -> VpsProbe {
+        let raw = format!("{PROBE_MAC}{}Port 22\n", if include { "Include /etc/ssh/sshd_config.d/*\n" } else { "" });
+        parse_probe_output(&raw, key_auth()).unwrap()
+    }
+
+    // Without a drop-in folder macOS would need main-file edits, which we do not offer.
+    #[test]
+    fn macos_support_full_with_dropin_readonly_without() {
+        let s = macos_probe(true).support;
+        assert_eq!(s.ssh.level, SupportLevel::Full);
+        assert!(!s.ssh_rows.port && s.password_coupled);
+        let s = macos_probe(false).support;
+        assert_eq!((s.ssh.level, s.ssh.reason.as_deref()), (SupportLevel::ReadOnly, Some("macos_no_dropin")));
+    }
+
+    // The Port row is hidden on macOS, so a port change must be refused, not written.
+    #[test]
+    fn macos_plan_rejects_port_change() {
+        let view = SshdView { write_target: WriteTarget::DropIn, ..Default::default() };
+        let moved = SshdSettings { port: 2222, ..SshdSettings::default() };
+        let e = plan_sshd_apply(&macos_probe(true), &view, &moved).unwrap_err();
+        assert!(e.starts_with("UNSUPPORTED: hidden_setting"), "{e}");
+    }
+
+    #[cfg(unix)]
+    struct MacRun {
+        out: String,
+        log: String,
+        file: std::path::PathBuf,
+        plist: std::path::PathBuf,
+        rollback: std::path::PathBuf,
+        bin: std::path::PathBuf,
+        dir: std::path::PathBuf,
+    }
+
+    // Runs the macOS apply script locally with fake sshd/launchctl; `launchctl print` exits FAKE_PENDING (default 1).
+    #[cfg(unix)]
+    fn run_mac_apply(existing: Option<&str>, envs: &[(&str, &str)]) -> MacRun {
+        run_mac_apply_at("rb.plist", existing, envs)
+    }
+
+    #[cfg(unix)]
+    fn run_mac_apply_at(plist_rel: &str, existing: Option<&str>, envs: &[(&str, &str)]) -> MacRun {
+        let dir = shell::temp_dir();
+        let bin = dir.join("bin");
+        let log = dir.join("calls.log");
+        shell::fake_bin(&bin, "sshd", r#"echo "sshd $*" >> "$FAKE_LOG"; [ "$1" = "-t" ] && exit "${FAKE_SSHD_T:-0}"; exit 0"#);
+        shell::fake_bin(&bin, "launchctl", r#"[ "$1" = print ] && exit "${FAKE_PENDING:-1}"; echo "launchctl $*" >> "$FAKE_LOG"; [ "$1" = bootstrap ] && exit "${FAKE_BOOTSTRAP:-0}"; exit 0"#);
+        let file = dir.join("00-sshbox.conf");
+        if let Some(c) = existing {
+            std::fs::write(&file, c).unwrap();
+        }
+        let secret = dir.join("secret");
+        std::fs::write(&secret, "PasswordAuthentication no\n").unwrap();
+        let (plist, rollback) = (dir.join(plist_rel), dir.join("sshbox-rollback.sh"));
+        let script = crate::vps_macos::build_sshd_apply_script_macos(
+            file.to_str().unwrap(), rollback.to_str().unwrap(), plist.to_str().unwrap());
+        let mut all = vec![("FAKE_LOG", log.to_str().unwrap()), ("SSHBOX_SECRET_FILE", secret.to_str().unwrap())];
+        all.extend_from_slice(envs);
+        let out = shell::run_local(&script, b"", &bin, &all, &dir);
+        let log = std::fs::read_to_string(&log).unwrap_or_default();
+        MacRun { out, log, file, plist, rollback, bin, dir }
+    }
+
+    // The launchd job is the only thing that can undo a bad change after the SSH session dies.
+    #[cfg(unix)]
+    #[test]
+    fn macos_apply_backs_up_writes_and_arms_launchd() {
+        let r = run_mac_apply(Some("Port 22\n"), &[]);
+        assert!(r.out.contains("NOW:") && r.out.contains("ROLLBACK_AT:"), "{}", r.out);
+        assert!(r.log.contains(&format!("launchctl bootstrap system {}", r.plist.display())), "{}", r.log);
+        assert!(std::fs::read_to_string(&r.plist).unwrap().contains("sleep 60"));
+        assert_eq!(std::fs::read_to_string(&r.file).unwrap(), "PasswordAuthentication no\n");
+        assert_eq!(std::fs::read_to_string(r.dir.join("00-sshbox.conf.sshbox.bak")).unwrap(), "Port 22\n");
+        assert!(!r.log.contains("reload") && !r.log.contains("kill"), "{}", r.log);
+    }
+
+    // A config sshd rejects must be undone before any timer exists.
+    #[cfg(unix)]
+    #[test]
+    fn macos_apply_invalid_config_restores_and_never_arms() {
+        let r = run_mac_apply(Some("Port 22\n"), &[("FAKE_SSHD_T", "1")]);
+        assert!(r.out.contains("SSHBOX_SSHD_INVALID"), "{}", r.out);
+        assert_eq!(std::fs::read_to_string(&r.file).unwrap(), "Port 22\n");
+        assert!(!r.log.contains("launchctl"), "{}", r.log);
+    }
+
+    // If the timer cannot be armed (plist unwritable or bootstrap fails), the new config must not stay.
+    #[cfg(unix)]
+    #[test]
+    fn macos_apply_restores_when_timer_cannot_be_armed() {
+        let cases = [("no-such-dir/rb.plist", "0"), ("rb.plist", "1")];
+        for (plist, bootstrap) in cases {
+            let r = run_mac_apply_at(plist, Some("Port 22\n"), &[("FAKE_BOOTSTRAP", bootstrap)]);
+            assert_eq!(std::fs::read_to_string(&r.file).unwrap(), "Port 22\n", "{plist}: {}", r.out);
+            assert!(!r.plist.exists() && !r.rollback.exists(), "{plist}");
+            assert!(!r.out.contains("ROLLBACK_AT:"), "{plist}: {}", r.out);
+        }
+    }
+
+    // Rolling back must restore the file and leave no plist that would re-fire at the next boot.
+    #[cfg(unix)]
+    #[test]
+    fn macos_rollback_restores_and_removes_plist() {
+        let r = run_mac_apply(Some("Port 22\n"), &[]);
+        let log = r.dir.join("calls.log");
+        shell::run_local(&format!("/bin/sh {}", r.rollback.display()), b"", &r.bin, &[("FAKE_LOG", log.to_str().unwrap())], &r.dir);
+        let log = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(std::fs::read_to_string(&r.file).unwrap(), "Port 22\n");
+        assert!(!r.plist.exists() && !r.rollback.exists());
+        assert!(log.trim_end().ends_with("launchctl bootout system/com.sshbox.rollback"), "{log}");
+    }
+
+    // bootout kills the process running the script, so anything after it would never run.
+    #[test]
+    fn macos_rollback_script_ends_with_bootout() {
+        let s = crate::vps_macos::build_sshd_rollback_script_macos("/f", "/p.plist");
+        assert!(s.trim_end().ends_with("launchctl bootout system/com.sshbox.rollback"), "{s}");
+    }
+
+    // A second apply while one is unverified would overwrite the only good backup.
+    #[cfg(unix)]
+    #[test]
+    fn macos_apply_refuses_while_rollback_pending() {
+        let r = run_mac_apply(Some("Port 22\n"), &[("FAKE_PENDING", "0")]);
+        assert!(r.out.contains("SSHBOX_ROLLBACK_PENDING"), "{}", r.out);
+        assert_eq!(std::fs::read_to_string(&r.file).unwrap(), "Port 22\n");
+    }
+
     fn probe_for(ctx_user: &str, has_systemd: bool) -> VpsProbe {
         let mut p = parse_probe_output(PROBE_UBUNTU, key_auth()).unwrap();
         p.context.login_user = ctx_user.to_string();
         p.has_systemd = has_systemd;
+        p.support = compute_support(&p);
         p
     }
 
@@ -2815,10 +3208,94 @@ SSH_CONNECTION:203.0.113.7 51000 198.51.100.2 2222\nSYSTEMD:1\nSSH_SOCKET:active
         assert_eq!(p.context.server_port, 22);
     }
 
+    // FreeBSD and friends must be refused: only Linux and macOS have probes.
     #[test]
-    fn probe_rejects_non_linux() {
-        let raw = PROBE_UBUNTU.replace("UNAME:Linux", "UNAME:Darwin");
-        assert!(parse_probe_output(&raw, key_auth()).unwrap_err().starts_with("UNSUPPORTED"));
+    fn probe_rejects_unknown_unix() {
+        let raw = PROBE_UBUNTU.replace("UNAME:Linux", "UNAME:FreeBSD");
+        assert!(parse_probe_output(&raw, key_auth()).unwrap_err().starts_with("UNSUPPORTED: unsupported_os"));
+    }
+
+    // macOS users have UID 501+; the parser must keep them, treat the admin group as sudo, and still drop _service accounts.
+    #[test]
+    fn macos_accounts_parse_admin_as_sudo() {
+        let raw = "MIN_UID:501\n---SUDOERS---\n%admin ALL = (ALL) ALL\nroot ALL = (ALL) ALL\n\
+---ACCOUNT---\nPASSWD:me:*:501:20::/Users/me:/bin/zsh\nGROUPS:staff admin\nSHADOW:\n---AUTHORIZED_KEYS---\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHkeyone me@mac\n\
+---ACCOUNT---\nPASSWD:guest:*:502:20::/Users/guest:/bin/zsh\nGROUPS:staff\nSHADOW:\n---AUTHORIZED_KEYS---\n\
+---ACCOUNT---\nPASSWD:_spotlight:*:89:89::/var/empty:/usr/bin/false\nGROUPS:\nSHADOW:\n---AUTHORIZED_KEYS---\n";
+        let s = parse_access_keys_snapshot(raw);
+        let by = |n: &str| s.accounts.iter().find(|a| a.username == n).unwrap();
+        assert!(by("me").has_sudo && !by("guest").has_sudo);
+        assert_eq!(by("me").authorized_keys.len(), 1);
+        assert!(s.accounts.iter().all(|a| a.username != "_spotlight"));
+    }
+
+    // Without MIN_UID (Linux) a UID 501 system-range account must stay hidden.
+    #[test]
+    fn linux_snapshot_still_hides_uid_501() {
+        let raw = "---SUDOERS---\n---ACCOUNT---\nPASSWD:svc:x:501:501::/home/svc:/bin/sh\nGROUPS:svc\nSHADOW:\n---AUTHORIZED_KEYS---\n";
+        assert!(parse_access_keys_snapshot(raw).accounts.is_empty());
+    }
+
+    // Writes would corrupt a macOS/Windows host; every non-Linux OS must be refused with the code the UI translates.
+    #[test]
+    fn macos_access_writes_are_refused() {
+        for os in [OsFamily::Macos, OsFamily::Windows] {
+            assert_eq!(check_access_writable(os).unwrap_err(), "UNSUPPORTED: read_only_os");
+        }
+        assert!(check_access_writable(OsFamily::Linux).is_ok());
+    }
+
+    // The script is what feeds the shared parser; it must emit the agreed sections and skip service accounts.
+    #[test]
+    fn macos_accounts_script_emits_parser_sections() {
+        let s = crate::vps_macos::MACOS_ACCOUNTS_READ_SCRIPT;
+        for m in ["MIN_UID:501", "---SUDOERS---", "---ACCOUNT---", "PASSWD:", "GROUPS:", "SHADOW:", "---AUTHORIZED_KEYS---", "dscl", "_*)"] {
+            assert!(s.contains(m), "{m}");
+        }
+    }
+
+    // dscl returns two space-separated homes for root; the PASSWD home must be the single real one so keys are found.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_script_reports_root_home_exactly() {
+        let out = std::process::Command::new("sh").arg("-c").arg(crate::vps_macos::MACOS_ACCOUNTS_READ_SCRIPT).output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        let line = text.lines().find(|l| l.starts_with("PASSWD:root:")).expect("root account line");
+        assert_eq!(line.split(':').nth(6), Some("/var/root"), "{line}");
+    }
+
+    const PROBE_MAC: &str = "UNAME:Darwin\nUSER:me\nUID:501\nSUDO:none\nSSH_CONNECTION:203.0.113.7 51000 198.51.100.2 22\nSYSTEMD:0\nFW:none\nMAC_VERSION:15.1\n---SSHD_MAIN---\n";
+
+    // The drop-in decision on macOS decides which file we write; wrong means edits that never take effect.
+    #[test]
+    fn macos_probe_parses_version_and_dropin() {
+        let raw = format!("{PROBE_MAC}Include /etc/ssh/sshd_config.d/*\nPort 22\n");
+        let p = parse_probe_output(&raw, key_auth()).unwrap();
+        assert_eq!(p.os_family, OsFamily::Macos);
+        assert_eq!((p.os_id.as_str(), p.os_version.as_str()), ("macOS", "15.1"));
+        assert!(p.caps.sshd_dropin);
+    }
+
+    #[test]
+    fn macos_probe_without_include_has_no_dropin() {
+        let p = parse_probe_output(&format!("{PROBE_MAC}Port 22\n"), key_auth()).unwrap();
+        assert!(!p.caps.sshd_dropin);
+    }
+
+    #[test]
+    fn macos_probe_parses_ipv6_ssh_connection() {
+        let raw = PROBE_MAC.replace("203.0.113.7 51000 198.51.100.2 22", "2001:db8::7 51000 2001:db8::2 22");
+        let p = parse_probe_output(&raw, key_auth()).unwrap();
+        assert_eq!((p.context.client_ip.as_str(), p.context.server_ip.as_str(), p.context.server_port), ("2001:db8::7", "2001:db8::2", 22));
+    }
+
+    // Any tab the OS cannot fully write must block the apply, with the reason the UI shows.
+    #[test]
+    fn preflight_blocks_when_ssh_not_full() {
+        let view = SshdView { write_target: WriteTarget::DropIn, ..Default::default() };
+        let mut p = probe_for("deploy", true);
+        p.support.ssh = crate::vps_support::TabSupport { level: SupportLevel::ReadOnly, reason: Some("no_systemd".into()) };
+        assert_eq!(apply_preflight(&p, &view, &SshdSettings::default()), Err("UNSUPPORTED: no_systemd".to_string()));
     }
 
     #[test]
@@ -2832,6 +3309,25 @@ SSH_CONNECTION:203.0.113.7 51000 198.51.100.2 2222\nSYSTEMD:1\nSSH_SOCKET:active
     fn probe_without_ssh_connection_is_unsupported() {
         let raw = PROBE_UBUNTU.replace("SSH_CONNECTION:203.0.113.7 51000 198.51.100.2 2222", "SSH_CONNECTION:");
         assert!(parse_probe_output(&raw, key_auth()).unwrap_err().starts_with("UNSUPPORTED"));
+    }
+
+    // With cached sudo credentials plain `sudo -S` succeeds without reading the password, so a wrong one read as "unlocked".
+    #[cfg(unix)]
+    #[test]
+    fn probe_wrong_password_with_cached_sudo_credentials_is_password_bad() {
+        let dir = shell::temp_dir();
+        let bin = dir.join("bin");
+        shell::fake_bin(&bin, "id", "echo 1000");
+        // Cached credentials: only `-k` makes this sudo read and check the password line.
+        shell::fake_bin(&bin, "sudo", "case \"$1\" in -n) exit 1;; -k) IFS= read -r p; [ \"$p\" = right ];; *) exit 0;; esac");
+        let run = |pw: &str| {
+            let stdin = privileged_stdin(Some(pw), None).unwrap();
+            shell::run_local(PROBE_SCRIPT, &stdin, &bin, &[("SSH_CONNECTION", "203.0.113.7 51000 198.51.100.2 22")], &dir)
+        };
+        let out = run("wrong");
+        assert!(out.contains("SUDO:password_bad"), "{out}");
+        let out = run("right");
+        assert!(out.contains("SUDO:password_ok"), "{out}");
     }
 
     // The old probe nested the password in sh -c '…', so "a;touch INJECTED" ran a command.
@@ -3057,7 +3553,7 @@ tcp        0      0 127.0.0.1:6379          0.0.0.0:*               LISTEN      
             from_source: from.to_string(),
             v6,
             comment: String::new(),
-            raw_spec: format!("{to} {action} IN {from}"),
+            raw_spec: format!("{to} {action} IN {from}"), effective: true,
         }
     }
 

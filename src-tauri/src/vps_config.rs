@@ -212,6 +212,9 @@ pub struct LinuxAccountItem {
     // Windows only: the file the keys were read from; empty elsewhere.
     #[serde(default)]
     pub keys_file: String,
+    // Windows only: sshd_config does not say for sure which file sshd reads (keys then empty, not "none").
+    #[serde(default)]
+    pub keys_file_unknown: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -1417,7 +1420,7 @@ fn normalize_permit_root_login(val: &str) -> String {
     }
 }
 
-fn split_sshd_directive(line: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_sshd_directive(line: &str) -> Option<(&str, &str)> {
     let without_comment = line.split('#').next().unwrap_or("").trim();
     if without_comment.is_empty() {
         return None;
@@ -2051,6 +2054,7 @@ fn default_linux_account() -> LinuxAccountItem {
         nopasswd_sudo: false,
         authorized_keys: Vec::new(),
         keys_file: String::new(),
+        keys_file_unknown: false,
     }
 }
 

@@ -207,6 +207,7 @@ export interface AppI18nStrings {
   vpsUsersUnlock: string;
   vpsUsersKeysTitle: string;
   vpsUsersNoKeys: string;
+  vpsUsersKeysFileUnknown: string;
   vpsUsersRevoke: string;
   vpsUsersRevokeConfirm: string;
   vpsUsersKeyInUse: string;
@@ -554,6 +555,7 @@ const VI_STRINGS: AppI18nStrings = {
   vpsUsersUnlock: "Mở khoá",
   vpsUsersKeysTitle: "SSH key được phép",
   vpsUsersNoKeys: "Chưa có key nào.",
+  vpsUsersKeysFileUnknown: "Không xác định được file khoá của tài khoản này: sshd_config có khối Match mà ứng dụng không xét được, hoặc không đọc được file.",
   vpsUsersRevoke: "Thu hồi",
   vpsUsersRevokeConfirm: "Thu hồi key",
   vpsUsersKeyInUse: "Ứng dụng đang dùng",
@@ -861,6 +863,7 @@ const EN_STRINGS: AppI18nStrings = {
   vpsUsersUnlock: "Unlock",
   vpsUsersKeysTitle: "Authorized SSH keys",
   vpsUsersNoKeys: "No keys yet.",
+  vpsUsersKeysFileUnknown: "The keys file of this account cannot be determined: sshd_config has a Match block the app cannot evaluate, or the file could not be read.",
   vpsUsersRevoke: "Revoke",
   vpsUsersRevokeConfirm: "Revoke key",
   vpsUsersKeyInUse: "Used by this app",

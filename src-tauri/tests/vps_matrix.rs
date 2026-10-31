@@ -541,6 +541,11 @@ async fn w4_users_keys(pool: &SshPool, h: &HostEntry) -> Result<String, String> 
     ensure(me.authorized_keys.iter().any(|k| k.public_key_body == body), "vm key not listed".into())?;
     let std_acc = find("sshbox-std")?;
     ensure(!std_acc.has_sudo && !std_acc.locked, format!("sshbox-std sudo {} locked {}", std_acc.has_sudo, std_acc.locked))?;
+    // Read from the Match User block (sshd -T hangs for any other user), and a disabled admin from Match Group administrators.
+    let std_keyed = std_acc.authorized_keys.iter().any(|k| k.public_key_body == body);
+    ensure(std_acc.keys_file == r"C:\ProgramData\ssh\sshbox-std_keys" && std_keyed, format!("sshbox-std file {} key {std_keyed}", std_acc.keys_file))?;
+    let admin = find("Administrator")?;
+    ensure(admin.keys_file == r"C:\ProgramData\ssh\administrators_authorized_keys", format!("disabled Administrator file {}", admin.keys_file))?;
     for b in ["Administrator", "Guest"] {
         ensure(find(b)?.locked, format!("{b} not shown disabled"))?;
     }

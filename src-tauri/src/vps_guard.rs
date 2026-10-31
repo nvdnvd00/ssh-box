@@ -328,6 +328,7 @@ mod tests {
             nopasswd_sudo: false,
             authorized_keys: vec![],
             keys_file: String::new(),
+            keys_file_unknown: false,
         }
     }
     fn blocked(r: Result<(), String>) -> bool {

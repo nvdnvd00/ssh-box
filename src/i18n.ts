@@ -129,6 +129,7 @@ export interface AppI18nStrings {
   vpsErrUnsupported: string;
   vpsLockoutReasons: Record<string, string>;
   vpsUnsupportedReasons: Record<string, string>;
+  vpsCommandReasons: Record<string, string>;
   vpsSshStatusTitle: string;
   vpsSshCheckPassword: string;
   vpsSshCheckRoot: string;
@@ -381,6 +382,9 @@ const VI_STRINGS: AppI18nStrings = {
   vpsErrCommandFailed: "Lệnh trên máy chủ bị lỗi:",
   vpsErrVerifyFailed: "Không mở được kết nối mới nên thay đổi đã được hoàn tác:",
   vpsErrUnsupported: "Máy chủ không hỗ trợ:",
+  vpsCommandReasons: {
+    no_answer: "Máy chủ không trả lời trong 120 giây. Nếu lúc đó đang áp dụng thay đổi cài đặt SSH, thay đổi ấy sẽ tự hoàn tác trong vòng 60 giây.",
+  },
   vpsLockoutReasons: {
     both_auth_off: "Không thể tắt cả đăng nhập bằng mật khẩu lẫn bằng SSH key.",
     no_sessions: "MaxSessions 0 từ chối mọi phiên làm việc, kể cả của ứng dụng.",
@@ -682,6 +686,9 @@ const EN_STRINGS: AppI18nStrings = {
   vpsErrCommandFailed: "The command failed on the server:",
   vpsErrVerifyFailed: "A new connection could not be opened, so the change was rolled back:",
   vpsErrUnsupported: "Not supported on this server:",
+  vpsCommandReasons: {
+    no_answer: "The server did not answer within 120 seconds. If an SSH settings change was being applied, it rolls back by itself within 60 seconds.",
+  },
   vpsLockoutReasons: {
     both_auth_off: "Password and SSH key login cannot both be turned off.",
     no_sessions: "MaxSessions 0 refuses every session, including the app's.",

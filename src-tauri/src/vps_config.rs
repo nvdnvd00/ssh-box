@@ -1226,6 +1226,15 @@ pub(crate) fn find_remote_host(host_id: &str) -> Result<crate::host_store::HostE
         .ok_or_else(|| vps_err(ERR_COMMAND_FAILED, format!("unknown host {host_id}")))
 }
 
+// The longest script (sshd apply with its 15s Windows sshd -t bound, restarts and rollback) needs well under this.
+// The UI text for no_answer names this value.
+pub(crate) const VPS_EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+// A hung remote command must not hang the app; the sshd rollback timers run on the host and do not need us.
+pub(crate) async fn bounded<T>(run: impl std::future::Future<Output = Result<T, String>>, limit: std::time::Duration) -> Result<T, String> {
+    tokio::time::timeout(limit, run).await.unwrap_or_else(|_| Err(vps_err(ERR_COMMAND_FAILED, "no_answer")))
+}
+
 // Write scripts start with `set -eu` themselves; read-only scripts may tolerate failing probes.
 pub async fn run_privileged_script(
     host_id: &str,
@@ -1236,9 +1245,7 @@ pub async fn run_privileged_script(
 ) -> Result<String, String> {
     let host = find_remote_host(host_id)?;
     let stdin = privileged_stdin(sudo_password.as_deref(), secret)?;
-    let out = pool
-        .exec_bytes_on_host(&host, &build_privileged_command(script), Some(&stdin))
-        .await?;
+    let out = bounded(pool.exec_bytes_on_host(&host, &build_privileged_command(script), Some(&stdin)), VPS_EXEC_TIMEOUT).await?;
     classify_privileged_output(&String::from_utf8_lossy(&out))
 }
 
@@ -1348,16 +1355,16 @@ pub async fn probe(
 ) -> Result<VpsProbe, String> {
     let host = find_remote_host(host_id)?;
     pool.get_or_connect(&host, None).await?;
-    let uname = pool
-        .exec_bytes_on_host(&host, "uname -s", None)
-        .await
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o).trim().to_string());
+    // A timeout says nothing about the OS: report it instead of trying the Windows path.
+    let uname = match bounded(pool.exec_bytes_on_host(&host, "uname -s", None), VPS_EXEC_TIMEOUT).await {
+        Err(e) if e.starts_with(ERR_COMMAND_FAILED) => return Err(e),
+        r => r.ok().map(|o| String::from_utf8_lossy(&o).trim().to_string()),
+    };
     if unix_family(uname.as_deref()).is_none() {
         return crate::vps_windows::probe_windows(&host, pool).await;
     }
     let stdin = privileged_stdin(sudo_password.as_deref(), None)?;
-    let out = pool.exec_bytes_on_host(&host, PROBE_SCRIPT, Some(&stdin)).await?;
+    let out = bounded(pool.exec_bytes_on_host(&host, PROBE_SCRIPT, Some(&stdin)), VPS_EXEC_TIMEOUT).await?;
     let auth = pool
         .session_auth(host_id)
         .await

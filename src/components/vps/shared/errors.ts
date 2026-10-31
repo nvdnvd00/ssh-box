@@ -43,7 +43,7 @@ export function vpsErrorText(t: AppI18nStrings, err: unknown): string {
     case "UNSUPPORTED":
       return t.vpsUnsupportedReasons[detail] ?? `${t.vpsErrUnsupported} ${detail}`;
     case "COMMAND_FAILED":
-      return `${t.vpsErrCommandFailed} ${detail}`;
+      return t.vpsCommandReasons[detail] ?? `${t.vpsErrCommandFailed} ${detail}`;
     case "VERIFY_FAILED":
       return `${t.vpsErrVerifyFailed} ${detail}`;
     case "TIMEOUT":

@@ -5,6 +5,7 @@ use crate::vps_config::{
     compute_socket_exposure_windows, is_anywhere_source, is_public_bind_address, vps_err, AccessKeysSnapshot,
     ConnectionContext, FirewallEngine, FirewallRuleItem, FirewallSnapshot, LinuxAccountItem, ListeningSocketItem,
     PrivilegeLevel, SshdView, VpsProbe, WriteTarget, ERR_COMMAND_FAILED, ERR_UNSUPPORTED, SSHD_PART, VERIFY_COMMAND,
+    bounded, VPS_EXEC_TIMEOUT,
 };
 use crate::vps_support::{compute_support, OsCaps, OsFamily, VpsSupport};
 use base64::Engine;
@@ -37,22 +38,10 @@ pub fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-// The longest script (sshd apply with its 15s sshd -t bound, restarts and rollback) needs well under this.
-const WINDOWS_EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-
-// Seen once on the VM matrix: the bootstrap sat on stdin for 10+ minutes before running anything. Never wait forever.
-async fn bounded<T>(run: impl std::future::Future<Output = Result<T, String>>, limit: std::time::Duration) -> Result<T, String> {
-    tokio::time::timeout(limit, run).await.unwrap_or_else(|_| {
-        Err(vps_err(
-            ERR_COMMAND_FAILED,
-            format!("the Windows host did not answer within {}s; if a change was being applied it is rolled back automatically within 60s", limit.as_secs()),
-        ))
-    })
-}
-
+// Seen once on the VM matrix: the bootstrap sat on stdin for 10+ minutes before running anything.
 async fn exec_windows(pool: &SshPool, host: &HostEntry, script: &str, secret: Option<&str>) -> Result<Vec<u8>, String> {
     let stdin = powershell_stdin(script, secret);
-    bounded(pool.exec_bytes_on_host(host, &build_powershell_command(), Some(&stdin)), WINDOWS_EXEC_TIMEOUT).await
+    bounded(pool.exec_bytes_on_host(host, &build_powershell_command(), Some(&stdin)), VPS_EXEC_TIMEOUT).await
 }
 
 pub async fn run_windows_script(
@@ -735,8 +724,9 @@ pub async fn probe_windows(host: &HostEntry, pool: &SshPool) -> Result<VpsProbe,
     let out = match exec_windows(pool, host, WINDOWS_PROBE_SCRIPT, None).await {
         Ok(out) => out,
         Err(e) => {
+            // A timeout keeps its message anyway: no need to wait for the check.
             let check = pool.exec_bytes_on_host(host, VERIFY_COMMAND, None);
-            let runs = bounded(check, std::time::Duration::from_secs(15)).await.is_ok();
+            let runs = e.starts_with(ERR_COMMAND_FAILED) || bounded(check, std::time::Duration::from_secs(15)).await.is_ok();
             return Err(exec_failure(&e, runs));
         }
     };
@@ -877,8 +867,8 @@ mod tests {
     #[tokio::test]
     async fn windows_exec_gives_up_on_a_silent_host() {
         let e = bounded(std::future::pending::<Result<Vec<u8>, String>>(), std::time::Duration::from_millis(20)).await.unwrap_err();
-        // The user must know a half-applied sshd change is not left behind: the armed task reverts it.
-        assert_eq!(e, "COMMAND_FAILED: the Windows host did not answer within 0s; if a change was being applied it is rolled back automatically within 60s");
+        // A reason id, so the UI can say in the user's language that a half-applied sshd change reverts itself.
+        assert_eq!(e, "COMMAND_FAILED: no_answer");
         assert_eq!(exec_failure(&e, true), e);
     }
 

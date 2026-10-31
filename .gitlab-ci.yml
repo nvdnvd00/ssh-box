@@ -30,12 +30,9 @@ build-windows-installer:
     - rustup target add x86_64-pc-windows-msvc
     - cargo-xwin xwin cache windows-msvc-sysroot --cache-dir "$CI_PROJECT_DIR/.xwin-cache"
     - npm ci --cache "$CI_PROJECT_DIR/.npm" --prefer-offline
-    # Every main build is a new release: version and update endpoint are injected here, not in tauri.conf.json.
+    # Release version comes directly from package.json; update endpoint is injected here.
     # Needs CI variables: TAURI_SIGNING_PRIVATE_KEY, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (IAM user gitlab-ssh-box-release: PutObject on ssh-box/* only).
-    # Version = package.json version + pipeline iid as semver build metadata (0.2.0+24); Windows file version becomes 0.2.0.24.
-    # S3 folder uses "." instead of "+", which S3 can read back as a space in URL paths.
-    - VERSION="$(node -p 'require("./package.json").version')+${CI_PIPELINE_IID}"
-    - RELEASE_DIR="$(echo "$VERSION" | tr + .)"
+    - VERSION="$(node -p 'require("./package.json").version')"
     - UPDATE_URL="https://${S3_BUCKET}.s3.${AWS_REGION}.amazonaws.com/ssh-box"
     - export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
     - XWIN_CROSS_COMPILER=clang XWIN_CACHE_DIR="$CI_PROJECT_DIR/.xwin-cache" npx tauri build --verbose --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis --config "{\"version\":\"$VERSION\",\"bundle\":{\"createUpdaterArtifacts\":true},\"plugins\":{\"updater\":{\"endpoints\":[\"$UPDATE_URL/latest.json\"]}}}"
@@ -44,9 +41,9 @@ build-windows-installer:
     - ls -lh artifacts/windows/
     - |
       SETUP_EXE="$(ls src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe)"
-      node -e 'const fs=require("fs");const [version,url,sig]=process.argv.slice(1);fs.writeFileSync("latest.json",JSON.stringify({version,pub_date:new Date().toISOString(),platforms:{"windows-x86_64":{signature:fs.readFileSync(sig,"utf8"),url}}},null,2))' "$VERSION" "$UPDATE_URL/$RELEASE_DIR/ssh-box-setup.exe" "$SETUP_EXE.sig"
+      node -e 'const fs=require("fs");const [version,url,sig]=process.argv.slice(1);fs.writeFileSync("latest.json",JSON.stringify({version,pub_date:new Date().toISOString(),platforms:{"windows-x86_64":{signature:fs.readFileSync(sig,"utf8"),url}}},null,2))' "$VERSION" "$UPDATE_URL/$VERSION/ssh-box-setup.exe" "$SETUP_EXE.sig"
       s3_put() { curl -fsS --aws-sigv4 "aws:amz:${AWS_REGION}:s3" --user "${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}" -H "x-amz-content-sha256: UNSIGNED-PAYLOAD" -T "$1" "$2"; }
-      s3_put "$SETUP_EXE" "$UPDATE_URL/$RELEASE_DIR/ssh-box-setup.exe"
+      s3_put "$SETUP_EXE" "$UPDATE_URL/$VERSION/ssh-box-setup.exe"
       s3_put latest.json "$UPDATE_URL/latest.json"
       cat latest.json
   artifacts:

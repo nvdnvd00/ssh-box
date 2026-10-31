@@ -741,16 +741,16 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                     ? m.cores.slice(0, 8)
                     : [
                         {
-                          coreId: "cpu0",
-                          usagePct: m?.cpuPercent ?? 0,
-                          userPct: 0,
-                          systemPct: 0,
-                          iowaitPct: 0,
+                          id: "cpu0",
+                          usage: m?.cpuPercent ?? 0,
+                          user: 0,
+                          system: 0,
+                          idle: 0,
                         },
                       ]
                   ).map((core) => (
-                    <div key={core.coreId} className="space-y-1">
-                      <SegmentedCoreBar percent={core.usagePct} />
+                    <div key={core.id} className="space-y-1">
+                      <SegmentedCoreBar percent={core.usage} />
                     </div>
                   ))}
                 </div>

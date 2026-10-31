@@ -1710,6 +1710,8 @@ sshbox_restore; echo SSHBOX_SEMANAGE_FAILED; exit 6; fi\n"
 {restore}R={r}
 if systemctl is-active --quiet sshbox-rollback.timer 2>/dev/null; then echo SSHBOX_ROLLBACK_PENDING; exit 3; fi
 if [ -e "$F" ]; then cp -p "$F" "$F.sshbox.bak"; rm -f "$F.sshbox.absent"; else : > "$F.sshbox.absent"; rm -f "$F.sshbox.bak"; fi
+# Until the rollback is armed, any failure puts the old file back.
+trap 'rc=$?; [ "$rc" -eq 0 ] || sshbox_restore; exit "$rc"' EXIT
 T=$(mktemp)
 cat "$SSHBOX_SECRET_FILE" > "$T"
 install -m 644 "$T" "$F"
@@ -2836,6 +2838,10 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         dir: std::path::PathBuf,
     }
 
+    // A failing chmod stands in for a full disk while the rollback script is written.
+    #[cfg(unix)]
+    const FAKE_CHMOD: &str = r#"[ -n "${FAKE_CHMOD_FAIL:-}" ] && exit 1; exec /bin/chmod "$@""#;
+
     #[cfg(unix)]
     fn plan(socket: bool, selinux: bool, new_port: Option<u16>, engine: FirewallEngine) -> ReloadPlan {
         ReloadPlan { ssh_socket_active: socket, selinux_enforcing: selinux, port: new_port.unwrap_or(2222), new_port, firewall_engine: engine }
@@ -2856,6 +2862,7 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         logger("semanage", "");
         logger("ufw", r#"[ "$1" = "status" ] && echo 'Status: active'"#);
         logger("firewall-cmd", r#"[ "$1" = "--state" ] && echo running"#);
+        shell::fake_bin(&bin, "chmod", FAKE_CHMOD);
         let file = dir.join("00-sshbox.conf");
         if let Some(content) = existing {
             std::fs::write(&file, content).unwrap();
@@ -2921,6 +2928,17 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         let r = run_apply(&plan(false, false, None, FirewallEngine::None), Some("Port 22\n"), &[("FAKE_SSHD_T", "1")]);
         assert_eq!(std::fs::read_to_string(&r.file).unwrap(), "Port 22\n");
         assert!(!r.log.contains("systemd-run") && !r.log.contains("reload"), "{}", r.log);
+    }
+
+    // The new file is on disk before the rollback is armed: a failure in between must not leave it there unguarded.
+    #[cfg(unix)]
+    #[test]
+    fn failure_before_arming_restores_previous_file() {
+        for existing in [Some("Port 22\n"), None] {
+            let r = run_apply(&plan(false, false, None, FirewallEngine::None), existing, &[("FAKE_CHMOD_FAIL", "1")]);
+            assert_eq!(std::fs::read_to_string(&r.file).ok().as_deref(), existing, "{}", r.out);
+            assert!(!r.log.contains("systemd-run") && !r.log.contains("reload"), "{}", r.log);
+        }
     }
 
     // Any failure after the timer is armed rolls back at once instead of waiting 60 seconds.
@@ -3047,6 +3065,7 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         let log = dir.join("calls.log");
         shell::fake_bin(&bin, "sshd", r#"echo "sshd $*" >> "$FAKE_LOG"; [ "$1" = "-t" ] && exit "${FAKE_SSHD_T:-0}"; exit 0"#);
         shell::fake_bin(&bin, "launchctl", r#"[ "$1" = print ] && exit "${FAKE_PENDING:-1}"; echo "launchctl $*" >> "$FAKE_LOG"; [ "$1" = bootstrap ] && exit "${FAKE_BOOTSTRAP:-0}"; exit 0"#);
+        shell::fake_bin(&bin, "chmod", FAKE_CHMOD);
         let file = dir.join("00-sshbox.conf");
         if let Some(c) = existing {
             std::fs::write(&file, c).unwrap();
@@ -3084,6 +3103,17 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         assert!(r.out.contains("SSHBOX_SSHD_INVALID"), "{}", r.out);
         assert_eq!(std::fs::read_to_string(&r.file).unwrap(), "Port 22\n");
         assert!(!r.log.contains("launchctl"), "{}", r.log);
+    }
+
+    // macOS: the next connection's sshd already reads the new file, so a failure before arming must restore it.
+    #[cfg(unix)]
+    #[test]
+    fn macos_apply_restores_when_rollback_script_cannot_be_written() {
+        for existing in [Some("Port 22\n"), None] {
+            let r = run_mac_apply(existing, &[("FAKE_CHMOD_FAIL", "1")]);
+            assert_eq!(std::fs::read_to_string(&r.file).ok().as_deref(), existing, "{}", r.out);
+            assert!(!r.log.contains("launchctl"), "{}", r.log);
+        }
     }
 
     // If the timer cannot be armed (plist unwritable or bootstrap fails), the new config must not stay.

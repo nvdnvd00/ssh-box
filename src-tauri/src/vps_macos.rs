@@ -29,6 +29,8 @@ pub fn build_sshd_apply_script_macos(file: &str, rollback_path: &str, plist_path
 PL={pl}
 if [ "$({pending})" = active ]; then echo SSHBOX_ROLLBACK_PENDING; exit 3; fi
 if [ -e "$F" ]; then cp -p "$F" "$F.sshbox.bak"; rm -f "$F.sshbox.absent"; else : > "$F.sshbox.absent"; rm -f "$F.sshbox.bak"; fi
+# Until the rollback is armed, any failure puts the old file back.
+trap 'rc=$?; [ "$rc" -eq 0 ] || sshbox_restore; exit "$rc"' EXIT
 T=$(mktemp)
 cat "$SSHBOX_SECRET_FILE" > "$T"
 install -m 644 "$T" "$F"

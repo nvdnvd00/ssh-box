@@ -155,6 +155,7 @@ export interface AppI18nStrings {
   vpsSshAliveCount: string;
   vpsSshWriteDropIn: string;
   vpsSshWriteMain: string;
+  vpsSshWriteWindows: string;
   vpsSshPending: string;
   vpsSshProgressTitle: string;
   vpsSshRollbackIn: string;
@@ -440,6 +441,7 @@ const VI_STRINGS: AppI18nStrings = {
   vpsSshAliveCount: "Số lần kiểm tra không phản hồi trước khi ngắt",
   vpsSshWriteDropIn: "Thay đổi được ghi vào /etc/ssh/sshd_config.d/00-sshbox.conf",
   vpsSshWriteMain: "Thay đổi được ghi vào /etc/ssh/sshd_config",
+  vpsSshWriteWindows: "Thay đổi được ghi vào C:\\ProgramData\\ssh\\sshd_config",
   vpsSshPending: "Một thay đổi trước đó đang chờ xác minh hoặc hoàn tác.",
   vpsSshProgressTitle: "Đang áp dụng thay đổi SSH",
   vpsSshRollbackIn: "Tự hoàn tác sau {s} giây nếu không xác minh được",
@@ -709,6 +711,7 @@ const EN_STRINGS: AppI18nStrings = {
   vpsSshAliveCount: "Missed keep-alives before disconnect",
   vpsSshWriteDropIn: "Changes are written to /etc/ssh/sshd_config.d/00-sshbox.conf",
   vpsSshWriteMain: "Changes are written to /etc/ssh/sshd_config",
+  vpsSshWriteWindows: "Changes are written to C:\\ProgramData\\ssh\\sshd_config",
   vpsSshPending: "A previous change is still waiting to be verified or rolled back.",
   vpsSshProgressTitle: "Applying SSH changes",
   vpsSshRollbackIn: "Rolls back in {s}s unless verified",

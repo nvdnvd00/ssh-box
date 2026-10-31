@@ -8,7 +8,7 @@ use crate::ssh_pool::SshPool;
 use crate::vps_config::{
     classify_privileged_output, find_remote_host, run_privileged_script_unbounded, vps_err, ERR_COMMAND_FAILED, ERR_SUDO_DENIED, ERR_SUDO_REQUIRED, ERR_UNSUPPORTED,
 };
-use crate::vps_windows::{ps_quote, run_windows_script};
+use crate::vps_windows::{ps_quote, run_windows_script_unbounded};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
@@ -524,7 +524,7 @@ pub async fn run(
         if host_id == "local" {
             run_local(os, script, sudo_password.as_deref(), root, elevated).await
         } else if os == HostOs::Windows {
-            run_windows_script(host_id, pool, script, None).await
+            run_windows_script_unbounded(host_id, pool, script, None).await
         } else if root {
             run_privileged_script_unbounded(host_id, pool, sudo_password, script, None).await
         } else {

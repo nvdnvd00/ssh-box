@@ -58,7 +58,7 @@ export const FirewallStudio: React.FC<VpsStudioProps> = ({ vps, probe }) => {
       if (parseVpsError(e).code === "LOCKOUT_BLOCKED") setBlocked(vpsErrorText(t, e));
       else {
         setPending(null);
-        res.setError(vpsErrorText(t, e));
+        res.failWrite(e);
       }
     } finally {
       setApplying(false);

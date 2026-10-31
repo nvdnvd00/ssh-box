@@ -60,7 +60,7 @@ export const AccessKeysStudio: React.FC<VpsStudioProps & { sshKeys: SshKeyItem[]
       if (parseVpsError(e).code === "LOCKOUT_BLOCKED") setBlocked(vpsErrorText(t, e));
       else {
         setPending(null);
-        res.setError(vpsErrorText(t, e));
+        res.failWrite(e);
       }
     } finally {
       setApplying(false);

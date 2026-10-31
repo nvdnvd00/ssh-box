@@ -25,6 +25,19 @@ export function useVpsResource<T>(vps: VpsCtx, load: (sudoPassword?: string) => 
     else setError(vpsErrorText(vpsRef.current.t, e));
   }, []);
 
+  // A write can fail half-way (Windows enable: rule added, profile not switched): keep its error and show the host as it
+  // is now. A lockout refusal or a missing sudo password means nothing ran.
+  const failWrite = useCallback(
+    (e: unknown) => {
+      fail(e);
+      const code = parseVpsError(e).code;
+      if (code !== "LOCKOUT_BLOCKED" && code !== "SUDO_REQUIRED") {
+        loadRef.current(vpsRef.current.sudoPassword).then(setData, () => {});
+      }
+    },
+    [fail],
+  );
+
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -48,14 +61,14 @@ export function useVpsResource<T>(vps: VpsCtx, load: (sudoPassword?: string) => 
         setData(await run(vps.sudoPassword));
         return true;
       } catch (e) {
-        fail(e);
+        failWrite(e);
         return false;
       }
     },
-    [vps.sudoPassword, fail],
+    [vps.sudoPassword, failWrite],
   );
 
-  return { data, loading, error, setError, refresh, mutate };
+  return { data, loading, error, setError, refresh, mutate, failWrite };
 }
 
 // Props every studio receives from VpsConfigWorkspace.

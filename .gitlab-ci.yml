@@ -32,7 +32,8 @@ build-windows-installer:
     - npm ci --cache "$CI_PROJECT_DIR/.npm" --prefer-offline
     # Every main build is a new release: version and update endpoint are injected here, not in tauri.conf.json.
     # Needs CI variables: TAURI_SIGNING_PRIVATE_KEY, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (IAM user gitlab-ssh-box-release: PutObject on ssh-box/* only).
-    - VERSION="0.1.${CI_PIPELINE_IID}"
+    # 0.2 line started at pipeline iid 24 (last 0.1 release was 0.1.23); only main creates pipelines, so patch counts main builds.
+    - VERSION="0.2.$((CI_PIPELINE_IID - 24))"
     - UPDATE_URL="https://${S3_BUCKET}.s3.${AWS_REGION}.amazonaws.com/ssh-box"
     - export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
     - XWIN_CROSS_COMPILER=clang XWIN_CACHE_DIR="$CI_PROJECT_DIR/.xwin-cache" npx tauri build --verbose --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis --config "{\"version\":\"$VERSION\",\"bundle\":{\"createUpdaterArtifacts\":true},\"plugins\":{\"updater\":{\"endpoints\":[\"$UPDATE_URL/latest.json\"]}}}"

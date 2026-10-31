@@ -50,8 +50,19 @@ pub async fn run_windows_script(
     script: &str,
     secret: Option<&str>,
 ) -> Result<String, String> {
+    bounded(run_windows_script_unbounded(host_id, pool, script, secret), VPS_EXEC_TIMEOUT).await
+}
+
+// For callers that set their own, longer limit (the installer gives winget installs 600 s).
+pub async fn run_windows_script_unbounded(
+    host_id: &str,
+    pool: &SshPool,
+    script: &str,
+    secret: Option<&str>,
+) -> Result<String, String> {
     let host = find_remote_host(host_id)?;
-    let out = exec_windows(pool, &host, script, secret).await?;
+    let stdin = powershell_stdin(script, secret);
+    let out = pool.exec_bytes_on_host(&host, &build_powershell_command(), Some(&stdin)).await?;
     classify_privileged_output(&String::from_utf8_lossy(&out))
 }
 

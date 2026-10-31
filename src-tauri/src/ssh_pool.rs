@@ -422,9 +422,19 @@ enum SshPaneCommand {
     Close,
 }
 
+// How the session authenticated; the VPS lockout guard must not disable this method.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum AuthUsed {
+    Password,
+    #[serde(rename_all = "camelCase")]
+    Key { public_key_body: String },
+}
+
 pub struct MultiplexedSession {
     pub host_id: String,
     pub fingerprint: String,
+    pub auth_used: AuthUsed,
     pub handle: tokio::sync::Mutex<Handle<SshClientHandler>>,
     remote_forwards: Arc<Mutex<HashMap<u32, (String, u16)>>>,
 }
@@ -453,10 +463,12 @@ impl SshPool {
             }
         }
 
-        let (handle, fp, remote_forwards) = Self::connect_new(host, password_override).await?;
+        let (handle, fp, remote_forwards, auth_used) =
+            Self::connect_new(host, password_override).await?;
         let session = Arc::new(MultiplexedSession {
             host_id: host.id.clone(),
             fingerprint: fp,
+            auth_used,
             handle: tokio::sync::Mutex::new(handle),
             remote_forwards,
         });
@@ -474,11 +486,42 @@ impl SshPool {
         host: &HostEntry,
         password_override: Option<String>,
     ) -> Result<String, String> {
-        let (handle, fp, _) = Self::connect_new(host, password_override).await?;
+        let (handle, fp, _, _) = Self::connect_new(host, password_override).await?;
         let _ = handle
             .disconnect(Disconnect::ByApplication, "Connection test", "en")
             .await;
         Ok(fp)
+    }
+
+    // Like test_connection, but also opens a session and runs `command`: login alone does not
+    // prove a shell works (MaxSessions 0 or ForceCommand authenticate, then refuse sessions).
+    pub async fn test_exec(&self, host: &HostEntry, command: &str) -> Result<String, String> {
+        let (handle, fp, _, _) = Self::connect_new(host, None).await?;
+        let result = async {
+            let mut channel = handle
+                .channel_open_session()
+                .await
+                .map_err(|e| format!("Failed to open channel ({e})"))?;
+            channel
+                .exec(true, command)
+                .await
+                .map_err(|e| format!("Failed to exec ({e})"))?;
+            let mut code = None;
+            while let Some(msg) = channel.wait().await {
+                if let ChannelMsg::ExitStatus { exit_status } = msg {
+                    code = Some(exit_status);
+                }
+            }
+            match code {
+                Some(0) => Ok(()),
+                other => Err(format!("`{command}` did not succeed (exit {other:?})")),
+            }
+        }
+        .await;
+        let _ = handle
+            .disconnect(Disconnect::ByApplication, "Connection test", "en")
+            .await;
+        result.map(|_| fp)
     }
 
     async fn connect_new(
@@ -489,6 +532,7 @@ impl SshPool {
             Handle<SshClientHandler>,
             String,
             Arc<Mutex<HashMap<u32, (String, u16)>>>,
+            AuthUsed,
         ),
         String,
     > {
@@ -534,13 +578,13 @@ impl SshPool {
 
         let store = resources::load_resources();
         let resolved = resources::resolve_host_credentials_from(&store, host, password_override);
-        let authenticated = Self::authenticate_session(&mut handle, host, &resolved).await?;
-        if !authenticated {
+        let Some(auth_used) = Self::authenticate_session(&mut handle, host, &resolved).await?
+        else {
             return Err(format!(
                 "Authentication failed for {}@{}:{} (tried SSH Agent, Identity/SSHKey, IdentityFile, and Keychain/Password)",
                 resolved.user, host.hostname, host.port
             ));
-        }
+        };
 
         let fp = fingerprint_out
             .lock()
@@ -548,14 +592,14 @@ impl SshPool {
             .clone()
             .unwrap_or_else(|| "SHA256:verified".to_string());
 
-        Ok((handle, fp, remote_forwards))
+        Ok((handle, fp, remote_forwards, auth_used))
     }
 
     async fn authenticate_session(
         handle: &mut Handle<SshClientHandler>,
         host: &HostEntry,
         resolved: &resources::ResolvedHostCredentials,
-    ) -> Result<bool, String> {
+    ) -> Result<Option<AuthUsed>, String> {
         let auth_user = &resolved.user;
         let secret = resolved.secret.as_deref();
 
@@ -567,11 +611,15 @@ impl SshPool {
             let key_res = russh_keys::load_secret_key(key_path, key_pass.as_deref())
                 .or_else(|_| russh_keys::load_secret_key(key_path, secret));
             if let Ok(key_pair) = key_res {
+                let public_key_body = key_pair
+                    .clone_public_key()
+                    .map(|k| k.public_key_base64())
+                    .unwrap_or_default();
                 if let Ok(true) = handle
                     .authenticate_publickey(auth_user, Arc::new(key_pair))
                     .await
                 {
-                    return Ok(true);
+                    return Ok(Some(AuthUsed::Key { public_key_body }));
                 }
             }
         }
@@ -586,11 +634,12 @@ impl SshPool {
                     let mut agent = russh_keys::agent::client::AgentClient::connect(stream);
                     if let Ok(identities) = agent.request_identities().await {
                         for pubkey in identities {
+                            let public_key_body = pubkey.public_key_base64();
                             let (returned_agent, res) =
                                 handle.authenticate_future(auth_user, pubkey, agent).await;
                             agent = returned_agent;
                             if res.unwrap_or(false) {
-                                return Ok(true);
+                                return Ok(Some(AuthUsed::Key { public_key_body }));
                             }
                         }
                     }
@@ -621,11 +670,15 @@ impl SshPool {
             let key_res = russh_keys::load_secret_key(&key_path, None)
                 .or_else(|_| russh_keys::load_secret_key(&key_path, secret));
             if let Ok(key_pair) = key_res {
+                let public_key_body = key_pair
+                    .clone_public_key()
+                    .map(|k| k.public_key_base64())
+                    .unwrap_or_default();
                 if let Ok(true) = handle
                     .authenticate_publickey(auth_user, Arc::new(key_pair))
                     .await
                 {
-                    return Ok(true);
+                    return Ok(Some(AuthUsed::Key { public_key_body }));
                 }
             }
         }
@@ -634,12 +687,12 @@ impl SshPool {
         if let Some(pw) = secret {
             if !pw.is_empty() {
                 if let Ok(true) = handle.authenticate_password(auth_user, pw).await {
-                    return Ok(true);
+                    return Ok(Some(AuthUsed::Password));
                 }
             }
         }
 
-        Ok(false)
+        Ok(None)
     }
 
     pub async fn open_pty_pane<F>(
@@ -802,6 +855,16 @@ impl SshPool {
         } else {
             false
         }
+    }
+
+    pub async fn session_auth(&self, host_id: &str) -> Option<AuthUsed> {
+        let map = self.sessions.lock().await;
+        map.get(host_id).map(|s| s.auth_used.clone())
+    }
+
+    pub async fn session_fingerprint(&self, host_id: &str) -> Option<String> {
+        let map = self.sessions.lock().await;
+        map.get(host_id).map(|s| s.fingerprint.clone())
     }
 
     pub async fn has_active_session(&self, host_id: &str) -> bool {

@@ -98,6 +98,10 @@ pub fn delete_secret(host_id: &str) -> Result<(), String> {
     delete_host_secret(host_id)
 }
 
+// Every test shares one vault file (the app dir is set once per process): hold this while using it.
+#[cfg(test)]
+pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,6 +111,7 @@ mod tests {
     // A saved password must still be readable from a fresh Entry, i.e. after an app restart.
     #[test]
     fn secrets_survive_restart_when_keyring_store_is_mock() {
+        let _vault = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
         crate::host_store::set_app_data_dir(
             std::env::temp_dir().join(format!("ssh-box-vault-test-{}", uuid::Uuid::new_v4())),

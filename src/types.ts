@@ -149,7 +149,163 @@ export type TabResources =
   | "portForwarding"
   | "snippets"
   | "docker"
-  | "sftp";
+  | "sftp"
+  | "vpsConfig";
+
+export type VpsStudioTab = "ssh" | "firewall" | "access" | "installer";
+
+export type HostOs = "linux" | "macos" | "windows";
+export interface InstallMethod { os: HostOs; manager: string; package: string; service: string | null }
+export type ToolStatus = { kind: "notInstalled" } | { kind: "installed"; via: Owner[] } | { kind: "external" };
+export interface Owner { manager: string; package: string }
+export interface ServiceState { enabled: boolean; active: boolean }
+export interface ManagerState { id: string; present: boolean }
+export interface ToolView {
+  id: string;
+  name: string;
+  category: string;
+  recommended: boolean;
+  descriptionVi: string;
+  descriptionEn: string;
+  status: ToolStatus;
+  service: string | null;
+  serviceState: ServiceState | null;
+  install: InstallMethod | null;
+  blockedBy: string | null;
+}
+export interface InstallerScan { os: HostOs; managers: ManagerState[]; tools: ToolView[] }
+export type InstallAction =
+  | { kind: "install"; manager: string; package: string }
+  | { kind: "uninstall"; manager: string; package: string }
+  | { kind: "enableService"; service: string }
+  | { kind: "installManager"; manager: string }
+  | { kind: "refresh" };
+export interface SearchHit { manager: string; package: string; description: string }
+
+export type AuthUsed = { kind: "password" } | { kind: "key"; publicKeyBody: string };
+export type PrivilegeLevel = "root" | "sudoNoPassword" | "sudoPassword" | "admin" | "none";
+export type FirewallEngine = "ufw" | "firewalld" | "iptables" | "windows" | "none";
+export type OsFamily = "linux" | "macos" | "windows";
+export type SupportLevel = "full" | "readOnly" | "hidden";
+export interface TabSupport { level: SupportLevel; reason: string | null }
+export interface VpsSupport {
+  ssh: TabSupport;
+  sshRows: { port: boolean; permitRootLogin: boolean; allowDenyUsers: boolean };
+  firewall: TabSupport;
+  access: TabSupport;
+  passwordCoupled: boolean;
+}
+
+export interface ConnectionContext {
+  loginUser: string;
+  auth: AuthUsed;
+  clientIp: string;
+  serverIp: string;
+  serverPort: number;
+}
+
+export interface VpsProbe {
+  privilege: PrivilegeLevel;
+  context: ConnectionContext;
+  osId: string;
+  osVersion: string;
+  opensshVersion: string;
+  hasSystemd: boolean;
+  sshSocketActive: boolean;
+  selinuxEnforcing: boolean;
+  firewallEngine: FirewallEngine;
+  osFamily: OsFamily;
+  support: VpsSupport;
+}
+
+export interface SshdSettings {
+  port: number;
+  permitRootLogin: string;
+  passwordAuthentication: boolean;
+  kbdInteractiveAuthentication: boolean;
+  pubkeyAuthentication: boolean;
+  allowUsers: string[];
+  denyUsers: string[];
+  maxAuthTries: number;
+  maxSessions: number;
+  loginGraceTime: number;
+  clientAliveInterval: number;
+  clientAliveCountMax: number;
+}
+
+export type WriteTarget = "dropIn" | "mainFile";
+
+export interface SshdView {
+  settings: SshdSettings;
+  writeTarget: WriteTarget;
+  rollbackPending: boolean;
+}
+
+export interface SshdApplyStarted {
+  rollbackAt: number;
+  serverNow: number;
+  newPort: number | null;
+}
+
+export interface ListeningSocketItem {
+  protocol: string;
+  bindAddr: string;
+  port: number;
+  isPublic: boolean;
+  processName: string;
+  pid?: number | null;
+  exposure: string;
+}
+
+export interface FirewallRuleItem {
+  index: number;
+  toPort: string;
+  protocol: string;
+  action: string;
+  fromSource: string;
+  v6: boolean;
+  comment: string;
+  rawSpec: string;
+  effective?: boolean;
+}
+
+export interface FirewallSnapshot {
+  engine: string;
+  enabled: boolean;
+  defaultIncoming: string;
+  defaultOutgoing: string;
+  ipv6Filtered: boolean;
+  rules: FirewallRuleItem[];
+  listeningSockets: ListeningSocketItem[];
+}
+
+export interface RemoteAuthorizedKey {
+  index: number;
+  keyType: string;
+  publicKeyBody: string;
+  comment: string;
+  shortPreview: string;
+  rawLine: string;
+}
+
+export interface LinuxAccountItem {
+  username: string;
+  uid: number;
+  gid: number;
+  homeDir: string;
+  shell: string;
+  locked: boolean;
+  groups: string[];
+  hasSudo: boolean;
+  nopasswdSudo: boolean;
+  authorizedKeys: RemoteAuthorizedKey[];
+  keysFile?: string;
+  keysFileUnknown?: boolean;
+}
+
+export interface AccessKeysSnapshot {
+  accounts: LinuxAccountItem[];
+}
 
 export interface KnownHostEntry {
   id: string;
@@ -248,11 +404,11 @@ export interface WorkspaceTab {
 }
 
 export interface CpuCoreMetric {
-  coreId: string;
-  usagePct: number;
-  userPct: number;
-  systemPct: number;
-  iowaitPct: number;
+  id: string;
+  usage: number;
+  user: number;
+  system: number;
+  idle: number;
 }
 
 export interface StorageVolumeMetric {

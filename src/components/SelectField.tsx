@@ -64,7 +64,7 @@ export const SelectField: React.FC<SelectFieldProps> = ({
       <button
         type="button"
         onClick={() => setOpen((p) => !p)}
-        className={`w-full flex items-center justify-between gap-2 cursor-pointer transition-all ${buttonClasses} ${
+        className={`w-full flex items-center justify-between gap-2 cursor-pointer transition-all disabled:opacity-50 disabled:cursor-not-allowed ${buttonClasses} ${
           open
             ? "border-primary ring-3 ring-primary/18"
             : ""

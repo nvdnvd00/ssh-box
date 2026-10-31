@@ -18,6 +18,7 @@ import {
   Plus,
   Search,
   Server,
+  Shield,
   Skull,
   Terminal as TerminalIcon,
   X,
@@ -50,6 +51,8 @@ interface DashboardWorkspaceProps {
   onOpenAddMachine: () => void;
   onOpenDockerManager: (hostId: string) => void;
   onOpenSftpManager?: (hostId: string) => void;
+  onOpenVpsConfig?: (hostId: string) => void;
+  vpsConfigLabel: string;
 }
 
 interface LoadHistoryPoint {
@@ -370,6 +373,8 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
   onOpenAddMachine,
   onOpenDockerManager,
   onOpenSftpManager,
+  onOpenVpsConfig,
+  vpsConfigLabel,
 }) => {
   // Icon toggle sized like the neighbouring action buttons; `small` matches the compact/list rows.
   const renderMonitorSwitch = (hostId: string, enabled: boolean, small = false) => (
@@ -548,6 +553,8 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
         : hostObj?.alias || hostObj?.hostname || selectedHostId;
 
     const m = selectedMetrics;
+    // Windows has no load average; its telemetry leaves the load fields at 0.
+    const noLoadAvg = m?.osName.startsWith("Windows") ?? false;
     const memPercent =
       m && m.memTotalMb > 0 ? (m.memUsedMb / m.memTotalMb) * 100 : 0;
     const primaryNic = m?.interfaces?.[0] ?? null;
@@ -618,6 +625,17 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
               <Container className="w-3.5 h-3.5 text-sky-400" />
               <span>Docker</span>
             </button>
+
+            {selectedHostId !== "local" && onOpenVpsConfig && (
+              <button
+                type="button"
+                onClick={() => onOpenVpsConfig(selectedHostId)}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-secondary/80 hover:bg-accent text-foreground text-xs font-medium border border-border/70 transition-all cursor-pointer"
+              >
+                <Shield className="w-3.5 h-3.5 text-emerald-400" />
+                <span>{vpsConfigLabel}</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -723,16 +741,16 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                     ? m.cores.slice(0, 8)
                     : [
                         {
-                          coreId: "cpu0",
-                          usagePct: m?.cpuPercent ?? 0,
-                          userPct: 0,
-                          systemPct: 0,
-                          iowaitPct: 0,
+                          id: "cpu0",
+                          usage: m?.cpuPercent ?? 0,
+                          user: 0,
+                          system: 0,
+                          idle: 0,
                         },
                       ]
                   ).map((core) => (
-                    <div key={core.coreId} className="space-y-1">
-                      <SegmentedCoreBar percent={core.usagePct} />
+                    <div key={core.id} className="space-y-1">
+                      <SegmentedCoreBar percent={core.usage} />
                     </div>
                   ))}
                 </div>
@@ -796,16 +814,24 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                   </div>
                 </div>
 
-                <MultiLineLoadChart
-                  points={loadHistoryMap[selectedHostId] ?? []}
-                />
+                {noLoadAvg ? (
+                  <div className="h-[115px] flex items-center justify-center text-xs text-muted-foreground">
+                    Windows has no load average
+                  </div>
+                ) : (
+                  <MultiLineLoadChart
+                    points={loadHistoryMap[selectedHostId] ?? []}
+                  />
+                )}
 
                 <div className="flex items-center justify-between pt-2 border-t border-border/60 text-xs">
                   <span className="text-muted-foreground">Current Load</span>
                   <span className="font-mono font-semibold text-foreground">
-                    {m
-                      ? `${m.loadOne.toFixed(2)} / ${m.loadFive.toFixed(2)} / ${m.loadFifteen.toFixed(2)}`
-                      : "0.00 / 0.00 / 0.00"}
+                    {noLoadAvg
+                      ? "—"
+                      : m
+                        ? `${m.loadOne.toFixed(2)} / ${m.loadFive.toFixed(2)} / ${m.loadFifteen.toFixed(2)}`
+                        : "0.00 / 0.00 / 0.00"}
                   </span>
                 </div>
               </div>
@@ -1549,6 +1575,20 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
 
                     <div className="flex items-center gap-2 shrink-0">
                       {renderMonitorSwitch(host.id, autoUpdate)}
+                      {onOpenVpsConfig && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onOpenVpsConfig(host.id);
+                          }}
+                          title={vpsConfigLabel}
+                          aria-label={vpsConfigLabel}
+                          className="p-2 rounded-xl bg-secondary/90 hover:bg-accent text-muted-foreground hover:text-emerald-400 transition-colors cursor-pointer"
+                        >
+                          <Shield className="w-4 h-4" />
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={(e) => {
@@ -1718,6 +1758,20 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                           className="p-1.5 rounded-lg bg-secondary/90 hover:bg-accent text-muted-foreground hover:text-amber-400 transition-colors cursor-pointer"
                         >
                           <HardDrive className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                      {!row.isLocal && onOpenVpsConfig && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onOpenVpsConfig(row.id);
+                          }}
+                          title={vpsConfigLabel}
+                          aria-label={vpsConfigLabel}
+                          className="p-1.5 rounded-lg bg-secondary/90 hover:bg-accent text-muted-foreground hover:text-emerald-400 transition-colors cursor-pointer"
+                        >
+                          <Shield className="w-3.5 h-3.5" />
                         </button>
                       )}
                     </div>
@@ -1981,6 +2035,17 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                           >
                             <Container className="w-3.5 h-3.5" />
                           </button>
+                          {!row.isLocal && onOpenVpsConfig && (
+                            <button
+                              type="button"
+                              onClick={() => onOpenVpsConfig(row.id)}
+                              title={vpsConfigLabel}
+                          aria-label={vpsConfigLabel}
+                              className="p-1.5 rounded-lg bg-secondary/90 hover:bg-accent text-muted-foreground hover:text-emerald-400 transition-colors cursor-pointer"
+                            >
+                              <Shield className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>

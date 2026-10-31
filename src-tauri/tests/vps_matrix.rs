@@ -4,7 +4,7 @@
 //! VM (macOS, Lima; restarted by `limactl` in the reboot scenario):
 //!   limactl start --name=u24 --vm-type=vz --network=vzNAT --plain template://ubuntu-24.04
 //!   (also template://debian-13 and template://rocky-9; ufw / firewalld + semanage may need installing)
-//! MX_DISTRO=macos runs the macOS scenarios M1,M2,M4,M5,M6 (VM user needs passwordless sudo).
+//! MX_DISTRO=macos runs the macOS scenarios M1-M6 (VM user needs passwordless sudo; M3 adds and removes `mxpw`).
 //! MX_DISTRO=windows runs W1-W12: MX_USER is an Administrator (key in administrators_authorized_keys),
 //! `sshbox-std` a standard account accepting the same key; W8-W11 (sshd writes) run only when
 //! WINDOWS_SSH_WRITE_VERIFIED is true; W7 reboots the VM (Restart-Computer) unless MX_NO_REBOOT is set.
@@ -304,6 +304,48 @@ async fn m2_password_off_on(pool: &SshPool, h: &HostEntry) -> Result<String, Str
     Ok(format!("off: sshd -T {} / methods '{m_off}'; on: methods '{m_on}'", t.split_whitespace().collect::<Vec<_>>().join(" ")))
 }
 
+// A password session: turning password login off must be refused, and a change must still apply and roll back through
+// sudo with a password. The VM admin has NOPASSWD sudo, so a throwaway admin (S3's test password) is made and removed.
+async fn m3_password_session(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let main = pool;
+    root(pool, h, "sysadminctl -addUser mxpw -fullName mxpw -password Mx-Test-123 -admin 2>&1; \
+dscl . -read /Groups/com.apple.access_ssh >/dev/null 2>&1 && dseditgroup -o edit -a mxpw -t user com.apple.access_ssh").await;
+    let pw = host("mx-pw", "mxpw", None, 22);
+    upsert_custom_host(pw.clone())?;
+    // Its own pool, dropped (sessions closed) before the account is deleted.
+    let pw_pool = SshPool::default();
+    let r = async {
+        let pool = &pw_pool;
+        pool.get_or_connect(&pw, Some("Mx-Test-123".into())).await?;
+        ensure(pool.session_auth(&pw.id).await == Some(AuthUsed::Password), "session not password".into())?;
+        let sudo = Some("Mx-Test-123".to_string());
+        let p = probe(&pw.id, pool, sudo.clone()).await?;
+        ensure(p.privilege == PrivilegeLevel::SudoPassword, format!("privilege {:?}", p.privilege))?;
+        let view = get_sshd_view(&pw.id, pool, sudo.clone()).await?;
+        let off = SshdSettings { password_authentication: false, kbd_interactive_authentication: false, ..view.settings.clone() };
+        let refused = apply_sshd_settings(&pw.id, pool, sudo.clone(), off).await;
+        ensure(matches!(&refused, Err(e) if e == "LOCKOUT_BLOCKED: password_in_use"), format!("password off: {refused:?}"))?;
+        let orig = view.settings.max_auth_tries;
+        let want = if orig > 3 { orig - 1 } else { orig + 1 };
+        apply_sshd_settings(&pw.id, pool, sudo.clone(), SshdSettings { max_auth_tries: want, ..view.settings }).await?;
+        let live = effective(main, h, "maxauthtries").await;
+        ensure(live == format!("maxauthtries {want}"), format!("after apply: {live}"))?;
+        revert_sshd_settings(&pw.id, pool, sudo).await?;
+        let back = effective(main, h, "maxauthtries").await;
+        ensure(back == format!("maxauthtries {orig}"), format!("after roll back now: {back}"))?;
+        let left = mac_leftovers(main, h).await;
+        ensure(left.trim().is_empty(), format!("rollback leftovers: {left}"))?;
+        Ok::<_, String>(format!("password off refused; maxauthtries {orig}->{want} applied and rolled back with password sudo"))
+    }
+    .await;
+    drop(pw_pool);
+    // Deleting the user leaves its name in the SSH access group.
+    let gone = root(pool, h, "dscl . -delete /Groups/com.apple.access_ssh GroupMembership mxpw 2>/dev/null; sysadminctl -deleteUser mxpw 2>&1; \
+id mxpw 2>&1; dscl . -read /Groups/com.apple.access_ssh GroupMembership 2>&1").await;
+    ensure(gone.contains("no such user") && !gone.contains("GroupMembership: mxpw"), format!("mxpw not removed: {gone}"))?;
+    r
+}
+
 async fn m4_apply_then_disconnect(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
     let view = get_sshd_view(&h.id, pool, None).await?;
     let off = SshdSettings { password_authentication: false, kbd_interactive_authentication: false, ..view.settings };
@@ -371,6 +413,7 @@ fn run_macos(only: &str) {
         }
         run!("M1 probe", m1_probe(&pool, &h));
         run!("M2 password off/on (coupled)", m2_password_off_on(&pool, &h));
+        run!("M3 password session", m3_password_session(&pool, &h));
         run!("M4 apply then disconnect -> rollback", m4_apply_then_disconnect(&pool, &h));
         run!("M5 port change blocked", m5_port_hidden(&pool, &h));
         run!("M6 users & keys read-only", m6_users_keys(&pool, &h));

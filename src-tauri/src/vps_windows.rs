@@ -39,7 +39,7 @@ pub fn ps_quote(s: &str) -> String {
 }
 
 // Seen once on the VM matrix: the bootstrap sat on stdin for 10+ minutes before running anything.
-async fn exec_windows(pool: &SshPool, host: &HostEntry, script: &str, secret: Option<&str>) -> Result<Vec<u8>, String> {
+pub(crate) async fn exec_windows(pool: &SshPool, host: &HostEntry, script: &str, secret: Option<&str>) -> Result<Vec<u8>, String> {
     let stdin = powershell_stdin(script, secret);
     bounded(pool.exec_bytes_on_host(host, &build_powershell_command(), Some(&stdin)), VPS_EXEC_TIMEOUT).await
 }

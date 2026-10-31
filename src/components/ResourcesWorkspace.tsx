@@ -97,27 +97,12 @@ const TAG_PALETTE = [
   "#ec4899",
 ];
 
-function downloadJson(fileName: string, data: unknown) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], {
-    type: "application/json",
-  });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = fileName;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-// Exported machines carry no identity/SSH key links.
-function toPortableMachine(h: HostEntry): HostEntry {
-  return {
-    ...h,
-    source: "custom",
-    authMethod: h.authMethod === "identity" ? "passwordOrKey" : h.authMethod,
-    identityId: null,
-    sshKeyId: null,
-  };
+interface MachinesExportBundle {
+  type: string;
+  items: HostEntry[];
+  hasIdentities?: boolean;
+  hasSshKeys?: boolean;
+  encryptedSecrets?: string | null;
 }
 
 function formatUnixDate(ts?: number | null): string {
@@ -661,12 +646,41 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
     mode: "export" | "import";
     items: HostEntry[];
     selected: boolean[];
+    includeIdentities: boolean;
+    includeSshKeys: boolean;
+    passphrase: string;
+    passphraseConfirm: string;
+    bundle?: MachinesExportBundle;
+    error?: string | null;
   } | null>(null);
 
   const openMachineTransfer = (
     mode: "export" | "import",
     items: HostEntry[],
-  ) => setMachineTransfer({ mode, items, selected: items.map(() => true) });
+    bundle?: MachinesExportBundle,
+  ) =>
+    setMachineTransfer({
+      mode,
+      items,
+      selected: items.map(() => true),
+      includeIdentities: mode === "import" ? Boolean(bundle?.hasIdentities) : false,
+      includeSshKeys: mode === "import" ? Boolean(bundle?.hasSshKeys) : false,
+      passphrase: "",
+      passphraseConfirm: "",
+      bundle,
+      error: null,
+    });
+
+  // Credentials always travel encrypted, so any include box needs a passphrase.
+  const transferNeedsPassphrase =
+    !!machineTransfer &&
+    (machineTransfer.includeIdentities || machineTransfer.includeSshKeys);
+  const transferPassphraseInvalid =
+    !!machineTransfer &&
+    transferNeedsPassphrase &&
+    (!machineTransfer.passphrase.trim() ||
+      (machineTransfer.mode === "export" &&
+        machineTransfer.passphrase !== machineTransfer.passphraseConfirm));
 
   const handlePickMachineFile = async (
     e: React.ChangeEvent<HTMLInputElement>,
@@ -676,11 +690,11 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
     if (!file) return;
     setErrorBanner(null);
     try {
-      const data = JSON.parse(await file.text());
+      const data = JSON.parse(await file.text()) as MachinesExportBundle;
       if (data?.type !== "ssh-box/machines" || !Array.isArray(data.items)) {
         throw new Error("Not an ssh-box machines export file");
       }
-      openMachineTransfer("import", data.items.map(toPortableMachine));
+      openMachineTransfer("import", data.items, data);
     } catch (err) {
       setErrorBanner(String(err));
     }
@@ -688,34 +702,45 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
 
   const handleConfirmMachineTransfer = async () => {
     if (!machineTransfer) return;
-    const { mode, items, selected } = machineTransfer;
+    const {
+      mode,
+      items,
+      selected,
+      includeIdentities,
+      includeSshKeys,
+      passphrase,
+      bundle,
+    } = machineTransfer;
     const picked = items.filter((_, i) => selected[i]);
-    setMachineTransfer(null);
     setErrorBanner(null);
     try {
       if (mode === "export") {
-        downloadJson(
-          `ssh-box-machines-${new Date().toISOString().slice(0, 10)}.json`,
-          { type: "ssh-box/machines", items: picked.map(toPortableMachine) },
-        );
+        // false = save dialog cancelled: keep the modal open.
+        const saved = await invoke<boolean>("export_machines_bundle", {
+          hosts: picked,
+          includeIdentities,
+          includeSshKeys,
+          passphrase: passphrase.trim() ? passphrase.trim() : null,
+          fileName: `ssh-box-machines-${new Date().toISOString().slice(0, 10)}.json`,
+        });
+        if (saved) setMachineTransfer(null);
         return;
       }
-      for (const m of picked) {
-        // Same id already here: update it but keep its local identity/key links.
-        const existing = hosts.find((h) => h.id === m.id);
-        await onSaveHost(
-          existing
-            ? {
-                ...m,
-                authMethod: existing.authMethod,
-                identityId: existing.identityId,
-                sshKeyId: existing.sshKeyId,
-              }
-            : m,
-        );
-      }
+      if (!bundle) return;
+      const selectedIndices = selected.flatMap((v, idx) => (v ? [idx] : []));
+      await invoke("import_machines_bundle", {
+        bundle,
+        selectedIndices,
+        includeIdentities,
+        includeSshKeys,
+        passphrase: passphrase.trim() ? passphrase.trim() : null,
+      });
+      onRefreshHosts();
+      setMachineTransfer(null);
     } catch (err) {
-      setErrorBanner(String(err));
+      setMachineTransfer((prev) =>
+        prev ? { ...prev, error: String(err) } : null,
+      );
     }
   };
 
@@ -3751,12 +3776,121 @@ export const ResourcesWorkspace: React.FC<ResourcesWorkspaceProps> = ({
                   ))
                 )}
               </div>
-              <p className="text-muted-foreground">
-                Identity and SSH key links are not included.
-              </p>
+              <div className="space-y-2 pt-1 border-t border-border/70">
+                {(
+                  [
+                    [
+                      "includeIdentities",
+                      "hasIdentities",
+                      "Include Identities & Passwords",
+                    ],
+                    [
+                      "includeSshKeys",
+                      "hasSshKeys",
+                      "Include SSH Keys (Private Keys & Passphrases)",
+                    ],
+                  ] as const
+                ).map(([field, flag, label]) => {
+                  const unavailable =
+                    machineTransfer.mode === "import" &&
+                    !machineTransfer.bundle?.[flag];
+                  return (
+                    <label
+                      key={field}
+                      className={`flex items-center gap-2.5 ${
+                        unavailable
+                          ? "opacity-50 cursor-not-allowed"
+                          : "cursor-pointer"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        disabled={unavailable}
+                        checked={machineTransfer[field]}
+                        onChange={(e) =>
+                          setMachineTransfer((prev) =>
+                            prev && {
+                              ...prev,
+                              [field]: e.target.checked,
+                              error: null,
+                            },
+                          )
+                        }
+                      />
+                      <span>
+                        {label}
+                        {unavailable && (
+                          <span className="text-muted-foreground ml-1">
+                            (not in file)
+                          </span>
+                        )}
+                      </span>
+                    </label>
+                  );
+                })}
+
+                {transferNeedsPassphrase && (
+                  <div className="pt-1 space-y-1.5">
+                    <input
+                      type="password"
+                      value={machineTransfer.passphrase}
+                      onChange={(e) =>
+                        setMachineTransfer((prev) =>
+                          prev && {
+                            ...prev,
+                            passphrase: e.target.value,
+                            error: null,
+                          },
+                        )
+                      }
+                      placeholder={
+                        machineTransfer.mode === "export"
+                          ? "Passphrase to encrypt credentials"
+                          : "Enter backup passphrase to decrypt"
+                      }
+                      className="ui-input w-full"
+                    />
+                    {machineTransfer.mode === "export" && (
+                      <input
+                        type="password"
+                        value={machineTransfer.passphraseConfirm}
+                        onChange={(e) =>
+                          setMachineTransfer((prev) =>
+                            prev && {
+                              ...prev,
+                              passphraseConfirm: e.target.value,
+                              error: null,
+                            },
+                          )
+                        }
+                        placeholder="Confirm passphrase"
+                        className="ui-input w-full"
+                      />
+                    )}
+                    {machineTransfer.mode === "export" &&
+                      machineTransfer.passphraseConfirm &&
+                      machineTransfer.passphrase !==
+                        machineTransfer.passphraseConfirm && (
+                        <p className="text-rose-400 text-[11px]">
+                          Passphrases do not match
+                        </p>
+                      )}
+                  </div>
+                )}
+              </div>
+
+              {machineTransfer.error && (
+                <p className="text-rose-400 text-[11px] break-all">
+                  {machineTransfer.error}
+                </p>
+              )}
+
               <button
                 type="button"
-                disabled={!machineTransfer.selected.some(Boolean)}
+                disabled={
+                  !machineTransfer.selected.some(Boolean) ||
+                  transferPassphraseInvalid
+                }
                 onClick={handleConfirmMachineTransfer}
                 className="w-full h-[38px] rounded-[10px] bg-primary text-primary-foreground font-semibold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >

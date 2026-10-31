@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { RefreshCw } from "lucide-react";
 import { HostEntry, HostOs, PrivilegeLevel, ResourcesStoreData, VpsProbe, VpsStudioTab } from "../types";
@@ -68,6 +68,9 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
   useEffect(() => {
     if (isLocal && !localOs) invoke<HostOs>("installer_local_os").then(setLocalOs).catch((e) => setLocalOsError(vpsErrorText(t, e)));
   }, [isLocal, localOs]);
+  // A slow probe of a host the user has already left must not touch the current host's state.
+  const selectedRef = useRef(selectedHostId);
+  selectedRef.current = selectedHostId;
 
   const runProbe = useCallback(
     async (hostId: string, password?: string) => {
@@ -78,7 +81,7 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
         setProbes((prev) => ({ ...prev, [hostId]: result }));
         return result;
       } finally {
-        setProbing(false);
+        if (selectedRef.current === hostId) setProbing(false);
       }
     },
     [],
@@ -86,7 +89,9 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
 
   useEffect(() => {
     if (!host || isLocal) return;
-    runProbe(host.id, sudoPasswords[host.id]).catch((e) => setProbeError(vpsErrorText(t, e)));
+    runProbe(host.id, sudoPasswords[host.id]).catch((e) => {
+      if (selectedRef.current === host.id) setProbeError(vpsErrorText(t, e));
+    });
     // Re-probe only when the host changes; unlocking sudo probes explicitly.
   }, [host?.id, isLocal]);
 
@@ -161,7 +166,12 @@ export const VpsConfigWorkspace: React.FC<VpsConfigWorkspaceProps> = ({
             {probe ? ` · ${probe.osId} ${probe.osVersion}` : ""}
           </span>
         )}
-        {probe && <StatusBadge tone={PRIVILEGE_TONE[probe.privilege]}>{privilegeLabel[probe.privilege]}</StatusBadge>}
+        {probe && (
+          <StatusBadge tone={PRIVILEGE_TONE[probe.privilege]}>
+            {/* Windows has no sudo: a non-admin login is simply a standard account. */}
+            {probe.osFamily === "windows" && probe.privilege === "none" ? t.vpsPrivStandard : privilegeLabel[probe.privilege]}
+          </StatusBadge>
+        )}
         {probe?.privilege === "none" && probe.osFamily !== "windows" && (
           <button
             type="button"

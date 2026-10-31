@@ -156,6 +156,13 @@ pub struct FirewallSnapshot {
     pub ipv6_filtered: bool,
     pub rules: Vec<FirewallRuleItem>,
     pub listening_sockets: Vec<ListeningSocketItem>,
+    // Windows only: enabled block rules without a port filter. Not listed in the UI, but a block beats any allow,
+    // so the lockout guard and the exposure must still see them.
+    #[serde(default)]
+    pub unlisted_blocks: Vec<FirewallRuleItem>,
+    // Windows only: the SSH interface's profile blocks every inbound connection, allowed apps included.
+    #[serde(default)]
+    pub inbound_allows_off: bool,
 }
 
 impl Default for FirewallSnapshot {
@@ -168,6 +175,8 @@ impl Default for FirewallSnapshot {
             ipv6_filtered: true,
             rules: Vec::new(),
             listening_sockets: Vec::new(),
+            unlisted_blocks: Vec::new(),
+            inbound_allows_off: false,
         }
     }
 }
@@ -933,7 +942,7 @@ pub async fn add_firewall_rule(
     crate::vps_guard::check_firewall_add(&probe.context, &action, &source, &port)?;
     if probe.firewall_engine == FirewallEngine::Windows {
         let script = crate::vps_windows::build_windows_add_rule_script(&action, &source, &port, &proto)?;
-        return crate::vps_windows::run_windows_firewall_write(host_id, pool, &script).await;
+        return crate::vps_windows::run_windows_firewall_write(host_id, pool, &probe.context, &script).await;
     }
     let script = match probe.firewall_engine {
         FirewallEngine::Firewalld => build_firewalld_add_rule_script(&action, &source, &port, &proto)?,
@@ -952,17 +961,8 @@ pub async fn delete_firewall_rule(
     writable_engine(probe.firewall_engine)?;
     let current = get_firewall_snapshot(host_id, pool, sudo_password.clone()).await?;
     if probe.firewall_engine == FirewallEngine::Windows {
-        // Trust only the fresh rows (never the client's flags): find the rule by name, then guard and delete it.
-        let fresh: Vec<&FirewallRuleItem> = current.rules.iter().filter(|r| r.raw_spec == rule.raw_spec).collect();
-        let Some(target) = fresh.first() else {
-            return Err(vps_err(ERR_COMMAND_FAILED, "rule not found"));
-        };
-        if fresh.iter().any(|r| r.comment != crate::vps_windows::WINDOWS_RULE_GROUP) {
-            return Err(vps_err(ERR_UNSUPPORTED, "windows_rule_not_managed"));
-        }
-        crate::vps_guard::check_firewall_delete_windows(&probe.context, &current.rules, target)?;
-        let script = crate::vps_windows::build_windows_delete_rule_script(target)?;
-        return crate::vps_windows::run_windows_firewall_write(host_id, pool, &script).await;
+        let script = crate::vps_windows::build_windows_delete(&probe.context, &current, &rule.raw_spec)?;
+        return crate::vps_windows::run_windows_firewall_write(host_id, pool, &probe.context, &script).await;
     }
     crate::vps_guard::check_firewall_delete(&probe.context, &current.rules, &rule)?;
     let script = match probe.firewall_engine {
@@ -982,9 +982,8 @@ pub async fn set_firewall_state(
     writable_engine(probe.firewall_engine)?;
     let current = get_firewall_snapshot(host_id, pool, sudo_password.clone()).await?;
     if probe.firewall_engine == FirewallEngine::Windows {
-        let ensure = crate::vps_windows::windows_ensure_port(&probe.context, &current.rules);
-        let script = crate::vps_windows::build_windows_firewall_state_script(enable, ensure);
-        return crate::vps_windows::run_windows_firewall_write(host_id, pool, &script).await;
+        let script = crate::vps_windows::build_windows_set_state(&probe.context, &current, enable)?;
+        return crate::vps_windows::run_windows_firewall_write(host_id, pool, &probe.context, &script).await;
     }
     let ensure = crate::vps_guard::ssh_allow_needed(&probe.context, &current.rules).then_some(probe.context.server_port);
     let script = build_set_firewall_state_script(probe.firewall_engine, enable, ensure)?;
@@ -1185,7 +1184,7 @@ elif sudo -n true 2>/dev/null; then
   sshbox_body | sudo -n sh -s 2>&1
   rc=$?
 elif [ -n "$SSHBOX_PW" ]; then
-  {{ printf '%s\n' "$SSHBOX_PW"; sshbox_body; }} | sudo -S -p '' sh -s 2>&1
+  {{ printf '%s\n' "$SSHBOX_PW"; sshbox_body; }} | sudo -k -S -p '' sh -s 2>&1
   rc=$?
 else
   echo "SSHBOX_ERR_SUDO_PASSWORD_REQUIRED"
@@ -1254,7 +1253,7 @@ echo "UID:$uid"
 if [ "$uid" = "0" ]; then s=root
 elif sudo -n true 2>/dev/null; then s=nopasswd
 elif [ -z "$pw" ]; then s=none
-elif printf '%s\n' "$pw" | sudo -S -p '' true >/dev/null 2>&1; then s=password_ok
+elif printf '%s\n' "$pw" | sudo -k -S -p '' true >/dev/null 2>&1; then s=password_ok
 else s=password_bad
 fi
 echo "SUDO:$s"
@@ -1522,7 +1521,11 @@ pub fn render_sshd_config(base_raw: &str, managed: &[(&'static str, Option<Strin
     for line in base_raw.lines() {
         if from_match.is_empty() {
             if let Some((key, _)) = split_sshd_directive(line) {
-                let key = key.to_ascii_lowercase();
+                let key = match key.to_ascii_lowercase().as_str() {
+                    // Same directive under its old name: replaced too when the kbd line is written, or its value could win.
+                    "challengeresponseauthentication" => "kbdinteractiveauthentication".to_string(),
+                    k => k.to_string(),
+                };
                 if key == "match" {
                     from_match.push(line.to_string());
                     continue;
@@ -1848,6 +1851,9 @@ async fn run_sshd_script(
     }
 }
 
+// Runs in sh, cmd.exe and PowerShell alike (a Windows login shell has no `true`).
+const VERIFY_COMMAND: &str = "exit 0";
+
 // Opens a brand-new SSH connection on `new_port`; the live session proves nothing (spec §4.1).
 pub async fn verify_new_connection(
     pool: &SshPool,
@@ -1859,7 +1865,7 @@ pub async fn verify_new_connection(
     let before = crate::ssh_pool::list_known_hosts_at(&known_hosts);
     let mut target = host.clone();
     target.port = new_port;
-    let reason = match pool.test_exec(&target, "true").await {
+    let reason = match pool.test_exec(&target, VERIFY_COMMAND).await {
         Ok(fp) if fp == expected_fp => return Ok(()),
         Ok(fp) => format!("host key changed on port {new_port} ({fp})"),
         Err(e) => e,
@@ -2473,6 +2479,15 @@ pub async fn revoke_ssh_key(
 mod tests {
     use super::*;
 
+    // cmd.exe and PowerShell have no `true`: with it every Windows change failed its new-connection check and rolled back.
+    #[cfg(unix)]
+    #[test]
+    fn verify_command_is_a_builtin_of_sh_cmd_and_powershell() {
+        assert_eq!(VERIFY_COMMAND, "exit 0");
+        let ok = std::process::Command::new("/bin/sh").args(["-c", VERIFY_COMMAND]).env_clear().status().unwrap();
+        assert!(ok.success());
+    }
+
     // Runs shell snippets locally against fake `sudo`/`id` binaries placed first in PATH.
     #[cfg(unix)]
     pub(crate) mod shell {
@@ -2577,6 +2592,26 @@ exec sh -s"#;
             assert!(!dir.join("INJECTED").exists(), "password {pw:?} ran a command");
             assert!(classify_privileged_output(&out).unwrap().contains("SCRIPT_RAN"), "{out}");
         }
+    }
+
+    // With cached sudo credentials, plain `sudo -S` skips the password line and `sh -s` would run it as a command.
+    #[cfg(unix)]
+    #[test]
+    fn sudo_with_cached_credentials_never_feeds_the_password_to_the_shell() {
+        let dir = shell::temp_dir();
+        let bin = dir.join("bin");
+        shell::fake_bin(&bin, "id", "echo 1000");
+        // Cached creds: only `-k` makes it read the password line; otherwise it execs the shell on stdin as-is.
+        shell::fake_bin(
+            &bin,
+            "sudo",
+            "case \"$1\" in -n) exit 1;; -k) IFS= read -r _pw;; esac\nexec sh -s",
+        );
+        let pw = "S3cr3t-pw";
+        let stdin = privileged_stdin(Some(pw), None).unwrap();
+        let out = shell::run_local(&build_privileged_command("echo SCRIPT_RAN"), &stdin, &bin, &[], &dir);
+        assert!(out.contains("SCRIPT_RAN"), "{out}");
+        assert!(!out.contains(pw), "password reached the shell: {out}");
     }
 
     // New-user passwords and key lines must reach the script without being part of the command line.
@@ -2941,6 +2976,20 @@ UsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n\nMatch User git\n    A
         assert!(parse_sshd_t("port 22\n").kbd_interactive_authentication);
     }
 
+    // An uncommented ChallengeResponseAuthentication above the Match block is the same directive as KbdInteractiveAuthentication
+    // and sshd keeps the first value it reads, so writing the kbd line must replace it in place.
+    #[test]
+    fn kbd_write_replaces_the_challenge_response_alias() {
+        let base = "Port 22\nChallengeResponseAuthentication yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\nMatch Group administrators\n  ChallengeResponseAuthentication yes\n";
+        let out = render_sshd_config(base, &[("kbdinteractiveauthentication", Some("KbdInteractiveAuthentication no".into()))]);
+        let head = &out[..out.find("Match").unwrap()];
+        assert_eq!(head.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>(), ["Port 22", "KbdInteractiveAuthentication no", "PasswordAuthentication yes"]);
+        assert!(out.ends_with("Match Group administrators\n  ChallengeResponseAuthentication yes\n"), "{out:?}");
+        // Linux never writes the kbd directive, so its alias line stays untouched.
+        let out = render_sshd_config(base, &[("passwordauthentication", Some("PasswordAuthentication no".into()))]);
+        assert!(out.starts_with("Port 22\nChallengeResponseAuthentication yes\nPasswordAuthentication no\nKbdInteractiveAuthentication yes\n"), "{out:?}");
+    }
+
     // Linux must never get an extra KbdInteractiveAuthentication line written behind the user's back.
     #[test]
     fn linux_password_toggle_does_not_touch_kbd() {
@@ -3260,6 +3309,25 @@ SSH_CONNECTION:203.0.113.7 51000 198.51.100.2 2222\nSYSTEMD:1\nSSH_SOCKET:active
     fn probe_without_ssh_connection_is_unsupported() {
         let raw = PROBE_UBUNTU.replace("SSH_CONNECTION:203.0.113.7 51000 198.51.100.2 2222", "SSH_CONNECTION:");
         assert!(parse_probe_output(&raw, key_auth()).unwrap_err().starts_with("UNSUPPORTED"));
+    }
+
+    // With cached sudo credentials plain `sudo -S` succeeds without reading the password, so a wrong one read as "unlocked".
+    #[cfg(unix)]
+    #[test]
+    fn probe_wrong_password_with_cached_sudo_credentials_is_password_bad() {
+        let dir = shell::temp_dir();
+        let bin = dir.join("bin");
+        shell::fake_bin(&bin, "id", "echo 1000");
+        // Cached credentials: only `-k` makes this sudo read and check the password line.
+        shell::fake_bin(&bin, "sudo", "case \"$1\" in -n) exit 1;; -k) IFS= read -r p; [ \"$p\" = right ];; *) exit 0;; esac");
+        let run = |pw: &str| {
+            let stdin = privileged_stdin(Some(pw), None).unwrap();
+            shell::run_local(PROBE_SCRIPT, &stdin, &bin, &[("SSH_CONNECTION", "203.0.113.7 51000 198.51.100.2 22")], &dir)
+        };
+        let out = run("wrong");
+        assert!(out.contains("SUDO:password_bad"), "{out}");
+        let out = run("right");
+        assert!(out.contains("SUDO:password_ok"), "{out}");
     }
 
     // The old probe nested the password in sh -c '…', so "a;touch INJECTED" ran a command.

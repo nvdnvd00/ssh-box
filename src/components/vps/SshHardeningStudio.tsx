@@ -247,7 +247,7 @@ export const SshHardeningStudio: React.FC<VpsStudioProps> = ({ vps, probe, host,
       </fieldset>
 
       <p className="text-xs text-muted-foreground font-mono break-all">
-        {res.data?.writeTarget === "dropIn" ? t.vpsSshWriteDropIn : t.vpsSshWriteMain}
+        {probe.osFamily === "windows" ? t.vpsSshWriteWindows : res.data?.writeTarget === "dropIn" ? t.vpsSshWriteDropIn : t.vpsSshWriteMain}
       </p>
 
       {changes.length > 0 && (

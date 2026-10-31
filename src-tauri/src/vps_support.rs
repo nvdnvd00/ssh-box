@@ -55,8 +55,8 @@ pub struct OsCaps {
     pub has_net_security: bool,
 }
 
-// Flipped only once the Windows write path is verified on a real host (Task 10).
-pub const WINDOWS_SSH_WRITE_VERIFIED: bool = false;
+// Verified on the Windows 11 VM matrix (W8-W11: kept change, password off/on, timed rollback, blocked port).
+pub const WINDOWS_SSH_WRITE_VERIFIED: bool = true;
 
 fn tab(level: SupportLevel, reason: Option<&str>) -> TabSupport {
     TabSupport { level, reason: reason.map(str::to_string) }
@@ -92,8 +92,13 @@ fn compute_support_with(p: &VpsProbe, windows_ssh_write: bool) -> VpsSupport {
             ssh: match (p.privilege == PrivilegeLevel::Admin, p.caps.sshd_running) {
                 (false, _) => tab(ReadOnly, Some("windows_not_admin")),
                 (_, false) => tab(ReadOnly, Some("windows_no_sshd")),
-                _ if windows_ssh_write && p.caps.has_scheduled_tasks => tab(Full, None),
-                _ => tab(ReadOnly, Some("windows_ssh_read_only")),
+                _ if !windows_ssh_write => tab(ReadOnly, Some("windows_ssh_read_only")),
+                // The rollback timer is a scheduled task: no module, no safe write.
+                _ if !p.caps.has_scheduled_tasks => tab(ReadOnly, Some("windows_no_scheduled_tasks")),
+                // Before 8.7 KbdInteractiveAuthentication does not cover ChallengeResponseAuthentication: the coupled
+                // password switch could leave keyboard-interactive open.
+                _ if !openssh_at_least(&p.openssh_version, (8, 7)) => tab(ReadOnly, Some("windows_openssh_old")),
+                _ => tab(Full, None),
             },
             ssh_rows: SshRows { permit_root_login: false, allow_deny_users: false, ..all_rows },
             firewall: match (p.caps.has_net_security, p.privilege == PrivilegeLevel::Admin) {
@@ -105,6 +110,15 @@ fn compute_support_with(p: &VpsProbe, windows_ssh_write: bool) -> VpsSupport {
             // Windows sshd keeps offering keyboard-interactive when only PasswordAuthentication is off.
             password_coupled: true,
         },
+    }
+}
+
+// "OpenSSH_9.5p2 for Windows", "OpenSSH_for_Windows_9.5p1" or a file version "9.5.6.4"; unreadable counts as too old.
+fn openssh_at_least(version: &str, want: (u32, u32)) -> bool {
+    let mut parts = version.trim_start_matches(|c: char| !c.is_ascii_digit()).split(|c: char| !c.is_ascii_digit());
+    match (parts.next().map(str::parse::<u32>), parts.next().map(str::parse::<u32>)) {
+        (Some(Ok(major)), Some(Ok(minor))) => (major, minor) >= want,
+        _ => false,
     }
 }
 
@@ -164,7 +178,7 @@ mod tests {
         assert_eq!(compute_support(&linux(true, "firewalld")).firewall.level, SupportLevel::Full);
     }
 
-    // Windows ssh stays read-only until the VM matrix flips the flag; with it, Full needs admin + sshd + scheduled tasks, and password is coupled.
+    // The VM matrix (W8-W11) verified the Windows rollback, so the flag is on; Full still needs admin + sshd + scheduled tasks, and password is coupled.
     #[test]
     fn windows_ssh_is_full_only_with_rollback_prerequisites() {
         let mut p = linux(true, "ufw");
@@ -172,16 +186,18 @@ mod tests {
         p.privilege = PrivilegeLevel::Admin;
         p.caps.sshd_running = true;
         p.caps.has_scheduled_tasks = true;
-        assert!(!WINDOWS_SSH_WRITE_VERIFIED);
-        assert_eq!(compute_support(&p).ssh, tab(SupportLevel::ReadOnly, Some("windows_ssh_read_only")));
-        let s = compute_support_with(&p, true);
+        p.openssh_version = "OpenSSH_9.5p2 for Windows".into();
+        assert!(WINDOWS_SSH_WRITE_VERIFIED);
+        assert_eq!(compute_support_with(&p, false).ssh, tab(SupportLevel::ReadOnly, Some("windows_ssh_read_only")));
+        let s = compute_support(&p);
         assert_eq!((s.ssh, s.access.level, s.firewall.level), (tab(SupportLevel::Full, None), SupportLevel::ReadOnly, SupportLevel::Hidden));
         assert!(!s.ssh_rows.permit_root_login && !s.ssh_rows.allow_deny_users && s.ssh_rows.port && s.password_coupled);
         p.caps.has_scheduled_tasks = false;
-        assert_eq!(compute_support_with(&p, true).ssh.level, SupportLevel::ReadOnly);
+        assert_eq!(compute_support_with(&p, true).ssh, tab(SupportLevel::ReadOnly, Some("windows_no_scheduled_tasks")));
+        assert_eq!(compute_support_with(&p, false).ssh, tab(SupportLevel::ReadOnly, Some("windows_ssh_read_only")));
     }
 
-    // The notice must name the real blocker first: no admin, then no sshd, then the generic read-only note.
+    // The notice must name the real blocker first: no admin, then no sshd, then the missing rollback timer (ScheduledTasks).
     #[test]
     fn windows_support_reasons_in_priority_order() {
         let mut p = linux(true, "ufw");
@@ -191,8 +207,37 @@ mod tests {
         p.privilege = PrivilegeLevel::Admin;
         assert_eq!(why(&p), "windows_no_sshd");
         p.caps.sshd_running = true;
-        assert_eq!(why(&p), "windows_ssh_read_only");
+        assert_eq!(why(&p), "windows_no_scheduled_tasks");
         assert_eq!(compute_support(&p).access, tab(SupportLevel::ReadOnly, Some("read_only_os")));
+        p.caps.has_scheduled_tasks = true;
+        assert_eq!(why(&p), "windows_openssh_old");
+    }
+
+    // Before OpenSSH 8.7, KbdInteractiveAuthentication and ChallengeResponseAuthentication are separate directives, so the
+    // coupled password switch could leave keyboard-interactive open: such hosts, and unreadable versions, are read only.
+    #[test]
+    fn windows_ssh_is_read_only_below_openssh_8_7() {
+        let mut p = linux(true, "ufw");
+        p.os_family = OsFamily::Windows;
+        p.privilege = PrivilegeLevel::Admin;
+        p.caps.sshd_running = true;
+        p.caps.has_scheduled_tasks = true;
+        let cases = [
+            ("OpenSSH_9.5p2 for Windows", true),
+            ("OpenSSH_8.7p1 for Windows", true),
+            ("OpenSSH_for_Windows_9.5p1", true),
+            ("9.5.6.4", true),
+            ("OpenSSH_10.0p1 for Windows", true),
+            ("OpenSSH_8.6p1 for Windows", false),
+            ("OpenSSH_7.7p1 for Windows", false),
+            ("", false),
+            ("unknown", false),
+        ];
+        for (version, full) in cases {
+            p.openssh_version = version.into();
+            let want = if full { tab(SupportLevel::Full, None) } else { tab(SupportLevel::ReadOnly, Some("windows_openssh_old")) };
+            assert_eq!(compute_support(&p).ssh, want, "{version}");
+        }
     }
 
     // Spec §4: a non-admin Windows login names the same reason on every tab; admin keys are unreadable to it.

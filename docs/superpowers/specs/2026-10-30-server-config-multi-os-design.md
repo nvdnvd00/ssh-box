@@ -70,7 +70,7 @@ Mỗi tab, và khi cần thì từng dòng cài đặt, trên mỗi hệ máy c�
 ### 3.1. Phiên bản chưa thử: theo khả năng của máy (quyết định của người dùng)
 Mức hỗ trợ **không** dựa trên danh sách các bản đã thử trên máy ảo. Probe kiểm tra những thứ mà từng luồng ghi cần. Thiếu thứ nào thì ô tương ứng về mức Chỉ xem, kèm lý do. Tối thiểu cần kiểm tra:
 - **macOS, SSH ghi:** có dòng `Include /etc/ssh/sshd_config.d/*` đứng trước mọi directive (macOS 13 trở lên). Không có thì tab SSH ở mức Chỉ xem, không dùng nhánh sửa file chính trên macOS *(quyết định của Claude: bớt một luồng phải thử; macOS 12 trở xuống đã hết được Apple hỗ trợ)*. Cần có thêm các lệnh mà cơ chế hẹn giờ hoàn tác dùng tới.
-- **Windows, SSH ghi:** có `sshd.exe` và dịch vụ `sshd` đang chạy; OpenSSH đủ mới để hiểu mọi directive mà luồng ghi dùng (người làm tự xác định phiên bản tối thiểu, dưới mức đó thì Chỉ xem); có module `ScheduledTasks`.
+- **Windows, SSH ghi:** có `sshd.exe` và dịch vụ `sshd` đang chạy; có module `ScheduledTasks`; có file `sshd.exe` của Windows; OpenSSH từ **8.7** trở lên (đọc từ phiên bản trong probe, đọc không được thì coi là cũ). Lý do: trước 8.7, `KbdInteractiveAuthentication` và `ChallengeResponseAuthentication` là hai directive riêng, nên công tắc mật khẩu không đóng hẳn được đăng nhập bằng mật khẩu; dưới 8.7 thì tab SSH ở mức Chỉ xem + `windows_openssh_old` (ví dụ Windows Server 2019 / Windows 10 LTSC 2019 đi kèm 7.7p1). Khi ghi, dòng `ChallengeResponseAuthentication` có sẵn được coi là cùng một directive với `KbdInteractiveAuthentication` và được thay tại chỗ. *(quyết định của Claude, sửa sau review cuối)*
 - **Windows, Firewall ghi:** có module `NetSecurity`.
 
 Lý do chấp nhận được: mọi thay đổi SSH luôn qua bước kết nối thử mới, thất bại thì tự hoàn tác, nên một bản chưa thử có hành vi lạ vẫn quay về cấu hình cũ. Mô tả MR phải ghi trung thực những bản nào đã được thử thật.
@@ -155,7 +155,7 @@ Windows mà tài khoản đăng nhập không có quyền quản trị: mọi ta
 - **Thêm rule:** allow hoặc block, theo cổng, giao thức, nguồn, vào nhóm rule `ssh-box`.
 - **Xoá rule:** chỉ xoá được rule thuộc nhóm `ssh-box`. Các rule khác, kể cả rule `OpenSSH-Server-In-TCP` của Windows, chỉ được xem.
 - **Bật/tắt:** áp dụng cho cả 3 profile cùng lúc. Khi bật, dòng "tự thêm rule cho phép `server_port`" ở spec gốc §4.3 vẫn áp dụng.
-- **Mức phơi ra ngoài của cổng:** Windows hay cho phép kết nối theo chương trình hoặc dịch vụ, không ghi cổng. App không đối chiếu các rule loại này, vì việc đó chậm và phức tạp. Vì vậy, khi firewall đang bật mà không có rule theo cổng nào khớp, cổng hiện trạng thái **"Không xác định"** (màu `neutral`) chứ không hiện "bị chặn". Thêm giá trị này vào kiểu trạng thái và chuỗi i18n. Bộ chặn tự khoá không bị ảnh hưởng: bỏ qua các rule theo chương trình chỉ khiến nó thận trọng hơn. *(quyết định của Claude)*
+- **Mức phơi ra ngoài của cổng:** Windows hay cho phép kết nối theo chương trình hoặc dịch vụ, không ghi cổng. Rule có lọc theo dịch vụ, địa chỉ cục bộ hoặc loại card mạng không được tính. Rule có lọc theo **chương trình** chỉ được tính khi đúng file thực thi đó (so đường dẫn đầy đủ, không phân biệt hoa thường, đã mở biến môi trường như `%SystemRoot%`) đang giữ **mọi** socket trên cổng; tiến trình không đọc được đường dẫn thì không bao giờ khớp. Khi firewall đang bật mà không có rule nào được tính khớp với cổng, cổng hiện trạng thái **"Không xác định"** (màu `neutral`) chứ không hiện "bị chặn". *(quyết định của Claude, sửa sau khi thử trên Windows thật: rule `OpenSSH-Server-In-TCP` mặc định của Windows chính là rule theo chương trình; nếu bỏ qua nó, mỗi lần bật firewall app sẽ tự mở SSH cho cả profile Public)*
 - **Khác biệt quan trọng cho bộ chặn và cách tính mức phơi ra ngoài:** ở Windows Firewall, rule **block luôn thắng rule allow**, bất kể thứ tự. Không có quy tắc "rule khớp đầu tiên thắng" như `ufw`. `check_firewall_add`, `check_firewall_delete` và `compute_socket_exposure` phải dùng luật này khi engine là `windows`.
 
 **Users & Keys (chỉ xem)**
@@ -216,6 +216,28 @@ Chưa chắc chắn, phải thử trên máy ảo ngay sau khi dựng xong. Kế
 
 ---
 
+### 8.1. Kết quả thử nghiệm (2026-10-31)
+
+Máy ảo UTM: macOS 27.0.1 (OpenSSH 10.3p1), Windows 11 Pro 26H2 ARM64 (OpenSSH_9.5p2 for Windows). Thử bằng khoá SSH riêng, không dùng mật khẩu.
+
+| Điểm | Kết quả | Kết luận |
+|---|---|---|
+| 1. `Restart-Service sshd` có làm rớt phiên? | Không. Phiên vẫn chạy tiếp sau 3 giây và in kết quả | Giữ `Restart-Service` trong script áp dụng (Task 10 bước 9), không cần task `sshbox-restart` |
+| 2. Token quản trị qua SSH | Tài khoản admin: `IsInRole(Administrator) = True`. Tài khoản thường `sshbox-std`: `False` | Nhận diện `admin` / `none` đúng |
+| 3. `SSH_CONNECTION` trên Windows | Có, ví dụ `192.168.65.1 59685 192.168.65.2 22` | Đủ thông tin cho bộ chặn |
+| 4. Bootstrap + stdin, chữ "Đạt" | Chữ tiếng Việt, bí mật có `' $ ; \`` và dấu `SSHBOX_EXIT_CODE` khi `throw` đều đúng, với `DefaultShell` là cmd lẫn PowerShell. `uname -s` dưới cả hai shell chỉ báo "không có lệnh" | Bộ chạy PowerShell dùng được |
+| 5. LaunchDaemon trên macOS | Job vẫn chạy sau khi phiên SSH đóng; `launchctl bootout` huỷ được | Dùng được cho hẹn giờ hoàn tác |
+| 6. Dòng `Include` trên macOS | `Include /etc/ssh/sshd_config.d/*` là directive đầu tiên | Nhánh file phụ |
+| 7. Chỉ tắt `PasswordAuthentication` | macOS và Windows đều vẫn mời `keyboard-interactive` (`publickey,keyboard-interactive`); tắt cả hai thì chỉ còn `publickey` | `password_coupled = true` cho cả macOS lẫn Windows |
+
+Phát hiện thêm, cần xử lý ở các task Windows:
+- Tên người dùng Windows có thể có dấu cách và bị trả về dạng chữ thường (`$env:USERNAME` = `ssh box test` cho tài khoản `SSH Box Test`).
+- Với tài khoản thường, `(Get-CimInstance Win32_OperatingSystem).Caption` trả về rỗng; cần chuỗi dự phòng khi hiện tên hệ.
+- Rule mặc định `OpenSSH-Server-In-TCP` của Windows chỉ áp dụng cho profile **Private**. Mạng ảo mới được xếp vào Public nên cổng 22 bị chặn tới khi đổi profile, đúng trường hợp "rule có nhưng không có hiệu lực".
+- PowerShell in tiến trình "Preparing modules for first use" ra stderr dạng CLIXML; không ảnh hưởng vì bộ chạy chỉ đọc stdout khi thoát mã 0.
+
+---
+
 ## 9. Thứ tự thực hiện
 
 Làm tuần tự trong một luồng, trên nhánh `feat/server-config-multi-os` tách từ `develop`. Mỗi bước tối đa khoảng 400 dòng code; bước nào lớn hơn thì tách tiếp.
@@ -249,25 +271,10 @@ Mỗi bước mở thêm ô nào thì sửa bảng mức hỗ trợ và test c�
 8. Firewall được bảo vệ bằng bộ chặn như Linux, không cần hẹn giờ hoàn tác (§3).
 9. Trên macOS (và Windows nếu cần), dòng "Đăng nhập bằng mật khẩu" điều khiển cả `KbdInteractiveAuthentication` (§6.1).
 10. Tài khoản Windows không phải admin: hiện thông báo kèm những gì đọc được, không tự parse `sshd_config` (§4).
-11. Cổng trên Windows không khớp rule theo cổng nào thì hiện "Không xác định" (§6.2).
+11. Cổng trên Windows không khớp rule nào được tính thì hiện "Không xác định"; rule theo chương trình chỉ được tính khi đúng file thực thi đó giữ cổng (§6.2).
 12. macOS không có dòng `Include` thì tab SSH ở mức Chỉ xem (§3.1).
-
-### 8.1. Kết quả thử nghiệm (2026-10-31)
-
-Máy ảo UTM: macOS 27.0.1 (OpenSSH 10.3p1), Windows 11 Pro 26H2 ARM64 (OpenSSH_9.5p2 for Windows). Thử bằng khoá SSH riêng, không dùng mật khẩu.
-
-| Điểm | Kết quả | Kết luận |
-|---|---|---|
-| 1. `Restart-Service sshd` có làm rớt phiên? | Không. Phiên vẫn chạy tiếp sau 3 giây và in kết quả | Giữ `Restart-Service` trong script áp dụng (Task 10 bước 9), không cần task `sshbox-restart` |
-| 2. Token quản trị qua SSH | Tài khoản admin: `IsInRole(Administrator) = True`. Tài khoản thường `sshbox-std`: `False` | Nhận diện `admin` / `none` đúng |
-| 3. `SSH_CONNECTION` trên Windows | Có, ví dụ `192.168.65.1 59685 192.168.65.2 22` | Đủ thông tin cho bộ chặn |
-| 4. Bootstrap + stdin, chữ "Đạt" | Chữ tiếng Việt, bí mật có `' $ ; \`` và dấu `SSHBOX_EXIT_CODE` khi `throw` đều đúng, với `DefaultShell` là cmd lẫn PowerShell. `uname -s` dưới cả hai shell chỉ báo "không có lệnh" | Bộ chạy PowerShell dùng được |
-| 5. LaunchDaemon trên macOS | Job vẫn chạy sau khi phiên SSH đóng; `launchctl bootout` huỷ được | Dùng được cho hẹn giờ hoàn tác |
-| 6. Dòng `Include` trên macOS | `Include /etc/ssh/sshd_config.d/*` là directive đầu tiên | Nhánh file phụ |
-| 7. Chỉ tắt `PasswordAuthentication` | macOS và Windows đều vẫn mời `keyboard-interactive` (`publickey,keyboard-interactive`); tắt cả hai thì chỉ còn `publickey` | `password_coupled = true` cho cả macOS lẫn Windows |
-
-Phát hiện thêm, cần xử lý ở các task Windows:
-- Tên người dùng Windows có thể có dấu cách và bị trả về dạng chữ thường (`$env:USERNAME` = `ssh box test` cho tài khoản `SSH Box Test`).
-- Với tài khoản thường, `(Get-CimInstance Win32_OperatingSystem).Caption` trả về rỗng; cần chuỗi dự phòng khi hiện tên hệ.
-- Rule mặc định `OpenSSH-Server-In-TCP` của Windows chỉ áp dụng cho profile **Private**. Mạng ảo mới được xếp vào Public nên cổng 22 bị chặn tới khi đổi profile, đúng trường hợp "rule có nhưng không có hiệu lực".
-- PowerShell in tiến trình "Preparing modules for first use" ra stderr dạng CLIXML; không ảnh hưởng vì bộ chạy chỉ đọc stdout khi thoát mã 0.
+13. Windows: SSH chỉ sửa được khi OpenSSH ≥ 8.7; dòng `ChallengeResponseAuthentication` có sẵn được thay tại chỗ khi ghi (§3.1).
+14. Windows Firewall: từ chối bật firewall (`windows_block_covers_me`) khi đang có rule chặn phủ IP và cổng SSH của người dùng, kể cả rule chặn mọi cổng. Với **rule chặn** (không áp cho rule cho phép), app cố tình nghiêng về an toàn: nguồn là dải `a-b` được so đúng dải; nguồn là từ khoá (`LocalSubnet`…) hoặc đọc không được thì coi như có phủ; không xác định được profile của card mạng SSH thì coi rule chặn áp cho mọi profile; rule chặn gắn với `sshd.exe` (đúng file đang giữ cổng SSH, hoặc chưa đọc được đường dẫn) hay với dịch vụ `sshd` được tính. Rule "chặn ứng dụng" cho chương trình khác của Windows không được tính, để không từ chối nhầm. Rule chặn ICMP hay theo mã giao thức khác TCP/UDP được bỏ qua. Riêng phần **hiển thị** mức phơi ra ngoài dùng tiêu chí chặt, để không bao giờ hiện một cổng an toàn hơn thực tế (§6.2).
+15. Windows Firewall: một rule chỉ có hiệu lực theo profile của **đúng card mạng nhận kết nối SSH**; không xác định được profile đó thì chỉ tin rule áp dụng cho mọi profile (§6.2).
+16. Windows Firewall: đọc trạng thái và rule từ chính sách đang áp dụng thật (`ActiveStore`, gồm Group Policy); ghi vào kho mặc định; sau khi bật/tắt thì đọc lại để hiện đúng trạng thái thật (§6.2).
+17. Windows Firewall: đọc thiết lập "chặn mọi kết nối vào, kể cả ứng dụng được phép" (`AllowInboundRules`). Nếu đặt `False` trên profile của card mạng SSH (hoặc trên bất kỳ profile nào khi chưa xác định được profile đó), rule cho phép không còn hiệu lực và app từ chối bật firewall (`windows_inbound_allows_off`) (§6.2).

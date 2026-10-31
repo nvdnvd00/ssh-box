@@ -155,6 +155,7 @@ export interface AppI18nStrings {
   vpsSshAliveCount: string;
   vpsSshWriteDropIn: string;
   vpsSshWriteMain: string;
+  vpsSshWriteWindows: string;
   vpsSshPending: string;
   vpsSshProgressTitle: string;
   vpsSshRollbackIn: string;
@@ -183,6 +184,7 @@ export interface AppI18nStrings {
   vpsFwSource: string;
   vpsFwMyIp: string;
   vpsFwPort: string;
+  vpsFwPortOnly: string;
   vpsFwProto: string;
   vpsFwAny: string;
   vpsFwAdd: string;
@@ -245,6 +247,7 @@ export interface AppI18nStrings {
   vpsPrivSudoPassword: string;
   vpsPrivAdmin: string;
   vpsPrivNone: string;
+  vpsPrivStandard: string;
   vpsSudoTitle: string;
   vpsSudoHint: string;
   vpsSudoLocalLabel: string;
@@ -394,6 +397,10 @@ const VI_STRINGS: AppI18nStrings = {
     login_user: "Đây là user mà ứng dụng đang đăng nhập.",
     last_sudo_user: "Đây là user cuối cùng có quyền sudo.",
     key_in_use: "Đây là SSH key mà ứng dụng đang dùng để đăng nhập.",
+    windows_block_covers_me:
+      "Đang có rule chặn chính kết nối SSH của bạn. Bật firewall lúc này sẽ cắt kết nối, nên ứng dụng không bật.",
+    windows_inbound_allows_off:
+      "Firewall đang đặt chế độ chặn mọi kết nối vào, kể cả ứng dụng được phép. Bật firewall lúc này sẽ cắt SSH, nên ứng dụng không bật.",
   },
   vpsUnsupportedReasons: {
     linux_only: "Cấu hình VPS không dùng cho máy local",
@@ -401,6 +408,8 @@ const VI_STRINGS: AppI18nStrings = {
     windows_not_admin: "Tài khoản này không có quyền quản trị nên chỉ xem được.",
     windows_no_sshd: "Dịch vụ OpenSSH Server (sshd) không chạy nên chỉ xem được.",
     windows_ssh_read_only: "Trên Windows, cấu hình SSH hiện chỉ xem được.",
+    windows_no_scheduled_tasks: "Máy này thiếu module ScheduledTasks nên cấu hình SSH chỉ xem được.",
+    windows_openssh_old: "Bản OpenSSH trên máy này cũ hơn 8.7 nên cấu hình SSH chỉ xem được.",
     macos_no_dropin: "Bản macOS này không có thư mục sshd_config.d nên chỉ xem được.",
     read_only_os: "Trên hệ điều hành này, mục này chỉ xem được.",
     hidden_setting: "Cài đặt này không sửa được trên hệ điều hành này.",
@@ -455,6 +464,7 @@ const VI_STRINGS: AppI18nStrings = {
   vpsPrivSudoPassword: "Sudo đã mở khoá",
   vpsPrivAdmin: "Quản trị viên",
   vpsPrivNone: "Chưa có quyền sudo",
+  vpsPrivStandard: "Tài khoản thường",
   vpsSudoTitle: "Mật khẩu sudo",
   vpsSudoLocalLabel: "Máy này",
   vpsSudoHint: "Chỉ giữ trong bộ nhớ cho phiên làm việc này, không lưu lại.",
@@ -486,6 +496,7 @@ const VI_STRINGS: AppI18nStrings = {
   vpsSshAliveCount: "Số lần kiểm tra không phản hồi trước khi ngắt",
   vpsSshWriteDropIn: "Thay đổi được ghi vào /etc/ssh/sshd_config.d/00-sshbox.conf",
   vpsSshWriteMain: "Thay đổi được ghi vào /etc/ssh/sshd_config",
+  vpsSshWriteWindows: "Thay đổi được ghi vào C:\\ProgramData\\ssh\\sshd_config",
   vpsSshPending: "Một thay đổi trước đó đang chờ xác minh hoặc hoàn tác.",
   vpsSshProgressTitle: "Đang áp dụng thay đổi SSH",
   vpsSshRollbackIn: "Tự hoàn tác sau {s} giây nếu không xác minh được",
@@ -514,6 +525,7 @@ const VI_STRINGS: AppI18nStrings = {
   vpsFwSource: "Nguồn (IP hoặc dải IP, để trống là mọi nơi)",
   vpsFwMyIp: "IP của tôi",
   vpsFwPort: "Cổng (để trống là mọi cổng)",
+  vpsFwPortOnly: "Cổng",
   vpsFwProto: "Giao thức",
   vpsFwAny: "Tất cả",
   vpsFwAdd: "Thêm",
@@ -686,6 +698,10 @@ const EN_STRINGS: AppI18nStrings = {
     login_user: "This is the user the app signs in as.",
     last_sudo_user: "This is the last user with sudo.",
     key_in_use: "This is the SSH key the app signs in with.",
+    windows_block_covers_me:
+      "A rule blocks your own SSH connection. Turning the firewall on now would cut you off, so the app will not do it.",
+    windows_inbound_allows_off:
+      "The firewall is set to block all incoming connections, even allowed apps. Turning it on now would cut SSH, so the app will not do it.",
   },
   vpsUnsupportedReasons: {
     linux_only: "Server Config is not available for the local machine",
@@ -693,6 +709,8 @@ const EN_STRINGS: AppI18nStrings = {
     windows_not_admin: "This account is not an administrator, so settings are read only.",
     windows_no_sshd: "The OpenSSH Server service (sshd) is not running, so settings are read only.",
     windows_ssh_read_only: "On Windows, SSH settings are read only for now.",
+    windows_no_scheduled_tasks: "This machine lacks the ScheduledTasks module, so SSH settings are read only.",
+    windows_openssh_old: "OpenSSH on this machine is older than 8.7, so SSH settings are read only.",
     macos_no_dropin: "This macOS version has no sshd_config.d folder, so settings are read only.",
     read_only_os: "On this operating system, this section is read only.",
     hidden_setting: "This setting cannot be changed on this operating system.",
@@ -747,6 +765,7 @@ const EN_STRINGS: AppI18nStrings = {
   vpsPrivSudoPassword: "Sudo unlocked",
   vpsPrivAdmin: "Administrator",
   vpsPrivNone: "No sudo yet",
+  vpsPrivStandard: "Standard account",
   vpsSudoTitle: "Sudo password",
   vpsSudoLocalLabel: "This machine",
   vpsSudoHint: "Kept in memory for this session only, never saved.",
@@ -778,6 +797,7 @@ const EN_STRINGS: AppI18nStrings = {
   vpsSshAliveCount: "Missed keep-alives before disconnect",
   vpsSshWriteDropIn: "Changes are written to /etc/ssh/sshd_config.d/00-sshbox.conf",
   vpsSshWriteMain: "Changes are written to /etc/ssh/sshd_config",
+  vpsSshWriteWindows: "Changes are written to C:\\ProgramData\\ssh\\sshd_config",
   vpsSshPending: "A previous change is still waiting to be verified or rolled back.",
   vpsSshProgressTitle: "Applying SSH changes",
   vpsSshRollbackIn: "Rolls back in {s}s unless verified",
@@ -806,6 +826,7 @@ const EN_STRINGS: AppI18nStrings = {
   vpsFwSource: "Source (IP or range, empty = anywhere)",
   vpsFwMyIp: "My IP",
   vpsFwPort: "Port (empty = all ports)",
+  vpsFwPortOnly: "Port",
   vpsFwProto: "Protocol",
   vpsFwAny: "Any",
   vpsFwAdd: "Add",

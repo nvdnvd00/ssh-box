@@ -12,6 +12,7 @@
 //! W14-W16 do the same with an ICMPv4 block, a .1-.10 block in that /24 and AllowInboundRules False on all three
 //! profiles (restored to their original values), W18 with AllowLocalFirewallRules False in the local GPO; a SYSTEM task,
 //! registered before each change, undoes it after 120s in case an enable that should be refused goes through.
+//! W17 adds and removes a throwaway admin `mxpw` with a password.
 //! Run (MX_DISTRO = ubuntu | debian | rocky; MX_ONLY=S1,S5 runs a subset):
 //!   MX_VM=u24 MX_IP=<lima0 address> MX_USER=$USER MX_KEY=$HOME/.lima/_config/user MX_DISTRO=ubuntu \
 //!   env -u SSH_AUTH_SOCK cargo test --manifest-path src-tauri/Cargo.toml --test vps_matrix -- --ignored --nocapture
@@ -874,6 +875,40 @@ async fn w18_local_rules_off_refuses(pool: &SshPool, h: &HostEntry) -> Result<St
     win_enable_refused(pool, h, TMP, &set("False"), &set("NotConfigured"), "windows_local_rules_off").await
 }
 
+// A password session on Windows: turning password login off must be refused. Throwaway admin with S3's test password.
+async fn w17_password_session(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let main = pool;
+    // Win32-OpenSSH keeps a password user's profile hive loaded until the next reboot: drop an earlier run's leftover first.
+    ps(pool, h, "Get-CimInstance Win32_UserProfile | Where-Object { $_.LocalPath -like '*\\mxpw*' -and -not $_.Loaded } | Remove-CimInstance").await;
+    let made = ps(pool, h, "New-LocalUser -Name mxpw -Password (ConvertTo-SecureString 'Mx-Test-123' -AsPlainText -Force) -PasswordNeverExpires | Out-Null; Add-LocalGroupMember -SID S-1-5-32-544 -Member mxpw; 'MADE'").await;
+    ensure(made.ends_with("MADE"), format!("mxpw not created: {made}"))?;
+    let pw = host("mx-pw", "mxpw", None, 22);
+    upsert_custom_host(pw.clone())?;
+    let pw_pool = SshPool::default();
+    let r = async {
+        let pool = &pw_pool;
+        pool.get_or_connect(&pw, Some("Mx-Test-123".into())).await?;
+        ensure(pool.session_auth(&pw.id).await == Some(AuthUsed::Password), "session not password".into())?;
+        let p = probe(&pw.id, pool, None).await?;
+        ensure(p.privilege == PrivilegeLevel::Admin, format!("privilege {:?}", p.privilege))?;
+        let view = get_sshd_view(&pw.id, pool, None).await?;
+        let off = SshdSettings { password_authentication: false, kbd_interactive_authentication: false, ..view.settings };
+        let refused = apply_sshd_settings(&pw.id, pool, None, off).await;
+        ensure(matches!(&refused, Err(e) if e == "LOCKOUT_BLOCKED: password_in_use"), format!("password off: {refused:?}"))?;
+        let pa = win_effective(main, h, "passwordauthentication").await;
+        ensure(pa == "passwordauthentication yes", format!("sshd -T after refusal: {pa}"))?;
+        Ok::<_, String>("password off refused: password_in_use; sshd unchanged".to_string())
+    }
+    .await;
+    drop(pw_pool);
+    let gone = ps(pool, h, "Remove-LocalUser -Name mxpw
+try { Get-CimInstance Win32_UserProfile | Where-Object { $_.LocalPath -like '*\\mxpw*' } | Remove-CimInstance -ErrorAction Stop } catch { }
+'USER:' + [bool](Get-LocalUser -Name mxpw -ErrorAction SilentlyContinue) + ' PROFILE:' + @(Get-CimInstance Win32_UserProfile | Where-Object { $_.LocalPath -like '*\\mxpw*' }).Count").await;
+    let ok = r?;
+    ensure(gone.starts_with("USER:False"), format!("mxpw not removed: {gone}"))?;
+    Ok(if gone.ends_with("PROFILE:0") { ok } else { format!("{ok}; profile C:\\Users\\mxpw left until the next reboot (hive still loaded)") })
+}
+
 fn run_windows(only: &str) {
     let h = host("mx-main", &env("MX_USER"), Some(env("MX_KEY")), 22);
     let std_host = host("mx-std", "sshbox-std", Some(env("MX_KEY")), 22);
@@ -917,6 +952,7 @@ fn run_windows(only: &str) {
             println!("SKIP W8-W11: WINDOWS_SSH_WRITE_VERIFIED is false");
         }
         run!("W12 PowerShell DefaultShell", w12_powershell_default_shell(&pool, &h));
+        run!("W17 password session", w17_password_session(&pool, &h));
         assert_eq!(failed, 0);
     });
 }

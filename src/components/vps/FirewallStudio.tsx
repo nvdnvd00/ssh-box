@@ -72,8 +72,10 @@ export const FirewallStudio: React.FC<VpsStudioProps> = ({ vps, probe }) => {
   if (skipRead) return <Notice tone="warn">{t.vpsUnsupportedReasons[reason!] ?? reason}</Notice>;
   if (!snap) return res.error ? <Notice tone="danger">{res.error}</Notice> : null;
 
-  // firewalld services/ports are listed once per address family; show each rule once.
-  const rules = snap.rules.filter((r, i, all) => all.findIndex((o) => o.rawSpec === r.rawSpec) === i);
+  // firewalld services/ports are listed once per address family; show each rule once. On Windows one named rule
+  // gives several rows (one per source, tcp and udp), so the name alone does not identify a row.
+  const rowKey = (r: FirewallRuleItem) => [r.rawSpec, r.action, r.toPort, r.protocol, r.fromSource].join("|");
+  const rules = snap.rules.filter((r, i, all) => all.findIndex((o) => rowKey(o) === rowKey(r)) === i);
   // Windows Firewall only allows or blocks, and every rule needs a port: offer nothing that would always fail.
   const isWindows = engine === "windows";
   const portMissing = isWindows && !form.port.trim();
@@ -129,7 +131,7 @@ export const FirewallStudio: React.FC<VpsStudioProps> = ({ vps, probe }) => {
         {rules.length === 0 && <p className="px-4 py-3 text-sm text-muted-foreground">{t.vpsFwNoRules}</p>}
         {rules.map((r) => (
           <SettingRow
-            key={r.rawSpec}
+            key={rowKey(r)}
             label={describe(r.action, r.toPort === "Anywhere" ? "" : r.toPort.replace(/\/(tcp|udp)$/, ""), r.protocol, r.fromSource)}
             directive={r.rawSpec}
           >

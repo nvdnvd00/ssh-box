@@ -158,6 +158,19 @@ if ((Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) -and (Get-Sche
     )
 }
 
+// `sshd -T` for the config in $SSHBOX_SECRET (sshd_config without ssh-box's lines), read from a side copy.
+pub fn windows_sshd_baseline_script(spec: &str) -> String {
+    format!(
+        r#"{SSHD_HELPER}$C = '{WINDOWS_SSHD_CONFIG}.sshbox.baseline'
+[IO.File]::WriteAllText($C, $SSHBOX_SECRET, (New-Object Text.UTF8Encoding $false))
+try {{ $r = sshbox_sshd ('-T -C "' + {spec} + '" -f "' + $C + '"') }} finally {{ Remove-Item -LiteralPath $C -Force -ErrorAction SilentlyContinue }}
+if ($r.Code -ne 0) {{ throw "sshd -T failed with exit code $($r.Code): $($r.Err)" }}
+$r.Out
+"#,
+        spec = ps_quote(spec)
+    )
+}
+
 pub const WINDOWS_ROLLBACK_TASK: &str = "sshbox-rollback";
 pub const WINDOWS_ROLLBACK_SCRIPT: &str = r"C:\ProgramData\ssh\sshbox-rollback.ps1";
 
@@ -182,13 +195,9 @@ fn windows_run_rollback_cmd() -> String {
 
 // Runs as SYSTEM 60s after arming (or by "Roll back now"). Unregistering is last: it may end the task running this script.
 pub fn build_sshd_rollback_script_windows(new_port: Option<u16>) -> String {
-    // Same DisplayName that new_rule_cmd gives an "allow <port>/tcp from any" rule.
-    let rule = new_port.map_or(String::new(), |p| {
-        format!(
-            "Get-NetFirewallRule -Group {} -ErrorAction SilentlyContinue | Where-Object {{ $_.DisplayName -ceq {} }} | Remove-NetFirewallRule\n",
-            ps_quote(WINDOWS_RULE_GROUP),
-            ps_quote(&format!("{WINDOWS_RULE_GROUP}: ALLOW {p}/tcp from any"))
-        )
+    // By the Name the apply recorded: a same-named allow the user already had is not this apply's.
+    let rule = new_port.map_or(String::new(), |_| {
+        "if (Test-Path -LiteralPath \"$F.sshbox.fwrule\") { Remove-NetFirewallRule -Name ([IO.File]::ReadAllText(\"$F.sshbox.fwrule\")) -ErrorAction SilentlyContinue; Remove-Item -LiteralPath \"$F.sshbox.fwrule\" -Force }\n".to_string()
     });
     format!(
         "$ErrorActionPreference = 'Stop'\n$ok = $true\n{}try {{ sshbox_restore }} catch {{ $ok = $false }}\nRemove-Item -LiteralPath \"$F.sshbox.new\" -Force -ErrorAction SilentlyContinue\ntry {{ Restart-Service sshd }} catch {{ $ok = $false }}\ntry {{ {rule}}} catch {{ $ok = $false }}\nRemove-Item -LiteralPath '{WINDOWS_ROLLBACK_SCRIPT}' -Force -ErrorAction SilentlyContinue\nUnregister-ScheduledTask -TaskName {WINDOWS_ROLLBACK_TASK} -Confirm:$false -ErrorAction SilentlyContinue\nif (-not $ok) {{ exit 1 }}\n",
@@ -199,7 +208,13 @@ pub fn build_sshd_rollback_script_windows(new_port: Option<u16>) -> String {
 // The new config arrives in $SSHBOX_SECRET (LF, no BOM). BOM and line endings of the existing file are put back here (the only layer that does it).
 // Order matters: validate a side file first (sshd -t can hang on a bad config), arm the rollback, only then replace the live file.
 pub fn build_sshd_apply_script_windows(new_port: Option<u16>, port: u16) -> String {
-    let fw = new_port.map_or(String::new(), |p| new_rule_cmd("allow", "any", &p.to_string(), "tcp", "tcp"));
+    // The rule gets its own Name, recorded before it exists, so the rollback removes this rule and no other.
+    let fw = new_port.map_or(String::new(), |p| {
+        format!(
+            "$fwn = 'ssh-box-' + [guid]::NewGuid(); [IO.File]::WriteAllText(\"$F.sshbox.fwrule\", $fwn)\n  {}  ",
+            new_rule_cmd("allow", "any", &p.to_string(), "tcp", "tcp").replacen("New-NetFirewallRule ", "New-NetFirewallRule -Name $fwn ", 1)
+        )
+    });
     format!(
         r#"{restore}{SSHD_HELPER}$R = '{WINDOWS_ROLLBACK_SCRIPT}'
 $N = "$F.sshbox.new"
@@ -214,6 +229,7 @@ if ($bom) {{ $text = [string][char]0xFEFF + $text }}
 $v = sshbox_sshd ('-t -f "' + $N + '"')
 if ($v.Code -ne 0) {{ Remove-Item -LiteralPath $N -Force -ErrorAction SilentlyContinue; 'SSHBOX_SSHD_INVALID'; ($v.Err -split "`r?`n")[0]; throw "sshd -t failed with exit code $($v.Code)" }}
 try {{
+  Remove-Item -LiteralPath "$F.sshbox.fwrule" -Force -ErrorAction SilentlyContinue
   if (Test-Path -LiteralPath $F) {{ Copy-Item -LiteralPath $F -Destination "$F.sshbox.bak" -Force; Remove-Item -LiteralPath "$F.sshbox.absent" -Force -ErrorAction SilentlyContinue }}
   else {{ New-Item -ItemType File -Path "$F.sshbox.absent" -Force | Out-Null; Remove-Item -LiteralPath "$F.sshbox.bak" -Force -ErrorAction SilentlyContinue }}
   [IO.File]::WriteAllText($R, @'
@@ -249,7 +265,7 @@ pub fn windows_cleanup_script() -> String {
     format!(
         r#"{restore}Unregister-ScheduledTask -TaskName {WINDOWS_ROLLBACK_TASK} -Confirm:$false -ErrorAction SilentlyContinue
 if (-not (Test-Path -LiteralPath '{WINDOWS_ROLLBACK_SCRIPT}')) {{ 'SSHBOX_ALREADY_ROLLED_BACK'; throw 'the change was already rolled back' }}
-Remove-Item -LiteralPath "$F.sshbox.bak", "$F.sshbox.absent", '{WINDOWS_ROLLBACK_SCRIPT}' -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath "$F.sshbox.bak", "$F.sshbox.absent", "$F.sshbox.fwrule", '{WINDOWS_ROLLBACK_SCRIPT}' -Force -ErrorAction SilentlyContinue
 "#,
         restore = windows_restore_fn()
     )
@@ -283,8 +299,7 @@ pub fn parse_windows_sshd_view(raw: &str) -> Result<SshdView, String> {
 
 pub async fn get_windows_sshd_view(host_id: &str, pool: &SshPool, probe: &VpsProbe) -> Result<SshdView, String> {
     check_windows_readable(probe)?;
-    let c = &probe.context;
-    let spec = format!("user={},host={},addr={},laddr={},lport={}", c.login_user, c.client_ip, c.client_ip, c.server_ip, c.server_port);
+    let spec = crate::vps_config::sshd_match_spec(&probe.context);
     parse_windows_sshd_view(&run_windows_script(host_id, pool, &windows_sshd_view_script(&spec), None).await?)
 }
 
@@ -1599,7 +1614,7 @@ mod tests {
     // A hung sshd.exe must never hang the app: no Windows script may call sshd.exe except through the bounded helper.
     #[test]
     fn windows_scripts_only_call_sshd_through_the_timeout_helper() {
-        let scripts = [windows_sshd_view_script("user=a"), build_sshd_apply_script_windows(Some(2222), 2222)];
+        let scripts = [windows_sshd_view_script("user=a"), build_sshd_apply_script_windows(Some(2222), 2222), windows_sshd_baseline_script("user=a")];
         for s in &scripts {
             assert!(s.contains("WaitForExit(15000)") && s.contains(".Kill()"));
             assert!(!s.contains("& $sshd") && !s.contains("& \"$env:WINDIR"), "{s}");
@@ -1636,11 +1651,26 @@ mod tests {
         assert!(s.contains("$SSHBOX_SECRET") && s.contains("0xEF") && s.contains("`r`n"));
     }
 
+    // sshd is asked about a side copy, which goes away even when sshd fails; the live sshd_config is never written.
+    #[test]
+    fn windows_baseline_reads_a_side_copy_and_removes_it() {
+        let s = windows_sshd_baseline_script("user=a");
+        assert!(s.contains("-f \"' + $C + '\"") && s.contains("WriteAllText($C, $SSHBOX_SECRET"), "{s}");
+        assert!(s.find("finally { Remove-Item -LiteralPath $C").unwrap() < s.find("throw").unwrap(), "{s}");
+        assert!(!s.contains(&format!("'{WINDOWS_SSHD_CONFIG}'")), "{s}");
+    }
+
     // A rolled-back port change must not leave its firewall hole, and the task and script must not linger.
+    // The hole is the one rule the apply created (by its recorded Name): a same-named allow the user already had stays.
     #[test]
     fn windows_rollback_unregisters_task_and_removes_port_rule() {
         let s = build_sshd_rollback_script_windows(Some(2222));
-        assert!(s.contains("Remove-NetFirewallRule") && s.contains("ALLOW 2222/tcp from any"));
+        assert!(s.contains("Remove-NetFirewallRule -Name ([IO.File]::ReadAllText(\"$F.sshbox.fwrule\"))"), "{s}");
+        assert!(!s.contains("DisplayName"), "a rule picked by DisplayName can be the user's own: {s}");
+        let apply = build_sshd_apply_script_windows(Some(2222), 2222);
+        let (mark, create) = (apply.find("WriteAllText(\"$F.sshbox.fwrule\", $fwn)").unwrap(), apply.find("New-NetFirewallRule -Name $fwn").unwrap());
+        assert!(mark < create, "the name is recorded before the rule exists, so a rollback can always find it");
+        assert!(windows_cleanup_script().contains("\"$F.sshbox.fwrule\""), "a kept change must drop the marker");
         assert!(s.find("Restart-Service sshd").unwrap() < s.find("Remove-NetFirewallRule").unwrap());
         assert!(s.find("Remove-Item -LiteralPath 'C:\\ProgramData\\ssh\\sshbox-rollback.ps1'").unwrap() < s.find("Unregister-ScheduledTask -TaskName sshbox-rollback").unwrap());
         assert!(!build_sshd_rollback_script_windows(None).contains("Remove-NetFirewallRule"));

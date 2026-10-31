@@ -170,6 +170,47 @@ fn dropin_wins_over_cloud_init_and_main_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// The apply compares a wanted value with this: sshd's own answer for the config without 00-sshbox.conf (cloud-init's
+// yes and the main file's 4 here), read from copies so the live files never change.
+#[test]
+#[ignore]
+fn baseline_is_sshd_without_the_ssh_box_dropin() {
+    use ssh_box_lib::vps_config::{baseline_config, parse_sshd_t, sshd_baseline_script, SshdView, WriteTarget};
+    let dir = std::env::temp_dir().join(format!("sshbox-it-{}-baseline", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let d = dir.join("sshd_config.d");
+    std::fs::create_dir_all(&d).unwrap();
+    let host_key = dir.join("host_key");
+    keygen(&host_key);
+    let ours = "# Managed by ssh-box\nPasswordAuthentication no\nMaxAuthTries 2\n";
+    std::fs::write(d.join("00-sshbox.conf"), ours).unwrap();
+    std::fs::write(d.join("50-cloud-init.conf"), "PasswordAuthentication yes\n").unwrap();
+    let view = SshdView {
+        write_target: WriteTarget::DropIn,
+        main_raw: format!("Include /etc/ssh/sshd_config.d/*.conf\nMaxAuthTries 4\nHostKey {}\n", host_key.display()),
+        dropin_raw: ours.to_string(),
+        ..Default::default()
+    };
+    let changes = [("passwordauthentication", Some("PasswordAuthentication yes".to_string())), ("maxauthtries", Some("MaxAuthTries 4".to_string()))];
+    let work = dir.join("work");
+    let cfg = baseline_config(&view, &changes, work.to_str().unwrap()).unwrap();
+    std::fs::write(dir.join("secret"), cfg).unwrap();
+    let spec = format!("user={},host=127.0.0.1,addr=127.0.0.1,laddr=127.0.0.1,lport=22", std::env::var("USER").unwrap());
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(sshd_baseline_script(&spec, d.to_str().unwrap(), work.to_str().unwrap()))
+        .env("SSHBOX_SECRET_FILE", dir.join("secret"))
+        .env("PATH", "/usr/sbin:/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let base = parse_sshd_t(&String::from_utf8_lossy(&out.stdout));
+    assert!(base.password_authentication && base.max_auth_tries == 4, "read ssh-box's own lines: {base:?}");
+    assert!(!work.exists(), "copies left behind");
+    assert_eq!(std::fs::read_to_string(d.join("00-sshbox.conf")).unwrap(), ours);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // The pool's sessions live on the runtime that opened them, so each test uses one block_on.
 async fn fingerprint_of(pool: &SshPool, host: &HostEntry) -> String {
     pool.get_or_connect(host, None).await.unwrap();

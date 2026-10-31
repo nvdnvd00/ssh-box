@@ -5,8 +5,8 @@
 //!   limactl start --name=u24 --vm-type=vz --network=vzNAT --plain template://ubuntu-24.04
 //!   (also template://debian-13 and template://rocky-9; ufw / firewalld + semanage may need installing)
 //! MX_DISTRO=macos runs the macOS scenarios M1-M6 (VM user needs passwordless sudo; M3 adds and removes `mxpw`).
-//! MX_DISTRO=windows runs W1-W12: MX_USER is an Administrator (key in administrators_authorized_keys),
-//! `sshbox-std` a standard account accepting the same key; W8-W11 (sshd writes) run only when
+//! MX_DISTRO=windows runs W1-W19: MX_USER is an Administrator (key in administrators_authorized_keys),
+//! `sshbox-std` a standard account accepting the same key; W8-W11 and W19 (sshd writes) run only when
 //! WINDOWS_SSH_WRITE_VERIFIED is true; W7 reboots the VM (Restart-Computer) unless MX_NO_REBOOT is set.
 //! W13 adds a temporary port-less block for MX_IP's /24 (raw admin PowerShell, not the app) while the firewall is off.
 //! W14-W16 do the same with an ICMPv4 block, a .1-.10 block in that /24 and AllowInboundRules False on all three
@@ -103,11 +103,46 @@ async fn s1_port_change(pool: &SshPool, h: &mut HostEntry, distro: &str) -> Resu
     Ok(note + " moved back to 22")
 }
 
+// "ALLOW" when the firewall allows port/tcp the way the app opens it, "LABEL" when SELinux labels it ssh_port_t.
+async fn port_marks(pool: &SshPool, h: &HostEntry, port: u16) -> String {
+    root(pool, h, &format!("ufw show added 2>/dev/null | grep -qx 'ufw allow {port}/tcp' && echo ALLOW; \
+firewall-cmd --permanent --query-port={port}/tcp >/dev/null 2>&1 && echo ALLOW; \
+semanage port -l 2>/dev/null | grep '^ssh_port_t' | grep -qw {port} && echo LABEL; true")).await.trim().to_string()
+}
+
+async fn firewall_on(pool: &SshPool, h: &HostEntry) -> bool {
+    root(pool, h, "ufw status 2>/dev/null | grep -q '^Status: active' && echo FW_ON; firewall-cmd --state >/dev/null 2>&1 && echo FW_ON; true").await.contains("FW_ON")
+}
+
 async fn s2_blocked_port(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let fw = firewall_on(pool, h).await;
+    let note = blocked_port_rollback(pool, h, 2300).await?;
+    // The rollback takes back the allow and the SELinux label the apply added.
+    let marks = port_marks(pool, h, 2300).await;
+    ensure(marks.is_empty(), format!("rollback left {marks:?} for 2300"))?;
+    Ok(format!("{note}; no 2300 allow/label left (firewall on: {fw})"))
+}
+
+// An allow (and on RHEL a label) the host already had for the new port is not the apply's to remove.
+async fn s8_existing_allow_kept(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    ensure(firewall_on(pool, h).await, "firewall not active: there is no allow to keep".into())?;
+    root(pool, h, "ufw allow 2301/tcp; firewall-cmd --permanent --add-port=2301/tcp && firewall-cmd --reload; \
+semanage port -a -t ssh_port_t -p tcp 2301; true").await;
+    let before = port_marks(pool, h, 2301).await;
+    let rolled = blocked_port_rollback(pool, h, 2301).await;
+    let after = port_marks(pool, h, 2301).await;
+    root(pool, h, "ufw delete allow 2301/tcp; firewall-cmd --permanent --remove-port=2301/tcp && firewall-cmd --reload; \
+semanage port -d -p tcp 2301; true").await;
+    let note = rolled?;
+    ensure(before.contains("ALLOW") && after == before, format!("before {before:?}, after rollback {after:?}"))?;
+    Ok(format!("{note}; kept {after:?}"))
+}
+
+async fn blocked_port_rollback(pool: &SshPool, h: &HostEntry, port: u16) -> Result<String, String> {
     // Stand-in for a provider firewall the app cannot see or change.
-    root(pool, h, "nft add table inet mxblock; nft add chain inet mxblock in '{ type filter hook input priority -10; }'; nft add rule inet mxblock in tcp dport 2300 drop").await;
+    root(pool, h, &format!("nft add table inet mxblock; nft add chain inet mxblock in '{{ type filter hook input priority -10; }}'; nft add rule inet mxblock in tcp dport {port} drop")).await;
     let view = get_sshd_view(&h.id, pool, None).await?;
-    let started = apply_sshd_settings(&h.id, pool, None, SshdSettings { port: 2300, ..view.settings }).await;
+    let started = apply_sshd_settings(&h.id, pool, None, SshdSettings { port, ..view.settings }).await;
     let result = match started {
         Err(e) => Err(format!("apply failed before verify: {e}")),
         Ok(s) => match finish_sshd_apply(&h.id, pool, None, s.new_port).await {
@@ -145,7 +180,7 @@ printf 'PasswordAuthentication yes\\n' > /etc/ssh/sshd_config.d/01-matrix.conf; 
 }
 
 async fn s4_cloud_init_password(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
-    root(pool, h, "printf 'PasswordAuthentication yes\\n' > /etc/ssh/sshd_config.d/50-cloud-init.conf; systemctl reload ssh 2>/dev/null || systemctl reload sshd").await;
+    root(pool, h, "printf 'PasswordAuthentication yes\\nMaxAuthTries 4\\n' > /etc/ssh/sshd_config.d/50-cloud-init.conf; systemctl reload ssh 2>/dev/null || systemctl reload sshd").await;
     let view = get_sshd_view(&h.id, pool, None).await?;
     ensure(view.settings.password_authentication, "app shows password off while 50-cloud-init.conf enables it".into())?;
     let s = apply_sshd_settings(&h.id, pool, None, SshdSettings { password_authentication: false, ..view.settings }).await?;
@@ -154,7 +189,20 @@ async fn s4_cloud_init_password(pool: &SshPool, h: &HostEntry) -> Result<String,
     ensure(pa == "passwordauthentication no", format!("sshd -T: {pa}"))?;
     let dropin = root(pool, h, "grep -v '^#' /etc/ssh/sshd_config.d/00-sshbox.conf").await;
     ensure(!dropin.contains("MaxAuthTries") && !dropin.contains("AllowUsers"), format!("drop-in wrote unchanged directives: {dropin}"))?;
-    Ok(format!("drop-in: {}", dropin.split_whitespace().collect::<Vec<_>>().join(" ")))
+    // Set back, a value sshd uses anyway (cloud-init's yes) loses its line; 6, OpenSSH's default, still needs one
+    // to beat cloud-init's 4, and going back to 4 removes it.
+    let view = get_sshd_view(&h.id, pool, None).await?;
+    let s = apply_sshd_settings(&h.id, pool, None, SshdSettings { password_authentication: true, max_auth_tries: 6, ..view.settings.clone() }).await?;
+    finish_sshd_apply(&h.id, pool, None, s.new_port).await?;
+    let back = root(pool, h, "grep -v '^#' /etc/ssh/sshd_config.d/00-sshbox.conf; sshd -T | grep -iE '^(passwordauthentication|maxauthtries) '").await;
+    ensure(!back.contains("PasswordAuthentication") && back.contains("MaxAuthTries 6"), format!("after password on, MaxAuthTries 6: {back}"))?;
+    ensure(back.contains("passwordauthentication yes") && back.contains("maxauthtries 6"), format!("sshd -T: {back}"))?;
+    let s = apply_sshd_settings(&h.id, pool, None, SshdSettings { password_authentication: true, max_auth_tries: 4, ..view.settings }).await?;
+    finish_sshd_apply(&h.id, pool, None, s.new_port).await?;
+    let four = root(pool, h, "grep -v '^#' /etc/ssh/sshd_config.d/00-sshbox.conf; sshd -T | grep -i '^maxauthtries '").await;
+    ensure(!four.contains("MaxAuthTries") && four.contains("maxauthtries 4"), format!("after MaxAuthTries 4: {four}"))?;
+    Ok(format!("off: drop-in {}; set back: no restated lines, MaxAuthTries 6 kept over cloud-init's 4, then removed",
+        dropin.split_whitespace().collect::<Vec<_>>().join(" ")))
 }
 
 async fn wait_ssh(h: &HostEntry) -> Result<(), String> {
@@ -302,6 +350,9 @@ async fn m2_password_off_on(pool: &SshPool, h: &HostEntry) -> Result<String, Str
     ensure(m_on.contains("password") && m_on.contains("keyboard-interactive"), format!("methods on: {m_on}"))?;
     let left = mac_leftovers(pool, h).await;
     ensure(left.trim().is_empty(), format!("rollback leftovers after on: {left}"))?;
+    // Back to what sshd uses anyway: no line restates it.
+    let restated = root(pool, h, "grep -iE '^(passwordauthentication|kbdinteractiveauthentication)' /etc/ssh/sshd_config.d/00-sshbox.conf").await;
+    ensure(restated.trim().is_empty(), format!("drop-in restates sshd's own values: {restated}"))?;
     Ok(format!("off: sshd -T {} / methods '{m_off}'; on: methods '{m_on}'", t.split_whitespace().collect::<Vec<_>>().join(" ")))
 }
 
@@ -783,6 +834,8 @@ async fn w8_max_auth_tries(pool: &SshPool, h: &HostEntry) -> Result<String, Stri
     win_apply_finish(pool, h, SshdSettings { max_auth_tries: orig, ..kept.settings }).await?;
     let back = win_effective(pool, h, "maxauthtries").await;
     ensure(back == format!("maxauthtries {orig}"), format!("set back: {back}"))?;
+    let restated = win_global_lines(pool, h, "MaxAuthTries").await?;
+    ensure(restated.is_empty(), format!("set back to sshd's own value, still written: {restated:?}"))?;
     Ok(format!("{orig}->{want} kept (sshd -T '{t}'), no task/script/markers, CRLF kept, +{added} lines ({added_blank} blank), directive line {at} < Match line {first_match}; set back to {orig}"))
 }
 
@@ -800,7 +853,15 @@ async fn w9_password_off_on(pool: &SshPool, h: &HostEntry) -> Result<String, Str
     ensure(m_on.contains("password") && m_on.contains("keyboard-interactive"), format!("methods on: {m_on}"))?;
     let left = win_leftovers(pool, h).await;
     ensure(left.is_empty(), format!("rollback leftovers: {left}"))?;
-    Ok(format!("off: '{t}', methods '{m_off}'; on: methods '{m_on}'"))
+    let restated = [win_global_lines(pool, h, "PasswordAuthentication").await?, win_global_lines(pool, h, "KbdInteractiveAuthentication").await?].concat();
+    ensure(restated.is_empty(), format!("on is sshd's own value, still written: {restated:?}"))?;
+    Ok(format!("off: '{t}', methods '{m_off}'; on: methods '{m_on}', no restated lines"))
+}
+
+// Uncommented `key` lines before the first Match block of the Windows sshd_config.
+async fn win_global_lines(pool: &SshPool, h: &HostEntry, key: &str) -> Result<Vec<String>, String> {
+    let cfg = win_config(pool, h).await?;
+    Ok(cfg.lines().map(str::trim).take_while(|l| !l.starts_with("Match ")).filter(|l| l.starts_with(&format!("{key} "))).map(String::from).collect())
 }
 
 async fn w10_apply_then_disconnect(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
@@ -824,6 +885,25 @@ async fn w10_apply_then_disconnect(pool: &SshPool, h: &HostEntry) -> Result<Stri
 }
 
 async fn w11_blocked_port(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    let (note, rules) = win_blocked_port_rollback(pool, h).await?;
+    ensure(!rules.contains("2222"), format!("2222 rule left: {rules}"))?;
+    Ok(format!("{note}, no 2222 rule"))
+}
+
+// The user's own "allow 2222 from any" has the same DisplayName as the rule the apply adds: the rollback must keep it.
+async fn w19_existing_allow_kept(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
+    const NAME: &str = "ssh-box: ALLOW 2222/tcp from any";
+    ps(pool, h, &format!("New-NetFirewallRule -Name mx-w19 -DisplayName '{NAME}' -Group 'ssh-box' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 2222 | Out-Null")).await;
+    let r = win_blocked_port_rollback(pool, h).await;
+    let kept = ps(pool, h, "Get-NetFirewallRule -Group 'ssh-box' -ErrorAction SilentlyContinue | Where-Object DisplayName -like '*2222*' | ForEach-Object Name").await;
+    ps(pool, h, "Remove-NetFirewallRule -Name mx-w19 -ErrorAction SilentlyContinue").await;
+    let (note, _) = r?;
+    ensure(kept == "mx-w19", format!("2222 rules after rollback: '{kept}'"))?;
+    Ok(format!("{note}; the existing '{NAME}' kept, the apply's own removed"))
+}
+
+// (summary, DisplayNames of the ssh-box rules left after the rollback)
+async fn win_blocked_port_rollback(pool: &SshPool, h: &HostEntry) -> Result<(String, String), String> {
     // Block beats the app's own allow for the new port, so only the new-connection check can catch it.
     ps(pool, h, "New-NetFirewallRule -DisplayName 'mx-block-2222' -Direction Inbound -Action Block -Protocol TCP -LocalPort 2222 | Out-Null").await;
     let view = get_sshd_view(&h.id, pool, None).await?;
@@ -840,11 +920,10 @@ async fn w11_blocked_port(pool: &SshPool, h: &HostEntry) -> Result<String, Strin
     let port = win_effective(pool, h, "port").await;
     ensure(port == "port 22", format!("after rollback sshd -T: {port}"))?;
     let rules = ps(pool, h, "Get-NetFirewallRule -Group 'ssh-box' -ErrorAction SilentlyContinue | ForEach-Object DisplayName").await;
-    ensure(!rules.contains("2222"), format!("2222 rule left: {rules}"))?;
     let left = win_leftovers(pool, h).await;
     ensure(left.is_empty(), format!("rollback leftovers: {left}"))?;
     ssh_works(h, "rollback").await?;
-    Ok(format!("rolled back ({}), port 22 reachable, no 2222 rule", err.chars().take(70).collect::<String>()))
+    Ok((format!("rolled back ({}), port 22 reachable", err.chars().take(70).collect::<String>()), rules))
 }
 
 async fn w12_powershell_default_shell(pool: &SshPool, h: &HostEntry) -> Result<String, String> {
@@ -948,6 +1027,7 @@ fn run_windows(only: &str) {
             run!("W9 password off/on (coupled)", w9_password_off_on(&pool, &h));
             run!("W10 apply then disconnect -> rollback", w10_apply_then_disconnect(&pool, &h));
             run!("W11 blocked port -> rollback", w11_blocked_port(&pool, &h));
+            run!("W19 existing allow kept on rollback", w19_existing_allow_kept(&pool, &h));
         } else {
             println!("SKIP W8-W11: WINDOWS_SSH_WRITE_VERIFIED is false");
         }
@@ -1000,11 +1080,13 @@ systemctl reload ssh 2>/dev/null || systemctl reload sshd").await;
         run!("S2 blocked port -> rollback", s2_blocked_port(&pool, &h));
         undo_port_moves(&pool, &h, &ports_before).await;
         run!("S3 password off while app uses password", s3_password_blocked(&pool, &h));
-        run!("S4 cloud-init password on -> off", s4_cloud_init_password(&pool, &h));
+        run!("S4 cloud-init password off, then set back", s4_cloud_init_password(&pool, &h));
         run!("S5 firewall on + reboot", s5_firewall_reboot(&pool, &h));
         let pool = SshPool::default();
         pool.get_or_connect(&h, None).await.expect("reconnect");
         run!("S6 blocked lockout actions", s6_blocked_actions(&pool, &h));
+        // After S5, so the firewall is on.
+        run!("S8 existing allow kept on rollback", s8_existing_allow_kept(&pool, &h));
         run!("S7 users & keys smoke", s7_users_keys(&pool, &h));
         let failed = rows.iter().filter(|(_, r)| r.is_err()).count();
         println!("== {distro}: {} passed, {failed} failed", rows.len() - failed);

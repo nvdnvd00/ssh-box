@@ -97,6 +97,105 @@ if command -v docker >/dev/null 2>&1; then
 fi
 '"#;
 
+// cmd.exe and PowerShell cannot run the sh probe above, so Windows hosts run this through the vps_windows bootstrap.
+// It prints the same sections. No CIM: it denies a standard account, 5 s per call. The perf counters (CPU, disk I/O,
+// page file, free memory) need an admin account; the rest works for any account.
+pub const WINDOWS_TELEMETRY_SCRIPT: &str = r#"Add-Type -AssemblyName Microsoft.VisualBasic
+$ci = New-Object Microsoft.VisualBasic.Devices.ComputerInfo
+$cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+# ProductName says "Windows 10" on 11 too; build 22000+ is 11.
+$os = $cv.ProductName
+if ([int]$cv.CurrentBuildNumber -ge 22000) { $os = $os -replace 'Windows 10', 'Windows 11' }
+$pc = @{}
+foreach ($c in 'Processor', 'Memory', 'LogicalDisk', 'Paging File', 'System') {
+  try { $pc[$c] = ([Diagnostics.PerformanceCounterCategory]::new($c)).ReadCategory() } catch { }
+}
+function one($cat, $ctr) { @($pc[$cat][$ctr].Values)[0].Sample }
+$up = [int64]([Diagnostics.Stopwatch]::GetTimestamp() / [Diagnostics.Stopwatch]::Frequency)
+if ($pc['System']) { $s = one 'System' 'system up time'; $up = [int64](($s.TimeStamp100nSec - $s.RawValue) / 1e7) }
+'---SYS---'
+"$os $($cv.DisplayVersion) $env:PROCESSOR_ARCHITECTURE" -replace '\s+', ' '
+$env:COMPUTERNAME
+$up
+"CPU(s): $([Environment]::ProcessorCount)"
+"Model name: $((Get-ItemProperty 'HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0').ProcessorNameString)"
+'---CPU---'
+if ($pc['Processor']) {
+  $u = $pc['Processor']['% user time']; $k = $pc['Processor']['% privileged time']; $i = $pc['Processor']['% idle time']
+  foreach ($n in $u.Keys) {
+    $id = if ($n -eq '_total') { 'cpu' } else { "cpu$n" }
+    # /proc/stat columns user nice system idle, in 100 ns ticks
+    "$id $($u[$n].Sample.RawValue) 0 $($k[$n].Sample.RawValue) $($i[$n].Sample.RawValue)"
+  }
+}
+'---MEM---'
+$avail = [int64]($ci.AvailablePhysicalMemory / 1KB)
+"MemTotal: $([int64]($ci.TotalPhysicalMemory / 1KB)) kB"
+"MemAvailable: $avail kB"
+if ($pc['Memory']) {
+  # Available is Free & Zero plus Standby, the file cache.
+  $free = [int64]((one 'Memory' 'free & zero page list bytes').RawValue / 1KB)
+  "MemFree: $free kB"
+  "Cached: $($avail - $free) kB"
+}
+if ($pc['Paging File']) {
+  $s = $pc['Paging File']['% usage']['_total'].Sample; $pg = [Environment]::SystemPageSize / 1KB
+  "SwapTotal: $($s.BaseValue * $pg) kB"
+  "SwapFree: $(($s.BaseValue - $s.RawValue) * $pg) kB"
+}
+'---DISK---'
+foreach ($d in [IO.DriveInfo]::GetDrives()) {
+  if ($d.DriveType -eq 'Fixed' -and $d.IsReady) {
+    $t = [int64]($d.TotalSize / 1KB)
+    # df -kP columns: device total used available use% mount
+    "$($d.Name.TrimEnd('\')) $t $($t - [int64]($d.TotalFreeSpace / 1KB)) $([int64]($d.AvailableFreeSpace / 1KB)) - $($d.Name)"
+  }
+}
+'---DISKIO---'
+if ($pc['LogicalDisk']) {
+  $ld = $pc['LogicalDisk']
+  foreach ($n in $ld['disk reads/sec'].Keys) {
+    if ($n -match '^[a-z]:$') {
+      # /proc/diskstats columns 3 5 7 9: reads, sectors read, writes, sectors written
+      "0 0 $($n.ToUpper()) $($ld['disk reads/sec'][$n].Sample.RawValue) 0 $([int64]($ld['disk read bytes/sec'][$n].Sample.RawValue / 512)) 0 $($ld['disk writes/sec'][$n].Sample.RawValue) 0 $([int64]($ld['disk write bytes/sec'][$n].Sample.RawValue / 512))"
+    }
+  }
+}
+$nics = @([Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object { $_.OperationalStatus -eq 'Up' -and $_.NetworkInterfaceType -ne 'Loopback' })
+'---NET---'
+foreach ($n in $nics) {
+  $s = $n.GetIPStatistics()
+  # /proc/net/dev columns: rx bytes, rx packets, 6 unused, tx bytes, tx packets
+  "$($n.Name): $($s.BytesReceived) $($s.UnicastPacketsReceived + $s.NonUnicastPacketsReceived) 0 0 0 0 0 0 $($s.BytesSent) $($s.UnicastPacketsSent + $s.NonUnicastPacketsSent)"
+}
+'---NETIP---'
+foreach ($n in $nics) {
+  foreach ($a in $n.GetIPProperties().UnicastAddresses) {
+    if ($a.Address.AddressFamily -eq 'InterNetwork') { "$($n.Name),$($a.Address)/$($a.PrefixLength)" }
+  }
+}
+'---PROC---'
+$now = Get-Date
+$procs = try { Get-Process -IncludeUserName } catch { Get-Process }
+# Like ps pcpu: CPU time over the process lifetime. A standard account reads it for its own processes only, and the
+# parser turns a list without a CPU section into a total, so without the perf counters it prints "-" and sorts by memory.
+$cpuOk = [bool]$pc['Processor']
+$rows = foreach ($p in $procs) {
+  if (-not $p.Id) { continue }
+  $life = if ($p.StartTime) { ($now - $p.StartTime).TotalSeconds } else { 0 }
+  # StartTime is wall-clock: a clock change since boot (time sync, time zone) can put it in the future.
+  if ($life -le 0 -or $life -gt $up) { $life = $up }
+  [pscustomobject]@{ P = $p; C = 100 * $p.CPU / [math]::Max(1, $life) }
+}
+'PID %CPU %MEM RSS NLWP USER COMMAND ARGS'
+$top = if ($cpuOk) { $rows | Sort-Object C -Descending } else { $rows | Sort-Object { $_.P.WorkingSet64 } -Descending }
+foreach ($r in $top | Select-Object -First 40) {
+  $p = $r.P
+  $user = if ($p.UserName) { ($p.UserName -split '\\')[-1] -replace '\s', '_' } else { '-' }
+  "$($p.Id) $(if ($cpuOk) { [math]::Round($r.C, 1) } else { '-' }) $([math]::Round(100 * $p.WorkingSet64 / $ci.TotalPhysicalMemory, 1)) $([int64]($p.WorkingSet64 / 1KB)) $($p.Threads.Count) $user $($p.ProcessName -replace '\s', '_') $(if ($p.Path) { $p.Path } else { $p.ProcessName })"
+}
+"#;
+
 #[derive(Debug, Clone, Default)]
 pub struct RawCpuSample {
     pub total: u64,
@@ -1188,6 +1287,21 @@ async fn probe_local_snapshot() -> Result<String, String> {
     Ok(build_portable_fallback_snapshot())
 }
 
+// On Windows the sh probe comes back as a cmd/PowerShell error with no sections.
+fn is_snapshot(raw: &str) -> bool {
+    raw.contains("---SYS---")
+}
+
+async fn probe_windows_snapshot(host_id: &str, pool: &SshPool) -> Result<String, String> {
+    let host = crate::vps_config::find_remote_host(host_id)?;
+    let out = crate::vps_windows::exec_windows(pool, &host, WINDOWS_TELEMETRY_SCRIPT, None).await?;
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+// ponytail: each Windows sample starts a PowerShell (~1.5 s of host CPU), so Windows hosts are sampled at most this
+// often; a long-lived PowerShell printing one snapshot per tick would remove that cost.
+const WINDOWS_MIN_INTERVAL: Duration = Duration::from_secs(10);
+
 pub fn start_monitoring(
     host_id: String,
     pool: SshPool,
@@ -1201,6 +1315,7 @@ pub fn start_monitoring(
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs.clamp(1, 60)));
         let mut consecutive_failures = 0u8;
         let mut backoff_skip = 0u8;
+        let mut windows = false;
 
         loop {
             tokio::select! {
@@ -1210,10 +1325,22 @@ pub fn start_monitoring(
                         backoff_skip -= 1;
                         continue;
                     }
+                    if windows && last_tick.elapsed() < WINDOWS_MIN_INTERVAL {
+                        continue;
+                    }
                     let raw_res = if host_id == "local" {
                         probe_local_snapshot().await
+                    } else if windows {
+                        probe_windows_snapshot(&host_id, &pool).await
                     } else {
-                        run_host_or_local_cmd(&host_id, &pool, TELEMETRY_PROBE_CMD).await
+                        match run_host_or_local_cmd(&host_id, &pool, TELEMETRY_PROBE_CMD).await {
+                            Ok(raw) if !is_snapshot(&raw) => {
+                                let win = probe_windows_snapshot(&host_id, &pool).await;
+                                windows = matches!(&win, Ok(w) if is_snapshot(w));
+                                if windows { win } else { Ok(raw) }
+                            }
+                            other => other,
+                        }
                     };
 
                     if let Ok(raw) = raw_res {
@@ -1323,6 +1450,159 @@ eth0,10.0.1.25/24
         assert_eq!(m2.gpus[0].name, "NVIDIA A100-SXM4-40GB");
         assert!(m2.docker.is_some());
         assert_eq!(m2.docker.as_ref().unwrap().running_containers, 4);
+    }
+
+    // Captured from the Windows 11 ARM VM (admin account), 5 s apart. The real output ends lines with CRLF.
+    const WIN_ADMIN_A: &str = r"---SYS---
+Windows 11 Pro 26H2 ARM64
+WIN-58D0KFGI3KB
+499
+CPU(s): 4
+Model name: virt-10.0
+---CPU---
+cpu2 96718750 0 110000000 4770969569
+cpu3 61562500 0 73437500 4847514092
+cpu0 161718750 0 203593750 4618964136
+cpu1 124843750 0 146406250 4709694327
+cpu 111210937 0 133359375 4736785531
+---MEM---
+MemTotal: 4184832 kB
+MemAvailable: 2659172 kB
+MemFree: 1690736 kB
+Cached: 968436 kB
+SwapTotal: 1441792 kB
+SwapFree: 1441792 kB
+---DISK---
+C: 66011132 30586148 35424984 - C:\
+---DISKIO---
+0 0 C: 40677 0 1934467 0 5751 0 114388
+---NET---
+Ethernet: 590424 1364 0 0 0 0 0 0 1108183 1698
+---NETIP---
+Ethernet,192.168.64.6/24
+---PROC---
+PID %CPU %MEM RSS NLWP USER COMMAND ARGS
+1944 209.4 2.4 100388 22 SSH_Box_Test powershell C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe
+1528 3.1 0.3 12520 5 SSH_Box_Test conhost C:\WINDOWS\system32\conhost.exe
+2528 3.1 0.3 13200 3 SYSTEM sshd C:\WINDOWS\System32\OpenSSH\sshd.exe
+";
+    const WIN_ADMIN_B: &str = r"---SYS---
+Windows 11 Pro 26H2 ARM64
+WIN-58D0KFGI3KB
+504
+CPU(s): 4
+Model name: virt-10.0
+---CPU---
+cpu2 100937500 0 112343750 4816941231
+cpu3 62343750 0 74218750 4897765395
+cpu0 167500000 0 207187500 4661384773
+cpu1 130000000 0 149843750 4753439605
+cpu 115195312 0 135898437 4782382751
+---MEM---
+MemTotal: 4184832 kB
+MemAvailable: 2659464 kB
+MemFree: 1690776 kB
+Cached: 968688 kB
+SwapTotal: 1441792 kB
+SwapFree: 1441792 kB
+---DISK---
+C: 66011132 30586192 35424940 - C:\
+---DISKIO---
+0 0 C: 40678 0 1934475 0 6233 0 120756
+---NET---
+Ethernet: 603184 1412 0 0 0 0 0 0 1126240 1734
+---NETIP---
+Ethernet,192.168.64.6/24
+---PROC---
+PID %CPU %MEM RSS NLWP USER COMMAND ARGS
+3028 175 2.4 101736 22 SSH_Box_Test powershell C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe
+2508 3.1 0.3 12528 5 SSH_Box_Test conhost C:\WINDOWS\system32\conhost.exe
+3692 3 6.2 259768 38 - MsMpEng MsMpEng
+";
+
+    // The bug: a Windows host showed 1 core / 0 GB because nothing in the sh probe's output parsed there.
+    #[test]
+    fn windows_snapshot_gives_real_cores_memory_and_usage() {
+        let crlf = |s: &str| s.replace('\n', "\r\n");
+        let (_, prev) = parse_linux_telemetry("win", &crlf(WIN_ADMIN_A), None, 5.0);
+        let (m, _) = parse_linux_telemetry("win", &crlf(WIN_ADMIN_B), Some(&prev), 5.0);
+        assert_eq!(m.os_name, "Windows 11 Pro 26H2 ARM64");
+        assert_eq!(m.hostname, "WIN-58D0KFGI3KB");
+        assert_eq!(m.uptime_seconds, 504);
+        assert_eq!((m.cpu_cores, m.cpu_model.as_str()), (4, "virt-10.0"));
+        // _Total ticks: busy = 1 - 45597220 idle / 52120657 total.
+        assert!((m.cpu_percent - 12.52).abs() < 0.05, "{}", m.cpu_percent);
+        assert!((m.cpu_user_percent - 7.64).abs() < 0.05 && (m.cpu_system_percent - 4.87).abs() < 0.05);
+        assert_eq!(m.cores.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["cpu0", "cpu1", "cpu2", "cpu3"]);
+        // Used is total minus Available, as on Linux; Cached is the standby list.
+        assert_eq!((m.mem_total_mb, m.mem_used_mb, m.mem_available_mb), (4086, 1489, 2597));
+        assert_eq!((m.mem_free_mb, m.mem_cached_mb), (1651, 945));
+        assert_eq!((m.swap_total_mb, m.swap_used_mb), (1408, 0));
+        assert!((m.disk_total_gb - 62.95).abs() < 0.01 && (m.disk_percent - 46.34).abs() < 0.01);
+        assert_eq!((m.volumes[0].device.as_str(), m.volumes[0].mount.as_str()), ("C:", "C:\\"));
+        // 6368 sectors written in 5 s.
+        assert!((m.volumes[0].write_bytes_per_sec - 652_083.2).abs() < 1.0);
+        assert!((m.volumes[0].iops_write - 96.4).abs() < 0.01);
+        // 12760 bytes received in 5 s.
+        assert!((m.net_rx_kbps - 2.49).abs() < 0.01);
+        assert_eq!((m.interfaces[0].name.as_str(), m.interfaces[0].ip.as_str()), ("Ethernet", "192.168.64.6/24"));
+        assert_eq!(m.top_processes[0].command, "powershell");
+        assert_eq!(m.top_processes[0].user, "SSH_Box_Test");
+    }
+
+    // A standard account can read no perf counters (registry 'Global' is denied), but cores, memory, disks,
+    // network and uptime must still show. Seen on the VM: when the list carried its own processes' CPU, the
+    // parser's fallback summed them into a made-up 21.9% total.
+    #[test]
+    fn windows_standard_account_snapshot_keeps_what_it_can_read() {
+        let raw = r"---SYS---
+Windows 11 Pro 26H2 ARM64
+WIN-58D0KFGI3KB
+926
+CPU(s): 4
+Model name: virt-10.0
+---CPU---
+---MEM---
+MemTotal: 4184832 kB
+MemAvailable: 2670848 kB
+---DISK---
+C: 66011132 30589204 35421928 - C:\
+---DISKIO---
+---NET---
+Ethernet: 734971 1926 0 0 0 0 0 0 1929545 2516
+---NETIP---
+Ethernet,192.168.64.6/24
+---PROC---
+PID %CPU %MEM RSS NLWP USER COMMAND ARGS
+3692 - 6.4 266348 38 - MsMpEng MsMpEng
+1756 - 2.2 94108 21 - powershell C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe
+1196 - 2.2 90816 16 - LogonUI LogonUI
+";
+        let (_, prev) = parse_linux_telemetry("win", raw, None, 10.0);
+        let (m, _) = parse_linux_telemetry("win", raw, Some(&prev), 10.0);
+        assert_eq!(m.cpu_cores, 4);
+        assert_eq!(m.cpu_percent, 0.0);
+        assert_eq!((m.mem_total_mb, m.mem_used_mb), (4086, 1478));
+        assert!((m.disk_total_gb - 62.95).abs() < 0.01);
+        assert_eq!(m.uptime_seconds, 926);
+        assert_eq!(m.top_processes[0].command, "MsMpEng");
+    }
+
+    // The sh probe's real answer from the Windows VM (cmd.exe as the SSH shell): this must send the poll to PowerShell.
+    #[test]
+    fn sh_probe_error_from_windows_is_not_a_snapshot() {
+        let cmd_error = "'LC_ALL' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n";
+        assert!(!is_snapshot(cmd_error));
+        assert!(is_snapshot(WIN_ADMIN_A));
+    }
+
+    // CIM denies a standard account after ~5 s per call, and Get-Counter paths are localized: either would stall
+    // or break every poll.
+    #[test]
+    fn windows_telemetry_script_uses_neither_cim_nor_get_counter() {
+        assert!(!WINDOWS_TELEMETRY_SCRIPT.contains("Get-CimInstance"));
+        assert!(!WINDOWS_TELEMETRY_SCRIPT.contains("Get-WmiObject"));
+        assert!(!WINDOWS_TELEMETRY_SCRIPT.contains("Get-Counter"));
     }
 
     #[test]

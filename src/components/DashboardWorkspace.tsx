@@ -553,6 +553,8 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
         : hostObj?.alias || hostObj?.hostname || selectedHostId;
 
     const m = selectedMetrics;
+    // Windows has no load average; its telemetry leaves the load fields at 0.
+    const noLoadAvg = m?.osName.startsWith("Windows") ?? false;
     const memPercent =
       m && m.memTotalMb > 0 ? (m.memUsedMb / m.memTotalMb) * 100 : 0;
     const primaryNic = m?.interfaces?.[0] ?? null;
@@ -812,16 +814,24 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                   </div>
                 </div>
 
-                <MultiLineLoadChart
-                  points={loadHistoryMap[selectedHostId] ?? []}
-                />
+                {noLoadAvg ? (
+                  <div className="h-[115px] flex items-center justify-center text-xs text-muted-foreground">
+                    Windows has no load average
+                  </div>
+                ) : (
+                  <MultiLineLoadChart
+                    points={loadHistoryMap[selectedHostId] ?? []}
+                  />
+                )}
 
                 <div className="flex items-center justify-between pt-2 border-t border-border/60 text-xs">
                   <span className="text-muted-foreground">Current Load</span>
                   <span className="font-mono font-semibold text-foreground">
-                    {m
-                      ? `${m.loadOne.toFixed(2)} / ${m.loadFive.toFixed(2)} / ${m.loadFifteen.toFixed(2)}`
-                      : "0.00 / 0.00 / 0.00"}
+                    {noLoadAvg
+                      ? "—"
+                      : m
+                        ? `${m.loadOne.toFixed(2)} / ${m.loadFive.toFixed(2)} / ${m.loadFifteen.toFixed(2)}`
+                        : "0.00 / 0.00 / 0.00"}
                   </span>
                 </div>
               </div>

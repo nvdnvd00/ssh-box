@@ -343,20 +343,20 @@ export const TelemetryDrawer: React.FC<TelemetryDrawerProps> = ({
               <div className="pt-2 border-t border-border/60 grid grid-cols-2 gap-1.5 max-h-36 overflow-y-auto">
                 {metrics.cores.map((c) => (
                   <div
-                    key={c.coreId}
+                    key={c.id}
                     className="p-2 rounded-lg bg-card/70 border border-border/60 space-y-1"
                   >
                     <div className="flex justify-between text-[11px]">
-                      <span className="text-muted-foreground">{c.coreId}</span>
+                      <span className="text-muted-foreground">{c.id}</span>
                       <span className="text-foreground font-medium">
-                        {c.usagePct.toFixed(0)}%
+                        {c.usage.toFixed(0)}%
                       </span>
                     </div>
                     <div className="w-full h-1.5 rounded-full bg-muted overflow-hidden">
                       <div
                         className="h-full bg-primary rounded-full"
                         style={{
-                          width: `${Math.min(100, Math.max(0, c.usagePct))}%`,
+                          width: `${Math.min(100, Math.max(0, c.usage))}%`,
                         }}
                       />
                     </div>

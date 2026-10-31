@@ -404,11 +404,11 @@ export interface WorkspaceTab {
 }
 
 export interface CpuCoreMetric {
-  coreId: string;
-  usagePct: number;
-  userPct: number;
-  systemPct: number;
-  iowaitPct: number;
+  id: string;
+  usage: number;
+  user: number;
+  system: number;
+  idle: number;
 }
 
 export interface StorageVolumeMetric {

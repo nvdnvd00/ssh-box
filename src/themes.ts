@@ -78,9 +78,15 @@ export interface AppThemeMeta {
   subtitle: string;
   mode: "dark" | "light";
   bgHex: string;
+  sidebarHex: string;
   cardHex: string;
+  secondaryHex: string;
+  accentHex: string;
   borderHex: string;
   fgHex: string;
+  mutedFgHex: string;
+  tintHex: string;
+  swatches: [string, string, string, string];
 }
 
 export interface AccentColorMeta {
@@ -151,9 +157,15 @@ export const APP_THEMES: AppThemeMeta[] = [
     subtitle: "Modern Neutral Dark",
     mode: "dark",
     bgHex: "#09090b",
+    sidebarHex: "#070709",
     cardHex: "#121216",
-    borderHex: "#27272a",
+    secondaryHex: "#1b1b21",
+    accentHex: "#272730",
+    borderHex: "#3f3f46",
     fgHex: "#fafafa",
+    mutedFgHex: "#a1a1aa",
+    tintHex: "#a1a1aa",
+    swatches: ["#09090b", "#1b1b21", "#3f3f46", "#a1a1aa"],
   },
   {
     id: "obsidian-dark",
@@ -161,9 +173,15 @@ export const APP_THEMES: AppThemeMeta[] = [
     subtitle: "Deep Slate Dark",
     mode: "dark",
     bgHex: "#0b0e14",
+    sidebarHex: "#080a0f",
     cardHex: "#101520",
-    borderHex: "#1e293b",
+    secondaryHex: "#171f30",
+    accentHex: "#222d42",
+    borderHex: "#334155",
     fgHex: "#f1f5f9",
+    mutedFgHex: "#94a3b8",
+    tintHex: "#38bdf8",
+    swatches: ["#0b0e14", "#171f30", "#334155", "#38bdf8"],
   },
   {
     id: "stone-dark",
@@ -171,9 +189,15 @@ export const APP_THEMES: AppThemeMeta[] = [
     subtitle: "Warm Graphite Dark",
     mode: "dark",
     bgHex: "#111010",
+    sidebarHex: "#0c0a09",
     cardHex: "#181615",
-    borderHex: "#292524",
+    secondaryHex: "#24201e",
+    accentHex: "#312c29",
+    borderHex: "#44403c",
     fgHex: "#fafaf9",
+    mutedFgHex: "#a8a29e",
+    tintHex: "#f59e0b",
+    swatches: ["#111010", "#24201e", "#44403c", "#d6d3d1"],
   },
   {
     id: "midnight-dark",
@@ -181,9 +205,15 @@ export const APP_THEMES: AppThemeMeta[] = [
     subtitle: "Deep Indigo Dark",
     mode: "dark",
     bgHex: "#0b0a12",
+    sidebarHex: "#07060d",
     cardHex: "#12101e",
-    borderHex: "#26213d",
+    secondaryHex: "#1d1930",
+    accentHex: "#2b2546",
+    borderHex: "#3b3260",
     fgHex: "#f5f3ff",
+    mutedFgHex: "#a59ec4",
+    tintHex: "#8b5cf6",
+    swatches: ["#0b0a12", "#1d1930", "#3b3260", "#a78bfa"],
   },
   {
     id: "zinc-light",
@@ -191,9 +221,15 @@ export const APP_THEMES: AppThemeMeta[] = [
     subtitle: "Clean Light Surface",
     mode: "light",
     bgHex: "#f8fafc",
+    sidebarHex: "#f1f5f9",
     cardHex: "#ffffff",
-    borderHex: "#e2e8f0",
+    secondaryHex: "#e2e8f0",
+    accentHex: "#cbd5e1",
+    borderHex: "#cbd5e1",
     fgHex: "#0f172a",
+    mutedFgHex: "#64748b",
+    tintHex: "#0284c7",
+    swatches: ["#ffffff", "#e2e8f0", "#94a3b8", "#0f172a"],
   },
 ];
 

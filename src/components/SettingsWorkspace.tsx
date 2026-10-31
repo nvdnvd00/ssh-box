@@ -351,38 +351,127 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
                               appTheme: t.id as AppThemeId,
                             }))
                           }
-                          className={`group flex flex-col gap-2.5 p-3.5 rounded-2xl border text-left transition-all duration-200 cursor-pointer ${
+                          className={`group flex flex-col gap-2.5 p-3 rounded-2xl border text-left transition-all duration-200 cursor-pointer ${
                             active
-                              ? "border-primary bg-primary/10 shadow-sm scale-[1.01]"
-                              : "border-border/80 bg-card/70 hover:bg-accent/50 hover:border-border"
+                              ? "border-primary ring-2 ring-primary/35 shadow-md scale-[1.01]"
+                              : "hover:scale-[1.01] hover:shadow-sm"
                           }`}
+                          style={{
+                            backgroundColor: t.cardHex,
+                            borderColor: active ? undefined : t.borderHex,
+                          }}
                         >
-                          <div className="flex items-center justify-between w-full">
+                          {/* Mini Application Window Preview */}
+                          <div
+                            className="w-full h-16 rounded-xl border overflow-hidden flex flex-col shadow-inner"
+                            style={{
+                              backgroundColor: t.bgHex,
+                              borderColor: t.borderHex,
+                            }}
+                          >
+                            {/* Mini Window Titlebar + Swatch Ramp */}
                             <div
-                              className="w-10 h-6 rounded-lg border flex items-center justify-center shadow-inner"
+                              className="h-4 px-2 flex items-center justify-between border-b shrink-0"
                               style={{
-                                backgroundColor: t.bgHex,
+                                backgroundColor: t.sidebarHex,
                                 borderColor: t.borderHex,
                               }}
                             >
+                              <div className="flex items-center gap-1">
+                                <span className="w-1.5 h-1.5 rounded-full bg-rose-400/80" />
+                                <span className="w-1.5 h-1.5 rounded-full bg-amber-400/80" />
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400/80" />
+                              </div>
+                              <div className="flex items-center gap-1">
+                                {t.swatches.map((hex, i) => (
+                                  <span
+                                    key={i}
+                                    className="w-2 h-2 rounded-full border border-white/15"
+                                    style={{ backgroundColor: hex }}
+                                  />
+                                ))}
+                              </div>
+                            </div>
+
+                            {/* Mini Sidebar + Workspace Canvas */}
+                            <div className="flex-1 flex min-h-0">
                               <div
-                                className="w-5 h-2.5 rounded-xs"
-                                style={{ backgroundColor: t.cardHex }}
-                              />
+                                className="w-10 p-1.5 flex flex-col gap-1 border-r shrink-0"
+                                style={{
+                                  backgroundColor: t.sidebarHex,
+                                  borderColor: t.borderHex,
+                                }}
+                              >
+                                <div
+                                  className="h-1.5 w-full rounded-full"
+                                  style={{ backgroundColor: t.tintHex }}
+                                />
+                                <div
+                                  className="h-1.5 w-4/5 rounded-full"
+                                  style={{ backgroundColor: t.accentHex }}
+                                />
+                                <div
+                                  className="h-1.5 w-3/5 rounded-full"
+                                  style={{ backgroundColor: t.secondaryHex }}
+                                />
+                              </div>
+
+                              <div
+                                className="flex-1 p-1.5 flex flex-col justify-between"
+                                style={{ backgroundColor: t.bgHex }}
+                              >
+                                <div
+                                  className="p-1.5 rounded-md border flex flex-col gap-1"
+                                  style={{
+                                    backgroundColor: t.cardHex,
+                                    borderColor: t.borderHex,
+                                  }}
+                                >
+                                  <div className="flex items-center gap-1">
+                                    <span
+                                      className="w-1.5 h-1.5 rounded-full shrink-0"
+                                      style={{ backgroundColor: t.tintHex }}
+                                    />
+                                    <div
+                                      className="h-1.5 w-12 rounded-full opacity-85"
+                                      style={{ backgroundColor: t.fgHex }}
+                                    />
+                                  </div>
+                                  <div
+                                    className="h-1 w-16 rounded-full opacity-75"
+                                    style={{ backgroundColor: t.mutedFgHex }}
+                                  />
+                                </div>
+                              </div>
                             </div>
-                            {active && (
-                              <span className="w-5 h-5 rounded-full bg-primary text-primary-foreground flex items-center justify-center">
-                                <Check className="w-3 h-3" />
-                              </span>
-                            )}
                           </div>
-                          <div>
-                            <div className="text-[13px] font-semibold text-foreground">
-                              {t.name}
+
+                          {/* Theme Title + Active Checkmark */}
+                          <div className="flex items-center justify-between gap-2 w-full px-0.5">
+                            <div className="min-w-0">
+                              <div
+                                className="text-[13px] font-semibold truncate"
+                                style={{ color: t.fgHex }}
+                              >
+                                {t.name}
+                              </div>
+                              <div
+                                className="text-[11px] truncate"
+                                style={{ color: t.mutedFgHex }}
+                              >
+                                {t.subtitle}
+                              </div>
                             </div>
-                            <div className="text-[11px] text-muted-foreground">
-                              {t.subtitle}
-                            </div>
+                            {active ? (
+                              <span className="w-5 h-5 rounded-full bg-primary text-primary-foreground flex items-center justify-center shrink-0 shadow-xs">
+                                <Check className="w-3 h-3 stroke-[2.5]" />
+                              </span>
+                            ) : (
+                              <span
+                                className="w-4 h-4 rounded-full border shrink-0 opacity-60 group-hover:opacity-100 transition-opacity"
+                                style={{ borderColor: t.borderHex }}
+                              />
+                            )}
                           </div>
                         </button>
                       );

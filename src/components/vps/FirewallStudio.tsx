@@ -78,6 +78,8 @@ export const FirewallStudio: React.FC<VpsStudioProps> = ({ vps, probe }) => {
   const rules = snap.rules.filter((r, i, all) => all.findIndex((o) => rowKey(o) === rowKey(r)) === i);
   // Windows Firewall only allows or blocks, and every rule needs a port: offer nothing that would always fail.
   const isWindows = engine === "windows";
+  // Windows names a rule of a removed app or package by its unresolved resource string.
+  const ruleName = (r: FirewallRuleItem) => (isWindows && /^(@|ms-resource:)/.test(r.rawSpec) ? t.vpsFwUnnamedRule : r.rawSpec);
   const portMissing = isWindows && !form.port.trim();
   const actionOptions = (isWindows ? ["allow", "deny"] : ["allow", "limit", "deny", "reject"]).map((a) => ({ value: a, label: t.vpsFwActions[a] }));
   const protoOptions = [
@@ -133,7 +135,7 @@ export const FirewallStudio: React.FC<VpsStudioProps> = ({ vps, probe }) => {
           <SettingRow
             key={rowKey(r)}
             label={describe(r.action, r.toPort === "Anywhere" ? "" : r.toPort.replace(/\/(tcp|udp)$/, ""), r.protocol, r.fromSource)}
-            directive={r.rawSpec}
+            directive={ruleName(r)}
           >
             {writable && (engine !== "windows" || r.comment === "ssh-box") && (
               <ConfirmButton

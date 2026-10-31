@@ -175,6 +175,7 @@ export interface AppI18nStrings {
   vpsFwNoPorts: string;
   vpsFwRulesTitle: string;
   vpsFwNoRules: string;
+  vpsFwUnnamedRule: string;
   vpsFwFrom: string;
   vpsFwAnywhere: string;
   vpsFwAllPorts: string;
@@ -519,6 +520,7 @@ const VI_STRINGS: AppI18nStrings = {
   vpsFwNoPorts: "Không có cổng nào đang lắng nghe.",
   vpsFwRulesTitle: "Quy tắc",
   vpsFwNoRules: "Chưa có quy tắc nào.",
+  vpsFwUnnamedRule: "Quy tắc Windows (không rõ tên)",
   vpsFwFrom: "từ {s}",
   vpsFwAnywhere: "mọi nơi",
   vpsFwAllPorts: "mọi cổng",
@@ -823,6 +825,7 @@ const EN_STRINGS: AppI18nStrings = {
   vpsFwNoPorts: "No ports are listening.",
   vpsFwRulesTitle: "Rules",
   vpsFwNoRules: "No rules yet.",
+  vpsFwUnnamedRule: "Windows rule (name not readable)",
   vpsFwFrom: "from {s}",
   vpsFwAnywhere: "anywhere",
   vpsFwAllPorts: "all ports",

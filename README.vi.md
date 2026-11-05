@@ -13,6 +13,7 @@
 
 [![Latest Release](https://img.shields.io/github/v/release/nvdnvd00/ssh-box?style=flat-square&logo=github&label=release&color=2563eb)](https://github.com/nvdnvd00/ssh-box/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-10b981?style=flat-square)](#download)
+[![License](https://img.shields.io/badge/license-Apache--2.0-f59e0b?style=flat-square)](LICENSE)
 
 <p align="center">
   <a href="README.md"><strong>🌐 English</strong></a>
@@ -134,6 +135,12 @@ npx tauri build
 
 ---
 
+## 📄 Giấy phép (License)
+
+Phát hành theo giấy phép [**Apache License 2.0**](LICENSE). Bản quyền © 2026 **Neos Nguyen** ([`@nvdnvd00`](https://github.com/nvdnvd00)).
+
+---
+
 <div align="center">
-  <sub>Được phát triển với ❤️ · <a href="https://github.com/nvdnvd00/ssh-box">github.com/nvdnvd00/ssh-box</a></sub>
+  <sub>Được phát triển với ❤️ bởi Neos Nguyen · <a href="https://github.com/nvdnvd00/ssh-box">github.com/nvdnvd00/ssh-box</a></sub>
 </div>

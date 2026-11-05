@@ -2,6 +2,20 @@
   "name": "ssh-box",
   "private": true,
   "version": "0.2.1",
+  "description": "The Modern SSH Client, Terminal & Server Manager",
+  "license": "Apache-2.0",
+  "author": {
+    "name": "Neos Nguyen",
+    "url": "https://github.com/nvdnvd00"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nvdnvd00/ssh-box.git"
+  },
+  "homepage": "https://github.com/nvdnvd00/ssh-box#readme",
+  "bugs": {
+    "url": "https://github.com/nvdnvd00/ssh-box/issues"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",

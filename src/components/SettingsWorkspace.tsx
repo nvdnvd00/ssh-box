@@ -2,7 +2,6 @@ import React, { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import {
-  Activity,
   Check,
   Globe,
   Info,
@@ -1611,25 +1610,141 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
 
             {/* ABOUT TAB */}
             {activeTab === "about" && (
-              <section className="space-y-4">
-                <div className="rounded-2xl border border-border/80 bg-card/65 p-6 flex items-center gap-4">
-                  <div className="w-14 h-14 rounded-2xl bg-primary/15 border border-primary/30 flex items-center justify-center text-primary shadow-sm">
-                    <Activity className="w-7 h-7" />
-                  </div>
-                  <div>
-                    <h2 className="text-base font-bold text-foreground">
-                      SSH-Box
-                    </h2>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      Native macOS Server Resource Manager, Telemetry Dashboard,
-                      Docker Controller &amp; SSH Workspace
+              <>
+                <section className="rounded-2xl border border-border/80 bg-card/65 p-6 flex items-center gap-4">
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 128 128"
+                    className="w-14 h-14 rounded-2xl shadow-md shrink-0"
+                    aria-hidden="true"
+                  >
+                    <defs>
+                      <linearGradient id="sshbox-about-bg" x1="0" y1="0" x2="1" y2="1">
+                        <stop offset="0" stopColor="#2563eb" />
+                        <stop offset="1" stopColor="#4f46e5" />
+                      </linearGradient>
+                    </defs>
+                    <rect width="128" height="128" rx="28" fill="url(#sshbox-about-bg)" />
+                    <path
+                      d="M56 64C70 64 70 36 82 36M56 64h26M56 64C70 64 70 92 82 92"
+                      fill="none"
+                      stroke="#93c5fd"
+                      strokeWidth="4"
+                      strokeLinecap="round"
+                    />
+                    <path
+                      d="M26 40l24 24-24 24"
+                      fill="none"
+                      stroke="#fff"
+                      strokeWidth="11"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    <rect
+                      x="82"
+                      y="27"
+                      width="22"
+                      height="18"
+                      rx="4"
+                      fill="#1e3a8a"
+                      stroke="#fff"
+                      strokeWidth="3"
+                    />
+                    <rect x="82" y="55" width="22" height="18" rx="4" fill="#fff" />
+                    <rect
+                      x="82"
+                      y="83"
+                      width="22"
+                      height="18"
+                      rx="4"
+                      fill="#1e3a8a"
+                      stroke="#fff"
+                      strokeWidth="3"
+                    />
+                  </svg>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2.5 flex-wrap">
+                      <h2 className="text-lg font-bold tracking-tight text-foreground">
+                        SSH Box
+                      </h2>
+                      {appVersion && (
+                        <span className="px-2.5 py-0.5 rounded-full bg-primary/15 text-primary border border-primary/30 text-[11px] font-mono font-semibold">
+                          v{appVersion}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+                      {lang === "vi"
+                        ? "Ứng dụng quản lý SSH, Terminal, SFTP và điều khiển máy chủ toàn diện."
+                        : "All-in-one SSH client, terminal, SFTP manager, and server control center."}
                     </p>
-                    <div className="inline-flex items-center gap-2 mt-2 px-2.5 py-0.5 rounded-full bg-secondary text-[11px] font-mono text-muted-foreground">
-                      Version {appVersion} · Tauri v2 + Rust
+                  </div>
+                </section>
+
+                <section className="space-y-2">
+                  <h2 className="text-[13px] font-semibold text-foreground px-1">
+                    {lang === "vi" ? "Thông tin sản phẩm" : "Product Information"}
+                  </h2>
+                  <div className="rounded-2xl border border-border/80 bg-card/65 divide-y divide-border/60 overflow-hidden">
+                    <div className="flex items-center justify-between px-4 py-3.5">
+                      <span className="text-[13px] text-muted-foreground">
+                        {lang === "vi" ? "Phiên bản" : "Version"}
+                      </span>
+                      <span className="text-[13px] font-mono font-medium text-foreground">
+                        {appVersion || "0.2.1"}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between px-4 py-3.5">
+                      <span className="text-[13px] text-muted-foreground">
+                        {lang === "vi" ? "Tác giả" : "Author"}
+                      </span>
+                      <span className="text-[13px] font-medium text-foreground">
+                        Neos Nguyen (@nvdnvd00)
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between px-4 py-3.5">
+                      <span className="text-[13px] text-muted-foreground">
+                        {lang === "vi" ? "Giấy phép" : "License"}
+                      </span>
+                      <span className="px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-amber-500/15 text-amber-400 border border-amber-500/30">
+                        Apache License 2.0
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between px-4 py-3.5">
+                      <span className="text-[13px] text-muted-foreground">
+                        {lang === "vi" ? "Bản quyền" : "Copyright"}
+                      </span>
+                      <span className="text-[13px] text-foreground">
+                        © 2026 Neos Nguyen
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between px-4 py-3.5">
+                      <span className="text-[13px] text-muted-foreground">
+                        GitHub
+                      </span>
+                      <span className="text-[13px] font-mono text-foreground select-text">
+                        github.com/nvdnvd00/ssh-box
+                      </span>
                     </div>
                   </div>
-                </div>
-              </section>
+                </section>
+
+                <section className="space-y-2">
+                  <h2 className="text-[13px] font-semibold text-foreground px-1">
+                    {lang === "vi" ? "Giấy phép nguồn mở" : "Open Source License"}
+                  </h2>
+                  <div className="rounded-2xl border border-border/80 bg-card/65 p-4 space-y-1.5">
+                    <div className="text-xs font-semibold text-foreground">
+                      Apache License, Version 2.0
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-muted-foreground select-text">
+                      {lang === "vi"
+                        ? "Copyright 2026 Neos Nguyen (nvdnvd00). Phần mềm được cấp phép theo Apache License 2.0 (http://www.apache.org/licenses/LICENSE-2.0). Bạn được phép tự do sử dụng, sửa đổi và phân phối lại theo các điều kiện của giấy phép. Phần mềm được cung cấp trên cơ sở \"NGUYÊN TRẠNG\" (AS IS), không kèm theo bất kỳ bảo đảm nào."
+                        : "Copyright 2026 Neos Nguyen (nvdnvd00). Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0). You may freely use, modify, and redistribute this software under the terms of the license. Distributed on an \"AS IS\" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND."}
+                    </p>
+                  </div>
+                </section>
+              </>
             )}
           </div>
         </div>

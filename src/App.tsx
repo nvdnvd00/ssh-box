@@ -1186,7 +1186,7 @@ export default function App() {
               <span>
                 {isUpdating
                   ? t.updateInstalling
-                  : `${t.updateBtn} v${pendingUpdate.version}`}
+                  : `${t.updateBtn} v${pendingUpdate.version.split("+")[0]}`}
               </span>
             </button>
           )}

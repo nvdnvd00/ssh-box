@@ -6,9 +6,9 @@ use std::sync::OnceLock;
 use crate::vps_config::shell_single_quote as shq;
 use crate::ssh_pool::SshPool;
 use crate::vps_config::{
-    classify_privileged_output, find_remote_host, run_privileged_script_unbounded, vps_err, ERR_COMMAND_FAILED, ERR_SUDO_DENIED, ERR_SUDO_REQUIRED, ERR_UNSUPPORTED,
+    build_privileged_command, classify_privileged_output, find_remote_host, privileged_stdin, vps_err, ERR_COMMAND_FAILED, ERR_SUDO_DENIED, ERR_SUDO_REQUIRED, ERR_UNSUPPORTED,
 };
-use crate::vps_windows::{ps_quote, run_windows_script_unbounded};
+use crate::vps_windows::{build_powershell_command, powershell_stdin, ps_quote};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
@@ -267,6 +267,8 @@ fn checked<'a>(os: HostOs, manager: &str, name: &'a str) -> Result<&'a str, Stri
     Ok(name)
 }
 
+const APT: &str = "DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120";
+
 pub fn action_script(os: HostOs, a: &InstallAction) -> Result<String, String> {
     use InstallAction::*;
     match a {
@@ -275,8 +277,8 @@ pub fn action_script(os: HostOs, a: &InstallAction) -> Result<String, String> {
             let pkg = checked(os, manager, package)?;
             let (q, pq) = (shq(pkg), ps_quote(pkg));
             Ok(match (manager.as_str(), add) {
-                ("apt", true) => format!("DEBIAN_FRONTEND=noninteractive apt-get install -y {q}"),
-                ("apt", false) => format!("DEBIAN_FRONTEND=noninteractive apt-get remove -y {q}"),
+                ("apt", true) => format!("{APT} install -y {q}"),
+                ("apt", false) => format!("{APT} remove -y {q}"),
                 ("dnf", true) => format!("dnf install -y {q}"),
                 ("dnf", false) => format!("dnf remove -y {q}"),
                 ("snap", true) => format!("snap install {q}"),
@@ -305,15 +307,15 @@ pub fn action_script(os: HostOs, a: &InstallAction) -> Result<String, String> {
         }
         InstallManager { manager } => match (manager.as_str(), os) {
             ("brew", HostOs::Macos) => Ok("NONINTERACTIVE=1 /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"".into()),
-            ("snap", HostOs::Linux) => Ok("DEBIAN_FRONTEND=noninteractive apt-get install -y snapd".into()),
-            ("npm", HostOs::Linux) => Ok("if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs npm; else dnf install -y nodejs npm; fi".into()),
+            ("snap", HostOs::Linux) => Ok(format!("{APT} install -y snapd")),
+            ("npm", HostOs::Linux) => Ok(format!("if command -v apt-get >/dev/null 2>&1; then {APT} install -y nodejs npm; else dnf install -y nodejs npm; fi")),
             ("npm", HostOs::Macos) => Ok("brew install node".into()),
             ("npm", HostOs::Windows) => Ok(format!("{WG_FN}Wg install --id OpenJS.NodeJS.LTS -e {WINGET_FLAGS}{PS_CHK}")),
             ("winget", HostOs::Windows) => Err("WINGET_MANUAL".into()),
             _ => Err(format!("cannot install manager {manager} on this OS")),
         },
         Refresh => match os {
-            HostOs::Linux => Ok("if command -v apt-get >/dev/null 2>&1; then apt-get update -qq; else dnf makecache -q; fi".into()),
+            HostOs::Linux => Ok(format!("if command -v apt-get >/dev/null 2>&1; then {APT} update; else dnf makecache; fi")),
             _ => Err("refresh is only supported on Linux".into()),
         },
     }
@@ -389,9 +391,9 @@ impl Drop for GroupKill {
     }
 }
 
-async fn pipe(mut cmd: tokio::process::Command, stdin: Vec<u8>) -> Result<String, String> {
+async fn pipe(mut cmd: tokio::process::Command, stdin: Vec<u8>, mut on_chunk: impl FnMut(&str)) -> Result<String, String> {
     use std::process::Stdio;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -404,13 +406,37 @@ async fn pipe(mut cmd: tokio::process::Command, stdin: Vec<u8>) -> Result<String
     // (sudo relays it to its child). ponytail: remote SSH timeouts rely on the channel closing.
     let mut guard = GroupKill(child.id());
     let mut sin = child.stdin.take().ok_or_else(|| vps_err(ERR_COMMAND_FAILED, "no stdin"))?;
+    let mut out = child.stdout.take().ok_or_else(|| vps_err(ERR_COMMAND_FAILED, "no stdout"))?;
+    let mut err = child.stderr.take().ok_or_else(|| vps_err(ERR_COMMAND_FAILED, "no stderr"))?;
     // Ignore write errors: the child may exit before reading everything.
     let _ = sin.write_all(&stdin).await;
     drop(sin);
-    let out = child.wait_with_output().await.map_err(|e| vps_err(ERR_COMMAND_FAILED, e))?;
+    let mut text = String::new();
+    let (mut b1, mut b2) = ([0u8; 4096], [0u8; 4096]);
+    let (mut o_open, mut e_open) = (true, true);
+    while o_open || e_open {
+        tokio::select! {
+            r = out.read(&mut b1), if o_open => match r {
+                Ok(0) | Err(_) => o_open = false,
+                Ok(n) => {
+                    let s = String::from_utf8_lossy(&b1[..n]);
+                    on_chunk(&s);
+                    text.push_str(&s);
+                }
+            },
+            r = err.read(&mut b2), if e_open => match r {
+                Ok(0) | Err(_) => e_open = false,
+                Ok(n) => {
+                    let s = String::from_utf8_lossy(&b2[..n]);
+                    on_chunk(&s);
+                    text.push_str(&s);
+                }
+            },
+        }
+    }
+    let status = child.wait().await.map_err(|e| vps_err(ERR_COMMAND_FAILED, e))?;
     guard.0 = None; // finished: never signal a possibly reused pid
-    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    if out.status.success() {
+    if status.success() {
         Ok(text)
     } else {
         let low = text.to_lowercase();
@@ -428,13 +454,24 @@ pub async fn run_local(
     root: bool,
     elevated: bool,
 ) -> Result<String, String> {
+    run_local_stream(os, script, sudo_password, root, elevated, |_| {}).await
+}
+
+pub async fn run_local_stream(
+    os: HostOs,
+    script: &str,
+    sudo_password: Option<&str>,
+    root: bool,
+    elevated: bool,
+    on_chunk: impl FnMut(&str),
+) -> Result<String, String> {
     if os == HostOs::Windows {
-        return run_local_windows(script, elevated).await;
+        return run_local_windows(script, elevated, on_chunk).await;
     }
     let mut cmd = tokio::process::Command::new(if root { "sudo" } else { "sh" });
     if !root {
         cmd.arg("-s");
-        return pipe(cmd, script.as_bytes().to_vec()).await;
+        return pipe(cmd, script.as_bytes().to_vec(), on_chunk).await;
     }
     match sudo_password.filter(|p| !p.is_empty()) {
         Some(pw) => {
@@ -443,7 +480,7 @@ pub async fn run_local(
             }
             // -k: ignore cached credentials so sudo always consumes line 1; otherwise sh would run the password.
             cmd.args(["-k", "-S", "-p", "", "sh", "-s"]);
-            pipe(cmd, format!("{pw}\n{script}").into_bytes()).await
+            pipe(cmd, format!("{pw}\n{script}").into_bytes(), on_chunk).await
         }
         None => {
             // Passwordless sudo works without prompting; otherwise ask the UI for a password.
@@ -458,13 +495,13 @@ pub async fn run_local(
                 return Err(vps_err(ERR_SUDO_REQUIRED, "sudo password required"));
             }
             cmd.args(["-n", "sh", "-s"]);
-            pipe(cmd, script.as_bytes().to_vec()).await
+            pipe(cmd, script.as_bytes().to_vec(), on_chunk).await
         }
     }
 }
 
 #[cfg(target_os = "windows")]
-async fn run_local_windows(script: &str, elevated: bool) -> Result<String, String> {
+async fn run_local_windows(script: &str, elevated: bool, mut on_chunk: impl FnMut(&str)) -> Result<String, String> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let ps = |args: &[&str]| {
         let mut c = tokio::process::Command::new("powershell.exe");
@@ -472,7 +509,7 @@ async fn run_local_windows(script: &str, elevated: bool) -> Result<String, Strin
         c
     };
     if !elevated {
-        return pipe(ps(&["-Command", "-"]), script.as_bytes().to_vec()).await;
+        return pipe(ps(&["-Command", "-"]), script.as_bytes().to_vec(), on_chunk).await;
     }
     // UAC prompt via RunAs; the elevated child cannot pipe back, so it writes to a temp file.
     let dir = std::env::temp_dir();
@@ -494,14 +531,15 @@ async fn run_local_windows(script: &str, elevated: bool) -> Result<String, Strin
         "Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',{}",
         ps_quote(&ps1.to_string_lossy())
     );
-    let r = pipe(ps(&["-Command", "-"]), outer.into_bytes()).await;
+    let r = pipe(ps(&["-Command", "-"]), outer.into_bytes(), &mut on_chunk).await;
     let text = std::fs::read_to_string(&out).unwrap_or_default();
+    on_chunk(&text);
     r?;
     classify_privileged_output(&text)
 }
 
 #[cfg(not(target_os = "windows"))]
-async fn run_local_windows(_script: &str, _elevated: bool) -> Result<String, String> {
+async fn run_local_windows(_script: &str, _elevated: bool, _on_chunk: impl FnMut(&str)) -> Result<String, String> {
     Err(vps_err(ERR_UNSUPPORTED, "windows_only"))
 }
 
@@ -518,18 +556,46 @@ pub async fn run(
     elevated: bool,
     secs: u64,
 ) -> Result<String, String> {
+    run_stream(host_id, pool, os, script, sudo_password, root, elevated, secs, |_| {}).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_stream(
+    host_id: &str,
+    pool: &SshPool,
+    os: HostOs,
+    script: &str,
+    sudo_password: Option<String>,
+    root: bool,
+    elevated: bool,
+    secs: u64,
+    mut on_chunk: impl FnMut(&str) + Send,
+) -> Result<String, String> {
     // GUI-launched apps and non-login SSH miss Homebrew/npm bins; inside the script so it survives sudo.
     let script = &if os == HostOs::Windows { script.to_string() } else { format!("{UNIX_PATH}\n{script}") };
+    let mut clean_chunk = |raw: &str| {
+        let filtered: String = raw
+            .lines()
+            .filter(|l| !l.starts_with("SSHBOX_EXIT_CODE:") && !l.starts_with("SSHBOX_ERR_SUDO_PASSWORD_REQUIRED"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        if !filtered.is_empty() {
+            on_chunk(&filtered);
+        }
+    };
     let fut = async {
         if host_id == "local" {
-            run_local(os, script, sudo_password.as_deref(), root, elevated).await
-        } else if os == HostOs::Windows {
-            run_windows_script_unbounded(host_id, pool, script, None).await
-        } else if root {
-            run_privileged_script_unbounded(host_id, pool, sudo_password, script, None).await
+            run_local_stream(os, script, sudo_password.as_deref(), root, elevated, &mut clean_chunk).await
         } else {
             let host = find_remote_host(host_id)?;
-            let out = pool.exec_bytes_on_host(&host, r#"sh -s 2>&1 || echo "SSHBOX_EXIT_CODE:$?""#, Some(script.as_bytes())).await?;
+            let (cmd, stdin) = if os == HostOs::Windows {
+                (build_powershell_command(), powershell_stdin(script, None))
+            } else if root {
+                (build_privileged_command(script), privileged_stdin(sudo_password.as_deref(), None)?)
+            } else {
+                (r#"sh -s 2>&1 || echo "SSHBOX_EXIT_CODE:$?""#.to_string(), script.as_bytes().to_vec())
+            };
+            let out = pool.exec_bytes_streaming_on_host(&host, &cmd, Some(&stdin), &mut clean_chunk).await?;
             classify_privileged_output(&String::from_utf8_lossy(&out))
         }
     };
@@ -559,12 +625,19 @@ pub async fn search(host_id: &str, pool: &SshPool, os: HostOs, present: Vec<Stri
     Ok(parse_search(&run(host_id, pool, os, &script, None, false, false, 30).await?))
 }
 
-pub async fn run_action(host_id: &str, pool: &SshPool, os: HostOs, a: InstallAction, pw: Option<String>) -> Result<String, String> {
+pub async fn run_action(
+    host_id: &str,
+    pool: &SshPool,
+    os: HostOs,
+    a: InstallAction,
+    pw: Option<String>,
+    on_chunk: impl FnMut(&str) + Send,
+) -> Result<String, String> {
     let script = action_script(os, &a)?;
     let elevated = host_id == "local"
         && os == HostOs::Windows
         && matches!(a, InstallAction::Uninstall { .. } | InstallAction::EnableService { .. });
-    run(host_id, pool, os, &script, pw, needs_root(os, &a), elevated, 600).await
+    run_stream(host_id, pool, os, &script, pw, needs_root(os, &a), elevated, 600, on_chunk).await
 }
 
 #[cfg(test)]
@@ -676,7 +749,9 @@ mod tests {
     #[test]
     fn action_apt_install_noninteractive() {
         let s = action_script(HostOs::Linux, &act("install", "apt", "fail2ban")).unwrap();
-        assert!(s.contains("DEBIAN_FRONTEND=noninteractive") && s.contains("apt-get install -y 'fail2ban'"));
+        assert!(s.contains("DEBIAN_FRONTEND=noninteractive") && s.contains("-o DPkg::Lock::Timeout=120") && s.contains("install -y 'fail2ban'"));
+        let r = action_script(HostOs::Linux, &InstallAction::Refresh).unwrap();
+        assert!(r.contains("-o DPkg::Lock::Timeout=120") && !r.contains("-qq"));
     }
 
     #[test]
@@ -814,5 +889,28 @@ mod tests {
         let out = run("local", &pool, HostOs::Macos, "echo \"$PATH\"", None, false, false, 10).await.unwrap();
         assert!(out.starts_with("/opt/homebrew/bin:/usr/local/bin:"), "{out}");
         assert!(UNIX_PATH.starts_with(r#"export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.npm-global/bin:$PATH""#));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_stream_delivers_live_chunks_and_strips_exit_marker() {
+        let pool = crate::ssh_pool::SshPool::default();
+        let mut chunks = Vec::new();
+        let out = run_stream(
+            "local",
+            &pool,
+            HostOs::Linux,
+            "echo step1; echo step2 >&2; echo SSHBOX_EXIT_CODE:0",
+            None,
+            false,
+            false,
+            10,
+            |c| chunks.push(c.to_string()),
+        )
+        .await
+        .unwrap();
+        let streamed = chunks.join("");
+        assert!(streamed.contains("step1") && streamed.contains("step2") && !streamed.contains("SSHBOX_EXIT_CODE:"), "{streamed}");
+        assert!(out.contains("step1"));
     }
 }

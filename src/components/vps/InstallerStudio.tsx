@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { Package } from "lucide-react";
+import React, { useEffect, useRef, useState } from "react";
+import { Channel, invoke } from "@tauri-apps/api/core";
+import { Package, Terminal, X } from "lucide-react";
 import { getI18n } from "../../i18n";
 import { HostOs, InstallAction, InstallerScan, SearchHit, ToolView } from "../../types";
 import { StatusBadge } from "./shared/StatusBadge";
@@ -14,6 +14,43 @@ const CATEGORIES = ["security", "apps", "ai", "network", "utils"];
 type Tab = "missing" | "installed" | "attention";
 type RunStatus = "waiting" | "running" | "done" | "failed";
 interface BatchItem { label: string; action: InstallAction; status: RunStatus; output: string }
+interface HostJob { batch: BatchItem[]; busy: boolean; startedAt: number; elapsed: number }
+
+// Keep running jobs across tab switches so leaving and returning never hides an active install or re-enables Install.
+const JOBS = new Map<string, HostJob>();
+const LISTENERS = new Set<() => void>();
+const getJob = (hostId: string): HostJob => JOBS.get(hostId) ?? { batch: [], busy: false, startedAt: 0, elapsed: 0 };
+const setJob = (hostId: string, fn: (j: HostJob) => HostJob) => {
+  JOBS.set(hostId, fn(getJob(hostId)));
+  LISTENERS.forEach((l) => l());
+};
+
+const stepPct = (b: BatchItem): number => {
+  if (b.status === "done") return 100;
+  if (b.status === "waiting") return 0;
+  const out = b.output;
+  if (!out) return b.status === "running" ? 5 : 0;
+  const pcts = [...out.matchAll(/(\d{1,3})%/g)].map((m) => Number(m[1])).filter((n) => n <= 100);
+  if (pcts.length) return Math.min(99, Math.max(8, pcts[pcts.length - 1]));
+  if (out.includes("Processing triggers")) return 95;
+  const setups = (out.match(/Setting up /g) ?? []).length;
+  if (setups) return Math.min(92, 75 + setups * 2);
+  const unpacks = (out.match(/Unpacking |Preparing to unpack/g) ?? []).length;
+  if (unpacks) return Math.min(74, 45 + unpacks);
+  if (/Fetched |Building dependency tree|Reading state information/.test(out)) return 40;
+  const gets = (out.match(/Get:|Hit:/g) ?? []).length;
+  if (gets) return Math.min(35, 12 + gets);
+  const lines = out.trim().split("\n").length;
+  return Math.min(90, 8 + lines * 2);
+};
+
+const lastLine = (s: string): string => {
+  const lines = s.split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean);
+  return lines[lines.length - 1] ?? "";
+};
+
+const fmtTime = (secs: number): string =>
+  `${String(Math.floor(secs / 60)).padStart(2, "0")}:${String(secs % 60).padStart(2, "0")}`;
 
 const BTN = "shrink-0 px-3 py-1.5 rounded-xl text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-accent/70 border border-border/60 transition-all cursor-pointer disabled:cursor-not-allowed disabled:opacity-50";
 const PRIMARY = "px-3 py-1.5 rounded-xl text-xs font-semibold bg-primary text-primary-foreground hover:opacity-90 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50";
@@ -43,13 +80,34 @@ export const InstallerStudio: React.FC<{ vps: VpsCtx; os: HostOs }> = ({ vps, os
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [hits, setHits] = useState<Record<string, SearchHit>>({});
   const [via, setVia] = useState<Record<string, string>>({});
-  const [batch, setBatch] = useState<BatchItem[]>([]);
-  const [busy, setBusy] = useState(false);
+  const [, forceRender] = useState(0);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchHit[]>([]);
+  const termRef = useRef<HTMLPreElement | null>(null);
+  const panelRef = useRef<HTMLElement | null>(null);
+  const { batch, busy, startedAt, elapsed } = getJob(hostId);
   const scan = res.data;
   const present = scan?.managers.filter((m) => m.present).map((m) => m.id) ?? [];
   const missingMgrs = scan?.managers.filter((m) => !m.present).map((m) => m.id) ?? [];
+
+  useEffect(() => {
+    const l = () => forceRender((n) => n + 1);
+    LISTENERS.add(l);
+    return () => { LISTENERS.delete(l); };
+  }, []);
+
+  useEffect(() => {
+    if (!busy || !startedAt) return;
+    const id = window.setInterval(() => {
+      setJob(hostId, (j) => ({ ...j, elapsed: Math.max(0, Math.floor((Date.now() - j.startedAt) / 1000)) }));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [busy, startedAt, hostId]);
+
+  const totalOutLen = batch.reduce((n, b) => n + b.output.length, 0);
+  useEffect(() => {
+    if (termRef.current) termRef.current.scrollTop = termRef.current.scrollHeight;
+  }, [totalOutLen, batch.length]);
 
   useEffect(() => {
     const q = query.trim();
@@ -105,27 +163,40 @@ export const InstallerStudio: React.FC<{ vps: VpsCtx; os: HostOs }> = ({ vps, os
   const count = buildActions().filter((a) => a.kind !== "refresh").length;
 
   const runBatch = async (actions: InstallAction[], clearSelection = false) => {
+    if (getJob(hostId).busy) return;
     const items: BatchItem[] = actions.map((a) => ({ label: verb(a), action: a, status: "waiting", output: "" }));
-    setBatch(items);
-    setBusy(true);
-    const patch = (i: number, p: Partial<BatchItem>) => setBatch((b) => b.map((x, j) => (j === i ? { ...x, ...p } : x)));
+    setJob(hostId, () => ({ batch: items, busy: true, startedAt: Date.now(), elapsed: 0 }));
+    window.setTimeout(() => panelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 50);
+    const patch = (i: number, fn: (b: BatchItem) => BatchItem) =>
+      setJob(hostId, (j) => ({ ...j, batch: j.batch.map((x, k) => (k === i ? fn(x) : x)) }));
     let stopped = false;
     for (let i = 0; i < items.length; i++) {
-      patch(i, { status: "running" });
+      patch(i, (b) => ({ ...b, status: "running" }));
+      const onOutput = new Channel<string>();
+      onOutput.onmessage = (chunk) => patch(i, (b) => ({ ...b, output: b.output + chunk }));
       try {
-        const output = await invoke<string>("installer_run", { hostId, os, action: items[i].action, sudoPassword: vps.sudoPassword ?? null });
-        patch(i, { status: "done", output });
+        const output = await invoke<string>("installer_run", {
+          hostId,
+          os,
+          action: items[i].action,
+          sudoPassword: vps.sudoPassword ?? null,
+          onOutput,
+        });
+        patch(i, (b) => ({ ...b, status: "done", output: b.output || output }));
       } catch (e) {
         if (["SUDO_REQUIRED", "SUDO_DENIED"].includes(parseVpsError(e).code ?? "")) {
-          patch(i, { status: "waiting" });
+          patch(i, (b) => ({ ...b, status: "waiting" }));
           vps.requestSudo();
           stopped = true;
           break;
         }
-        patch(i, { status: "failed", output: vpsErrorText(t, e) });
+        const errText = vpsErrorText(t, e);
+        patch(i, (b) => ({ ...b, status: "failed", output: b.output ? `${b.output}\n${errText}` : errText }));
+        stopped = true;
+        break;
       }
     }
-    setBusy(false);
+    setJob(hostId, (j) => ({ ...j, busy: false }));
     if (clearSelection && !stopped) setSel(new Set());
     await res.refresh();
   };
@@ -209,11 +280,77 @@ export const InstallerStudio: React.FC<{ vps: VpsCtx; os: HostOs }> = ({ vps, os
     );
 
   const hitGroups = results.reduce<Record<string, SearchHit[]>>((g, h) => ({ ...g, [h.manager]: [...(g[h.manager] ?? []), h] }), {});
+  const pct = batch.length ? Math.round(batch.reduce((s, b) => s + stepPct(b), 0) / batch.length) : 0;
+  const activeIdx = batch.findIndex((b) => b.status === "running");
+  const failedItem = batch.find((b) => b.status === "failed");
+  const currentItem = activeIdx >= 0 ? batch[activeIdx] : failedItem ?? batch[batch.length - 1];
+  const overallStatus: RunStatus = busy ? "running" : failedItem ? "failed" : "done";
+  const liveLine = currentItem ? lastLine(currentItem.output) : "";
 
   return (
     <div className="space-y-5 pb-16">
       {res.error && <Notice tone="danger">{res.error}</Notice>}
       {hostId === "local" && os === "windows" && <Notice tone="warn">{t.instWindowsPopupNote}</Notice>}
+
+      {batch.length > 0 && (
+        <section ref={panelRef} className="rounded-2xl border border-border/80 bg-card/90 overflow-hidden shadow-sm">
+          <div className="px-4 py-3 border-b border-border/60 space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <Terminal className="size-4 shrink-0 text-primary" />
+                <span className="font-mono text-xs font-medium text-foreground truncate">
+                  {activeIdx >= 0 ? `[${activeIdx + 1}/${batch.length}] ${currentItem?.label}` : currentItem?.label}
+                </span>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="font-mono text-xs text-muted-foreground">{fmtTime(elapsed)}</span>
+                <span className="font-mono text-xs font-semibold text-foreground">{pct}%</span>
+                <StatusBadge tone={STATUS_TONE[overallStatus]}>{t.instStatus[overallStatus]}</StatusBadge>
+                {!busy && (
+                  <button
+                    type="button"
+                    onClick={() => setJob(hostId, () => ({ batch: [], busy: false, startedAt: 0, elapsed: 0 }))}
+                    className="p-1 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent/70 cursor-pointer"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
+              <div
+                className={`h-full transition-all duration-300 ${
+                  overallStatus === "failed" ? "bg-destructive" : overallStatus === "done" ? "bg-emerald-500" : "bg-primary"
+                }`}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+
+            <p className="font-mono text-[11px] text-muted-foreground truncate">
+              {liveLine || (busy ? `${t.instStatus.running}…` : t.instStatus[overallStatus])}
+            </p>
+          </div>
+
+          <pre
+            ref={termRef}
+            className="bg-zinc-950 text-zinc-100 font-mono text-xs p-3.5 max-h-72 overflow-y-auto whitespace-pre-wrap break-all leading-relaxed"
+          >
+            {batch.map((b, i) => (
+              <div key={i} className={i > 0 ? "mt-3 pt-2 border-t border-zinc-800" : ""}>
+                <div className="text-emerald-400 font-semibold">
+                  $ [{i + 1}/{batch.length}] {b.label} ({t.instStatus[b.status]})
+                </div>
+                {b.output ? (
+                  <div className="mt-1 text-zinc-300">{b.output}</div>
+                ) : b.status === "running" ? (
+                  <div className="mt-1 text-zinc-500 animate-pulse">{t.instStatus.running}…</div>
+                ) : null}
+              </div>
+            ))}
+          </pre>
+        </section>
+      )}
 
       <section className="space-y-2">
         <input
@@ -270,7 +407,14 @@ export const InstallerStudio: React.FC<{ vps: VpsCtx; os: HostOs }> = ({ vps, os
             {m.present ? (
               <StatusBadge tone="ok">{t.instTabInstalled}</StatusBadge>
             ) : (
-              <button type="button" className={BTN} disabled={busy} onClick={() => runBatch([{ kind: "installManager", manager: m.id }])}>
+              <button
+                type="button"
+                className={BTN}
+                disabled={busy}
+                onClick={() =>
+                  runBatch(os === "linux" ? [{ kind: "refresh" }, { kind: "installManager", manager: m.id }] : [{ kind: "installManager", manager: m.id }])
+                }
+              >
                 {t.instInstall}
               </button>
             )}
@@ -279,25 +423,6 @@ export const InstallerStudio: React.FC<{ vps: VpsCtx; os: HostOs }> = ({ vps, os
         )),
       )}
       {CATEGORIES.map((c) => group(c, scan.tools.filter((tl) => tl.category === c && inTab(tl)).map(toolRow)))}
-
-
-      {batch.length > 0 && (
-        <section className="rounded-2xl border border-border/80 bg-card/65 divide-y divide-border/60">
-          {batch.map((b, i) => (
-            <details key={i} className="px-4 py-2">
-              <summary className="flex flex-wrap items-center justify-between gap-2 cursor-pointer text-sm">
-                <span className="font-mono text-xs text-foreground break-all">{b.label}</span>
-                <StatusBadge tone={STATUS_TONE[b.status]}>{t.instStatus[b.status]}</StatusBadge>
-              </summary>
-              {b.output && (
-                <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs text-muted-foreground">
-                  {b.output.split("\n").slice(-40).join("\n")}
-                </pre>
-              )}
-            </details>
-          ))}
-        </section>
-      )}
 
       {count > 0 && (
         <div className="sticky bottom-0 flex justify-end rounded-2xl border border-border/80 bg-card/95 px-4 py-3">

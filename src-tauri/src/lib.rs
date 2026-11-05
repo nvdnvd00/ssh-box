@@ -921,8 +921,12 @@ async fn installer_run(
     os: installer::HostOs,
     action: installer::InstallAction,
     sudo_password: Option<String>,
+    on_output: Channel<String>,
 ) -> Result<String, String> {
-    installer::run_action(&host_id, &state.ssh_pool, os, action, sudo_password).await
+    installer::run_action(&host_id, &state.ssh_pool, os, action, sudo_password, |chunk| {
+        let _ = on_output.send(chunk.to_string());
+    })
+    .await
 }
 
 #[tauri::command]

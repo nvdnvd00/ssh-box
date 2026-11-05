@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="18 22 90 84" width="90" height="84">
+  <!-- Glyph only, no background. Mid blue reads on both light and dark pages. -->
+  <path d="M56 64C70 64 70 36 82 36M56 64h26M56 64C70 64 70 92 82 92" fill="none" stroke="#93c5fd" stroke-width="4" stroke-linecap="round"/>
+  <path d="M26 40l24 24-24 24" fill="none" stroke="#3b82f6" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="82" y="27" width="22" height="18" rx="4" fill="none" stroke="#3b82f6" stroke-width="3"/>
+  <rect x="82" y="55" width="22" height="18" rx="4" fill="#3b82f6"/>
+  <rect x="82" y="83" width="22" height="18" rx="4" fill="none" stroke="#3b82f6" stroke-width="3"/>
+</svg>

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="18 22 90 84" width="90" height="84" fill="none" stroke="currentColor">
+  <!-- Single colour: takes the surrounding text colour (menu bar, print, stamps). -->
+  <path d="M56 64C70 64 70 36 82 36M56 64h26M56 64C70 64 70 92 82 92" stroke-width="4" stroke-linecap="round" opacity=".5"/>
+  <path d="M26 40l24 24-24 24" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="82" y="27" width="22" height="18" rx="4" stroke-width="3"/>
+  <rect x="82" y="55" width="22" height="18" rx="4" fill="currentColor" stroke="none"/>
+  <rect x="82" y="83" width="22" height="18" rx="4" stroke-width="3"/>
+</svg>

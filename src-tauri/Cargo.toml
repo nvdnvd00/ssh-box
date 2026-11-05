@@ -1,8 +1,11 @@
 [package]
 name = "ssh-box"
 version = "0.2.1"
-description = "SSH & Terminal Manager"
-authors = ["darien"]
+description = "The Modern SSH Client, Terminal & Server Manager"
+authors = ["Neos Nguyen <17423070+nvdnvd00@users.noreply.github.com>"]
+license = "Apache-2.0"
+homepage = "https://github.com/nvdnvd00/ssh-box"
+repository = "https://github.com/nvdnvd00/ssh-box"
 edition = "2021"
 
 [lib]

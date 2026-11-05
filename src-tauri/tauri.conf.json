@@ -27,7 +27,14 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "publisher": "darien",
+    "publisher": "Neos Nguyen",
+    "copyright": "Copyright © 2026 Neos Nguyen. All rights reserved.",
+    "category": "DeveloperTool",
+    "shortDescription": "Modern SSH Client, Terminal & Server Manager",
+    "longDescription": "All-in-one SSH client, terminal, dual-pane SFTP manager, live server monitor, and visual server configuration studio.",
+    "homepage": "https://github.com/nvdnvd00/ssh-box",
+    "license": "Apache-2.0",
+    "licenseFile": "../LICENSE",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

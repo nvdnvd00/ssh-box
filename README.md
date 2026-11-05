@@ -9,7 +9,6 @@
 <br />
 
 ### High-Performance SSH, 120fps WebGL2 Terminal & Multi-OS Server Control Center
-*Trình quản lý SSH, Terminal 120fps WebGL2 & Trung tâm điều khiển máy chủ đa nền tảng*
 
 [![Latest Release](https://img.shields.io/github/v/release/nvdnvd00/ssh-box?style=flat-square&logo=github&label=release&color=2563eb)](https://github.com/nvdnvd00/ssh-box/releases/latest)
 [![Release Workflow](https://img.shields.io/github/actions/workflow/status/nvdnvd00/ssh-box/release.yml?branch=main&style=flat-square&logo=githubactions&label=build)](https://github.com/nvdnvd00/ssh-box/actions/workflows/release.yml)
@@ -19,10 +18,12 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-10b981?style=flat-square)](#download)
 
 <p align="center">
-  <a href="#english"><strong>🌐 English</strong></a>
+  <strong>🌐 English</strong>
   &nbsp;·&nbsp;
-  <a href="#tieng-viet"><strong>🇻🇳 Tiếng Việt</strong></a>
-  &nbsp;·&nbsp;
+  <a href="README.vi.md"><strong>🇻🇳 Tiếng Việt</strong></a>
+</p>
+
+<p align="center">
   <a href="#download"><strong>⬇️ Download</strong></a>
   &nbsp;·&nbsp;
   <a href="#features"><strong>✨ Features</strong></a>
@@ -37,8 +38,6 @@
 </div>
 
 ---
-
-<a id="english"></a>
 
 ## ⚡ Overview
 
@@ -248,52 +247,6 @@ npx tauri build
 # Cross-compile Windows NSIS installer from macOS/Linux (requires cargo-xwin)
 npm run tauri:build:win
 ```
-
----
----
-
-<a id="tieng-viet"></a>
-
-<div align="center">
-
-## 🇻🇳 Tài Liệu Tiếng Việt
-
-**SSH Box** — Ứng dụng quản lý SSH, Terminal 120fps WebGL2, SFTP 2 cột, Giám sát tài nguyên thời gian thực và Trung tâm cấu hình bảo mật máy chủ (Linux · macOS · Windows).
-
-</div>
-
-### 🌟 Điểm nổi bật
-
-1. **⚡ Terminal 120fps WebGL2 & Chia khung đệ quy (Split Panes):**
-   - Toàn bộ tầng mạng SSH (`russh`) và Local PTY (`portable-pty`) chạy trên nhân **Rust bất đồng bộ (`tokio`)**.
-   - Cơ chế **Frame-Batched Binary Streaming (`8ms` / `64KB`)** gom luồng byte nhị phân qua `tauri::ipc::Channel` đẩy thẳng lên bộ vẽ **WebGL2 GPU** (`@xterm/addon-webgl`), giữ tốc độ mượt 120fps ngay cả khi chạy `btop`, `tmux`, `nvim` hoặc xả log lớn.
-   - Chia đôi màn hình dọc/ngang nhiều tầng như iTerm2 (`⌘D` / `⌘⇧D`), tự động gắn phiên `tmux` (tuỳ chọn), tìm kiếm trong terminal và bảng lệnh nhanh (`⌘K`).
-
-2. **🛡️ Cấu hình VPS & Chống tự khoá máy chủ (Linux · macOS · Windows):**
-   - **Bảo mật SSH (`sshd`):** Đọc cấu hình thực tế bằng `sshd -T`, ghi file drop-in chuẩn, đi kèm **Bộ chặn tự khoá (Anti-Lockout Guard)** ở backend. Mọi thay đổi đều có bảng **Xem trước (`cũ → mới`)**, tự mở **kết nối thử nghiệm mới** để xác minh trước khi giữ cấu hình, và tự động hoàn tác (rollback) nếu mất kết nối.
-   - **Tường lửa (Firewall Studio):** Hỗ trợ `UFW`, `firewalld`, `iptables` (chỉ xem) và `Windows Defender Firewall`. Xem danh sách cổng đang lắng nghe, bật/tắt tường lửa (tự động mở cổng SSH hiện tại), thêm/xoá rule và cho phép nhanh IP hiện tại của bạn.
-   - **Người dùng & Khoá truy cập (Users & Keys):** Quản lý tài khoản hệ thống, quyền `sudo`, khoá/mở khoá user và cấp/thu hồi trực tiếp SSH Public Key từ kho khoá của SSH Box.
-   - **Trình cài đặt công cụ (Tool Installer):** Cài đặt 1 chạm các công cụ Bảo mật (`UFW`, `Fail2ban`, `Unattended Upgrades`, `Lynis`, `rkhunter`), Ứng dụng (`Docker`, `Git`, `Node.js`, `Python 3`, `Nginx`), AI (`Claude Code`), Mạng (`Tailscale`) và Tiện ích (`tmux`, `htop`, `ripgrep`, `jq`) hoặc tìm kiếm trực tiếp trên `apt`, `dnf`, `snap`, `brew`, `winget`, `npm` cho cả máy chủ từ xa lẫn **Máy này (Local)**.
-
-3. **📊 Giám sát máy chủ thời gian thực & Quản lý Docker:**
-   - Lấy thông số định kỳ mỗi `2 giây` qua kênh `exec` (không tạo PTY giả, không làm bẩn `.bash_history`): `%CPU` từng nhân, nhiệt độ CPU, `RAM`, `Swap`, tốc độ mạng `RX/TX`, ổ đĩa và tiến trình tiêu thụ tài nguyên cao nhất.
-   - Quản lý **Docker Containers & Images** trực quan: bật, tắt, khởi động lại, xoá container/image ngay trong giao diện.
-
-4. **📂 Trình quản lý file SFTP 2 cột (Local ↔ Remote):**
-   - Duyệt file song song giữa máy cục bộ và máy chủ từ xa trên cùng kết nối SSH Multiplexed.
-   - Hỗ trợ tải lên/tải xuống, tạo mới, đổi tên, xoá, phân quyền `chmod` (nhập số octal hoặc tích chọn) và sửa nhanh file văn bản trực tiếp (tối đa `2 MB`).
-
-5. **🔐 Khoá bảo mật hệ điều hành, Proxy, Port Forwarding & Sao lưu mã hoá:**
-   - Tự động đọc `~/.ssh/config` (chế độ chỉ đọc) kết hợp với danh sách máy chủ tuỳ chỉnh, phân nhóm và gắn thẻ màu.
-   - Lưu mật khẩu và passphrase an toàn trong **macOS Keychain**, **Windows Credential Manager**, hoặc **Linux Secret Service**.
-   - Hỗ trợ **Jump Host (Bastion)**, **Proxy SOCKS5 / HTTP Connect**, **Port Forwarding** (`Local -L`, `Remote -R`, `Dynamic -D`), quản lý **Snippets** và xuất/nhập toàn bộ dữ liệu bằng gói **mã hoá AES-256-GCM (PBKDF2)**.
-
-### ⬇️ Tải xuống nhanh
-
-- **macOS (Universal — Apple Silicon & Intel):** [**Tải `ssh-box.dmg`**](https://github.com/nvdnvd00/ssh-box/releases/latest/download/ssh-box.dmg)
-  *(Nếu mở lần đầu bị macOS Gatekeeper chặn, chạy lệnh: `xattr -cr "/Applications/SSH Box.app"`)*
-- **Windows (64-bit Installer):** [**Tải `ssh-box-setup.exe`**](https://github.com/nvdnvd00/ssh-box/releases/latest/download/ssh-box-setup.exe)
-- **Tự động cập nhật:** Tích hợp sẵn trình kiểm tra và cập nhật phiên bản mới có chữ ký số ngay trong mục **Cài đặt → Cập nhật**.
 
 ---
 

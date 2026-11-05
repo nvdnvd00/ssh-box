@@ -164,7 +164,8 @@ export default function App() {
   }, []);
 
   const handleInstallUpdate = async () => {
-    if (!pendingUpdate || !window.confirm(t.updateConfirm)) return;
+    // tauri-plugin-dialog replaces window.confirm with an async version, so await it.
+    if (!pendingUpdate || !(await window.confirm(t.updateConfirm))) return;
     setIsUpdating(true);
     try {
       await pendingUpdate.downloadAndInstall();

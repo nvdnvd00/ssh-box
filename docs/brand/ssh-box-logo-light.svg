@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 440 128" width="440" height="128">
+  <!-- For light backgrounds. Wordmark is live text: exact glyphs depend on the viewer's monospace font. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#4f46e5"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="url(#bg)"/>
+  <path d="M56 64C70 64 70 36 82 36M56 64h26M56 64C70 64 70 92 82 92" fill="none" stroke="#93c5fd" stroke-width="4" stroke-linecap="round"/>
+  <path d="M26 40l24 24-24 24" fill="none" stroke="#fff" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="82" y="27" width="22" height="18" rx="4" fill="#1e3a8a" stroke="#fff" stroke-width="3"/>
+  <rect x="82" y="55" width="22" height="18" rx="4" fill="#fff"/>
+  <rect x="82" y="83" width="22" height="18" rx="4" fill="#1e3a8a" stroke="#fff" stroke-width="3"/>
+  <text x="156" y="86" fill="#0f172a" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="64" font-weight="700" letter-spacing="-1">ssh box</text>
+</svg>

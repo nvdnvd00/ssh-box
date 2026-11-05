@@ -51,9 +51,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          # Version = package.json version + run number as semver build metadata (0.2.1+5).
-          # run_number restarts at 1 if this file is renamed: bump package.json when that happens.
-          VERSION="$(node -p 'require("./package.json").version')+${{ github.run_number }}"
+          # Version = package.json major.minor + run number as the last part (0.2.5), the same everywhere.
+          # run_number restarts at 1 if this file is renamed: bump the minor in package.json when that happens.
+          VERSION="$(node -p 'require("./package.json").version.split(".").slice(0, 2).join(".")').${{ github.run_number }}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           # Config goes through a file: Git Bash on Windows can rewrite path-like parts of a JSON argument.
           node -e 'require("fs").writeFileSync("release.conf.json", JSON.stringify({version: process.argv[1], bundle: {createUpdaterArtifacts: true}, plugins: {updater: {endpoints: [process.argv[2]]}}}))' "$VERSION" "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json"
@@ -78,8 +78,7 @@ jobs:
       - uses: actions/download-artifact@v8
       - name: Create the GitHub Release
         run: |
-          # The tag (and so every asset URL) avoids "+": 0.2.1+5 -> v0.2.1.5.
-          TAG="v$(echo "$VERSION" | tr + .)"
+          TAG="v$VERSION"
           URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
           # Plain asset names: GitHub turns the spaces in "SSH Box_..." into dots.
           mv Windows/*-setup.exe ssh-box-setup.exe

@@ -10,6 +10,73 @@ pub fn set_app_data_dir(dir: PathBuf) {
     let _ = APP_DATA_DIR_OVERRIDE.set(dir);
 }
 
+/// Identifier before the rename to com.neos.sshbox; its data dir sits next to the current one.
+const LEGACY_IDENTIFIER: &str = "com.darien.sshbox";
+
+/// First start after the identifier rename: copy the old data dir into `new_dir` (only while
+/// `new_dir` is missing or empty). The old dir is left as is so a rolled-back install still
+/// has its data. Returns the dir to use; on a failed copy that is the old dir, so this run
+/// still sees the user's data and the copy is retried on the next start.
+pub fn migrate_legacy_data_dir(new_dir: PathBuf) -> PathBuf {
+    let Some(old_dir) = new_dir.parent().map(|p| p.join(LEGACY_IDENTIFIER)) else {
+        return new_dir;
+    };
+    let _ = std::fs::remove_dir(&new_dir); // only succeeds when it is empty
+    if new_dir.exists() || !old_dir.is_dir() {
+        return new_dir;
+    }
+    let mut tmp = new_dir.clone().into_os_string();
+    tmp.push(".migrating");
+    let tmp = PathBuf::from(tmp);
+    let _ = std::fs::remove_dir_all(&tmp); // left over from an interrupted copy
+    let copied = copy_dir(&old_dir, &tmp)
+        .and_then(|_| rebase_key_paths(&tmp.join("resources.json"), &old_dir, &new_dir))
+        .and_then(|_| std::fs::rename(&tmp, &new_dir));
+    match copied {
+        Ok(()) => new_dir,
+        Err(e) => {
+            eprintln!(
+                "ssh-box: copying {} failed ({e}), using it in place",
+                old_dir.display()
+            );
+            old_dir
+        }
+    }
+}
+
+fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &to)?;
+        } else {
+            std::fs::copy(entry.path(), &to)?; // keeps file mode, e.g. 0600 private keys
+        }
+    }
+    Ok(())
+}
+
+// resources.json stores absolute paths of the app-managed keys, so they still point into the
+// old dir after the copy. Keys the user keeps elsewhere are left alone.
+fn rebase_key_paths(store: &Path, old_dir: &Path, new_dir: &Path) -> std::io::Result<()> {
+    let mut data = crate::resources::load_resources_at(store);
+    let mut changed = false;
+    for key in &mut data.ssh_keys {
+        if let Ok(rest) = Path::new(&key.private_key_path).strip_prefix(old_dir) {
+            key.private_key_path = new_dir.join(rest).to_string_lossy().to_string();
+            changed = true;
+        }
+    }
+    // Only save when something moved: an unreadable file loads as empty and must not be
+    // written back over the copy.
+    if changed {
+        crate::resources::save_resources_at(store, &data).map_err(std::io::Error::other)?;
+    }
+    Ok(())
+}
+
 pub fn app_home_dir() -> PathBuf {
     if let Some(dir) = APP_DATA_DIR_OVERRIDE.get() {
         let home = dir.join("home");
@@ -528,5 +595,61 @@ mod tests {
         assert_eq!(load_ui_settings_at(&settings_path), Some(payload));
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    // Users updating from the com.darien.sshbox build must keep their hosts and private keys,
+    // the old dir must survive for a rollback, and a later start must never overwrite data
+    // the user saved after the move.
+    #[test]
+    fn copies_legacy_identifier_data_dir_once() {
+        let root = std::env::temp_dir().join(format!("ssh-box-test-{}", uuid::Uuid::new_v4()));
+        let old_dir = root.join(LEGACY_IDENTIFIER);
+        let new_dir = root.join("com.neos.sshbox");
+        let managed_key = old_dir.join("keys").join("id_test");
+        std::fs::create_dir_all(old_dir.join("keys")).unwrap();
+        std::fs::write(old_dir.join("hosts.json"), "old-hosts").unwrap();
+        std::fs::write(&managed_key, "PRIVATE").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(&managed_key, mode).unwrap();
+        }
+        let resources = serde_json::json!({ "sshKeys": [
+            { "id": "k1", "name": "managed", "keyType": "ed25519", "publicKey": "",
+              "privateKeyPath": managed_key.to_string_lossy() },
+            { "id": "k2", "name": "user-owned", "keyType": "ed25519", "publicKey": "",
+              "privateKeyPath": "/home/someone/.ssh/id_ed25519" }
+        ]});
+        std::fs::write(old_dir.join("resources.json"), resources.to_string()).unwrap();
+        std::fs::create_dir_all(&new_dir).unwrap(); // an empty dir does not count as a store
+
+        assert_eq!(migrate_legacy_data_dir(new_dir.clone()), new_dir);
+        assert_eq!(
+            std::fs::read_to_string(new_dir.join("hosts.json")).unwrap(),
+            "old-hosts"
+        );
+        let key = new_dir.join("keys").join("id_test");
+        assert_eq!(std::fs::read_to_string(&key).unwrap(), "PRIVATE");
+        // A key path left pointing into the old dir breaks once the user deletes that dir.
+        let keys = crate::resources::load_resources_at(&new_dir.join("resources.json")).ssh_keys;
+        assert_eq!(PathBuf::from(&keys[0].private_key_path), key);
+        assert_eq!(keys[1].private_key_path, "/home/someone/.ssh/id_ed25519");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&key).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert!(old_dir.join("hosts.json").exists());
+
+        std::fs::write(new_dir.join("hosts.json"), "edited-after-move").unwrap();
+        assert_eq!(migrate_legacy_data_dir(new_dir.clone()), new_dir);
+        assert_eq!(
+            std::fs::read_to_string(new_dir.join("hosts.json")).unwrap(),
+            "edited-after-move"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

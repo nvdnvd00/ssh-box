@@ -1089,7 +1089,7 @@ pub fn run() {
         .setup(|app| {
             use tauri::Manager;
             if let Ok(app_dir) = app.path().app_data_dir() {
-                host_store::set_app_data_dir(app_dir);
+                host_store::set_app_data_dir(host_store::migrate_legacy_data_dir(app_dir));
             }
             #[cfg(desktop)]
             app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;

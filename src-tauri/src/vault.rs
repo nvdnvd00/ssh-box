@@ -2,7 +2,11 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-const SERVICE_NAME: &str = "com.darien.sshbox";
+const SERVICE_NAME: &str = "com.neos.sshbox";
+// Secrets saved before the identifier rename. Copied to SERVICE_NAME on first read, so only
+// secrets that are actually used get touched (one macOS Keychain prompt each, not all at start).
+// ponytail: read-through kept forever; drop it once no pre-rename install is left.
+const LEGACY_SERVICE_NAME: &str = "com.darien.sshbox";
 
 fn fallback_vault_path() -> PathBuf {
     crate::host_store::app_config_dir().join("vault.json")
@@ -33,8 +37,8 @@ fn write_fallback_map(map: &BTreeMap<String, String>) -> Result<(), String> {
 
 // keyring falls back to its in-memory mock store on targets without a native backend
 // (Android, featureless Linux): writes "succeed" but are gone on restart, so treat it as absent.
-fn keyring_entry(host_id: &str) -> Option<keyring::Entry> {
-    let entry = keyring::Entry::new(SERVICE_NAME, host_id).ok()?;
+fn keyring_entry(service: &str, host_id: &str) -> Option<keyring::Entry> {
+    let entry = keyring::Entry::new(service, host_id).ok()?;
     if entry
         .get_credential()
         .downcast_ref::<keyring::mock::MockCredential>()
@@ -46,7 +50,7 @@ fn keyring_entry(host_id: &str) -> Option<keyring::Entry> {
 }
 
 pub fn set_host_secret(host_id: &str, secret: &str) -> Result<(), String> {
-    if let Some(entry) = keyring_entry(host_id) {
+    if let Some(entry) = keyring_entry(SERVICE_NAME, host_id) {
         if entry.set_password(secret).is_ok() {
             return Ok(());
         }
@@ -57,10 +61,17 @@ pub fn set_host_secret(host_id: &str, secret: &str) -> Result<(), String> {
 }
 
 pub fn get_host_secret(host_id: &str) -> Result<Option<String>, String> {
-    if let Some(entry) = keyring_entry(host_id) {
+    if let Some(entry) = keyring_entry(SERVICE_NAME, host_id) {
         match entry.get_password() {
             Ok(pw) => return Ok(Some(pw)),
-            Err(keyring::Error::NoEntry) => {}
+            Err(keyring::Error::NoEntry) => {
+                let legacy = keyring_entry(LEGACY_SERVICE_NAME, host_id)
+                    .and_then(|old| old.get_password().ok());
+                if let Some(pw) = legacy {
+                    let _ = entry.set_password(&pw);
+                    return Ok(Some(pw));
+                }
+            }
             Err(_) => {}
         }
     }
@@ -76,7 +87,7 @@ pub fn get_host_secret(host_id: &str) -> Result<Option<String>, String> {
 }
 
 pub fn delete_host_secret(host_id: &str) -> Result<(), String> {
-    if let Some(entry) = keyring_entry(host_id) {
+    if let Some(entry) = keyring_entry(SERVICE_NAME, host_id) {
         let _ = entry.delete_credential();
     }
     let mut map = read_fallback_map();

@@ -423,7 +423,7 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
                                 <div
                                   className="p-1.5 rounded-md border flex flex-col gap-1"
                                   style={{
-                                    backgroundColor: t.cardHex,
+                                    backgroundColor: t.secondaryHex,
                                     borderColor: t.borderHex,
                                   }}
                                 >

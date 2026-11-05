@@ -1,0 +1,96 @@
+# Every push to main is a release: build Windows + macOS, then publish one latest.json for the Tauri updater.
+# Needs repo variable S3_BUCKET and secrets TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD,
+# AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (IAM user limited to PutObject on ssh-box/*).
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Queue releases instead of racing: an older run finishing last would put an older latest.json back.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-southeast-1
+  S3_BUCKET: ${{ vars.S3_BUCKET }}
+
+jobs:
+  build:
+    # A manual run from another branch must not publish a release.
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            args: --bundles nsis
+            files: src-tauri/target/release/bundle/nsis/*-setup.exe*
+          - os: macos-latest
+            # Universal = one .app for Apple Silicon and Intel. Ad-hoc signed via tauri.macos.conf.json, not notarized.
+            args: --target universal-apple-darwin --bundles app,dmg
+            files: |
+              src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz*
+              src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+    runs-on: ${{ matrix.os }}
+    outputs:
+      # Both legs compute the same value, so whichever finishes last is fine.
+      version: ${{ steps.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - run: npm ci
+      - name: Build
+        id: build
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          # Version = package.json version + run number as semver build metadata (0.2.1+5).
+          # run_number restarts at 1 if this file is renamed: bump package.json when that happens.
+          VERSION="$(node -p 'require("./package.json").version')+${{ github.run_number }}"
+          UPDATE_URL="https://${S3_BUCKET:?repo variable S3_BUCKET is not set}.s3.${AWS_REGION}.amazonaws.com/ssh-box"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # Config goes through a file: Git Bash on Windows can rewrite path-like parts of a JSON argument.
+          node -e 'require("fs").writeFileSync("release.conf.json", JSON.stringify({version: process.argv[1], bundle: {createUpdaterArtifacts: true}, plugins: {updater: {endpoints: [process.argv[2]]}}}))' "$VERSION" "$UPDATE_URL/latest.json"
+          npx tauri build --verbose ${{ matrix.args }} --config release.conf.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ runner.os }}
+          path: ${{ matrix.files }}
+          if-no-files-found: error
+
+  # Runs only when every build succeeded, so latest.json never lists a platform without its file.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/download-artifact@v8
+      - name: Upload installers, then latest.json
+        run: |
+          UPDATE_URL="https://${S3_BUCKET:?repo variable S3_BUCKET is not set}.s3.${AWS_REGION}.amazonaws.com/ssh-box"
+          # S3 can read "+" in a URL path as a space, so the folder uses "." (0.2.1+5 -> 0.2.1.5).
+          RELEASE_URL="$UPDATE_URL/$(echo "$VERSION" | tr + .)"
+          WIN="$(ls Windows/*-setup.exe)"
+          MAC="$(ls macOS/macos/*.app.tar.gz)"
+          # The universal .app serves both Mac platform keys.
+          node -e 'const fs=require("fs");const [version,url,winSig,macSig]=process.argv.slice(1);const mac={signature:fs.readFileSync(macSig,"utf8"),url:url+"/ssh-box.app.tar.gz"};fs.writeFileSync("latest.json",JSON.stringify({version,pub_date:new Date().toISOString(),platforms:{"windows-x86_64":{signature:fs.readFileSync(winSig,"utf8"),url:url+"/ssh-box-setup.exe"},"darwin-aarch64":mac,"darwin-x86_64":mac}},null,2))' "$VERSION" "$RELEASE_URL" "$WIN.sig" "$MAC.sig"
+          s3_put() { curl -fsS --aws-sigv4 "aws:amz:${AWS_REGION}:s3" --user "${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}" -H "x-amz-content-sha256: UNSIGNED-PAYLOAD" -T "$1" "$2"; }
+          s3_put "$WIN" "$RELEASE_URL/ssh-box-setup.exe"
+          s3_put "$MAC" "$RELEASE_URL/ssh-box.app.tar.gz"
+          s3_put latest.json "$UPDATE_URL/latest.json"
+          cat latest.json

@@ -992,6 +992,16 @@ impl SshPool {
         command: &str,
         stdin_data: Option<&[u8]>,
     ) -> Result<Vec<u8>, String> {
+        self.exec_bytes_streaming_on_host(host, command, stdin_data, |_| {}).await
+    }
+
+    pub async fn exec_bytes_streaming_on_host(
+        &self,
+        host: &HostEntry,
+        command: &str,
+        stdin_data: Option<&[u8]>,
+        mut on_chunk: impl FnMut(&str) + Send,
+    ) -> Result<Vec<u8>, String> {
         let session = self.get_or_connect(host, None).await?;
         let mut channel = {
             let handle = session.handle.lock().await;
@@ -1022,8 +1032,14 @@ impl SshPool {
 
         while let Some(msg) = channel.wait().await {
             match msg {
-                ChannelMsg::Data { data } => stdout_buf.extend_from_slice(&data),
-                ChannelMsg::ExtendedData { data, .. } => stderr_buf.extend_from_slice(&data),
+                ChannelMsg::Data { data } => {
+                    on_chunk(&String::from_utf8_lossy(&data));
+                    stdout_buf.extend_from_slice(&data);
+                }
+                ChannelMsg::ExtendedData { data, .. } => {
+                    on_chunk(&String::from_utf8_lossy(&data));
+                    stderr_buf.extend_from_slice(&data);
+                }
                 ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status),
                 ChannelMsg::Close => break,
                 _ => {}
